@@ -6,7 +6,8 @@
 
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
-- 下一阶段：Phase 2 — 可靠性与任务执行：`planned`
+- Phase 2 — 可靠性与任务执行：`in_progress`（2026-08-25 开始）
+- 后续阶段：Phase 3–6：`planned`
 
 ## 当前版本
 
@@ -27,11 +28,13 @@
 
 ## 进行中功能
 
-当前没有跨回合遗留的 Phase 1 实施项。仓库尚无 commit，下一位维护者应先审查并建立 Phase 1 基线，再开始 Phase 2。
+- Phase 1 已固定为基线 commit `3db1e29`。
+- Phase 2 可靠任务执行基础已开始；[ADR-0005](decisions/ADR-0005-durable-task-execution.md) 已在实现前接受，代码、迁移和故障验收尚未完成。
+- PostgreSQL/Redis/独立 Worker、租约/心跳/fencing、幂等恢复及 SQLite→PostgreSQL 对账正在按 [当前工作日志](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md) 推进。
 
-## 未开始功能
+## 尚未完成的功能
 
-- Phase 2：PostgreSQL、Redis、独立 Worker、持久恢复、租约/心跳、并发与限流、可观测性。
+- Phase 2：PostgreSQL、Redis、独立 Worker、持久恢复、租约/心跳、并发与限流、可观测性仍在实施；当前只有 ADR/计划完成，尚不能宣称运行能力。
 - Phase 3：MMLU-Pro、GPQA、IFEval、数据集插件和隔离代码评测。
 - Phase 4：LLM/Pairwise Judge、个人 Arena 与长上下文评测。
 - Phase 5：Agent/Tool Use、私有 Benchmark 与 Live Benchmark。
@@ -67,8 +70,8 @@
 
 ## 最近工作日志
 
-[2026-08-25-fix-setup-alembic-conflict.md](worklogs/2026-08-25-fix-setup-alembic-conflict.md)（修复 setup 既有表冲突并无损收养本地旧库）
+[2026-08-25-phase-2-reliable-execution-foundation.md](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)（进行中：PostgreSQL、Redis、独立 Worker 与可靠恢复基础）
 
-## 下一阶段入口
+## 当前任务入口
 
 [NEXT_TASK.md](NEXT_TASK.md) 已定义 Phase 2 的第一个可靠执行切片：PostgreSQL、Redis、独立 Worker、租约/幂等与重启恢复，同时保持 Phase 1 API 和 `llmbenchlab-protocol-v1` 语义兼容。

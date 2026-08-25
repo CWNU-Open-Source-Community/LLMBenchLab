@@ -1,6 +1,6 @@
 # Phase 2：可靠性与任务执行
 
-- 状态：`planned`
+- 状态：`in_progress`
 - 前置阶段：[Phase 1 — MVP](PHASE-1-MVP.md)（须 `completed`）
 - 后续阶段：[Phase 3 — Benchmarks](PHASE-3-BENCHMARKS.md)
 
@@ -71,4 +71,4 @@
 
 ## 状态
 
-`planned`。Phase 1 完成前不得开始生产化迁移；预研结论可记录，但不改变本阶段状态。
+`in_progress`。Phase 1 已完成并由 commit `3db1e29` 固定基线；[ADR-0005](../decisions/ADR-0005-durable-task-execution.md) 已在代码实现前接受。当前正在实施 `NEXT_TASK.md` 定义的可靠执行基础；在真实 PostgreSQL/Redis 故障验收以及本阶段限流、预算、背压、审计和性能门禁全部完成前，不得标记为 `completed`。

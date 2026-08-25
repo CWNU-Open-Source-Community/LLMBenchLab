@@ -1,8 +1,8 @@
 # LLMBenchLab Roadmap
 
-> 最后更新：2026-08-25  
-> 当前阶段：Phase 2 — 可靠性与任务执行（下一阶段）  
-> 当前状态：Phase 0–1 `completed`；Phase 2–6 `planned`
+> 最后更新：2026-08-25
+> 当前阶段：Phase 2 — 可靠性与任务执行
+> 当前状态：Phase 0–1 `completed`；Phase 2 `in_progress`；Phase 3–6 `planned`
 
 ## 1. Roadmap 使用方式
 
@@ -30,7 +30,7 @@
 | --- | --- | --- | --- | --- |
 | Phase 0 | 项目治理和架构 | 可执行的需求、架构、协议、ADR 与持续文档流程 | `completed` | [PHASE-0-GOVERNANCE.md](phases/PHASE-0-GOVERNANCE.md) |
 | Phase 1 | MVP 垂直链路 | Mock 模型到 Run、逐题结果与排行榜的离线闭环 | `completed` | [PHASE-1-MVP.md](phases/PHASE-1-MVP.md) |
-| Phase 2 | 可靠性与任务执行 | PostgreSQL、Redis Worker、恢复、幂等与并发控制 | `planned` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
+| Phase 2 | 可靠性与任务执行 | PostgreSQL、Redis Worker、恢复、幂等与并发控制 | `in_progress` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
 | Phase 3 | 标准 Benchmark 与代码评测 | MMLU-Pro、GPQA、IFEval、代码沙箱和数据集插件 | `planned` | [PHASE-3-BENCHMARKS.md](phases/PHASE-3-BENCHMARKS.md) |
 | Phase 4 | Judge、Arena 与长上下文 | 可校准 Judge、Pairwise Judge、个人 Arena 和长上下文评测 | `planned` | [PHASE-4-JUDGE-ARENA.md](phases/PHASE-4-JUDGE-ARENA.md) |
 | Phase 5 | Agent、私有与 Live Benchmark | 工具调用轨迹、隔离私有集和持续更新的 Live Benchmark | `planned` | [PHASE-5-AGENT-LIVE.md](phases/PHASE-5-AGENT-LIVE.md) |
@@ -229,7 +229,7 @@
 
 ### 状态
 
-`planned`。
+`in_progress`。可靠任务执行基础已开始并由 ADR-0005 固定语义；限流、预算、完整背压、审计和性能基线等阶段验收仍未完成。
 
 ## 6. Phase 3：标准 Benchmark 与代码评测
 
