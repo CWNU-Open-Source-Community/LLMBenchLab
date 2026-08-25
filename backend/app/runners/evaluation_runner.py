@@ -1,11 +1,10 @@
-"""Durable run state around a deliberately small in-process task manager."""
+"""Fenced evaluation execution used only by the independent Worker."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -62,6 +61,10 @@ class _LeaseUnavailable(RuntimeError):
     """Raised internally when a fenced Worker must stop processing a Run."""
 
 
+class _ShutdownRequested(RuntimeError):
+    """Raised after in-flight questions drain so the attempt can be resumed later."""
+
+
 class EvaluationRunner:
     """Execute one claimed Run while isolating every question failure."""
 
@@ -83,12 +86,19 @@ class EvaluationRunner:
         )
         self._heartbeat_seconds = settings.worker_heartbeat_seconds
 
-    async def execute(self, run_id: str) -> None:
-        """Claim and execute ``run_id`` with a renewable, fenced database lease."""
+    async def execute(
+        self,
+        run_id: str,
+        *,
+        shutdown_requested: asyncio.Event | None = None,
+    ) -> bool:
+        """Execute ``run_id`` and report whether a queue delivery is safe to ACK."""
 
+        if shutdown_requested is not None and shutdown_requested.is_set():
+            return False
         lease = self._claim(run_id)
         if lease is None:
-            return
+            return True
         heartbeat_stop = asyncio.Event()
         lease_lost = asyncio.Event()
         heartbeat_task = asyncio.create_task(
@@ -119,9 +129,13 @@ class EvaluationRunner:
             async def evaluate_bounded(question: _QuestionSnapshot) -> None:
                 if lease_lost.is_set():
                     raise _LeaseUnavailable("heartbeat_fence_lost")
+                if shutdown_requested is not None and shutdown_requested.is_set():
+                    return
                 async with semaphore:
                     if lease_lost.is_set():
                         raise _LeaseUnavailable("heartbeat_fence_lost")
+                    if shutdown_requested is not None and shutdown_requested.is_set():
+                        return
                     if self._cancellation_requested(run_id):
                         return
                     await self._evaluate_question(
@@ -139,23 +153,37 @@ class EvaluationRunner:
             )
             if lease_lost.is_set():
                 raise _LeaseUnavailable("heartbeat_fence_lost")
+            if shutdown_requested is not None and shutdown_requested.is_set():
+                raise _ShutdownRequested("process_shutdown_requested")
             final_status = (
                 RunStatus.CANCELLED if self._cancellation_requested(run_id) else RunStatus.COMPLETED
             )
             self._finish(lease, final_status)
+            return True
         except asyncio.CancelledError:
-            self._lease_repository.fail_attempt(lease, error_code="interrupted_by_process_shutdown")
+            logger.warning(
+                "Evaluation run interrupted; durable lease expiry will recover it",
+                extra={"event": "run_shutdown_lease_expiry", "run_id": run_id},
+            )
             raise
+        except _ShutdownRequested:
+            logger.info(
+                "Evaluation run drained for shutdown; durable lease expiry will recover it",
+                extra={"event": "run_shutdown_lease_expiry", "run_id": run_id},
+            )
+            return False
         except _LeaseUnavailable:
             if self._lease_repository.finish_cancelled(lease):
                 logger.info("Evaluation run %s stopped after cancellation", run_id)
             else:
                 logger.warning("Evaluation run %s stopped after losing its lease", run_id)
+            return True
         except Exception as exc:  # Run-level isolation; details are deliberately sanitized.
             logger.exception("Evaluation run %s failed", run_id)
             self._lease_repository.fail_attempt(
                 lease, error_code=f"runner_error:{type(exc).__name__}"
             )
+            return True
         finally:
             heartbeat_stop.set()
             await heartbeat_task
@@ -490,43 +518,3 @@ class EvaluationRunner:
             run.lease_expires_at = None
             run.heartbeat_at = None
             return True
-
-
-class EvaluationTaskManager:
-    """Deduplicate in-process tasks and expose cooperative scheduling/shutdown."""
-
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
-        self._runner = EvaluationRunner(session_factory)
-        self._tasks: dict[str, asyncio.Task[None]] = {}
-
-    def schedule(self, run_id: str) -> bool:
-        """Schedule a run once in the current process and return whether accepted."""
-
-        existing = self._tasks.get(run_id)
-        if existing is not None and not existing.done():
-            return False
-        task = asyncio.create_task(self._runner.execute(run_id), name=f"evaluation-{run_id}")
-        self._tasks[run_id] = task
-        task.add_done_callback(lambda completed, rid=run_id: self._discard(rid, completed))
-        return True
-
-    def _discard(self, run_id: str, task: asyncio.Task[None]) -> None:
-        if self._tasks.get(run_id) is task:
-            self._tasks.pop(run_id, None)
-        if not task.cancelled():
-            with suppress(asyncio.CancelledError):
-                task.exception()
-
-    async def shutdown(self) -> None:
-        """Cancel and await tasks during application shutdown."""
-
-        tasks = list(self._tasks.values())
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tasks.clear()
-
-    @property
-    def active_run_ids(self) -> frozenset[str]:
-        return frozenset(run_id for run_id, task in self._tasks.items() if not task.done())

@@ -13,24 +13,35 @@ from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.constants import API_V1_PREFIX
 from app.db.init_db import initialize_database
-from app.db.session import SessionLocal
-from app.runners import EvaluationTaskManager
-
-logger = logging.getLogger(__name__)
+from app.task_queue import RedisRunQueue
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    task_manager = EvaluationTaskManager(SessionLocal)
+    run_queue = (
+        RedisRunQueue.from_url(
+            settings.redis_url,
+            stream=settings.task_stream,
+            consumer_group=settings.task_consumer_group,
+            max_length=settings.task_stream_max_length,
+            block_milliseconds=settings.redis_block_milliseconds,
+            max_connections=settings.redis_max_connections,
+            publish_timeout_seconds=settings.redis_publish_timeout_seconds,
+            operation_timeout_seconds=settings.redis_operation_timeout_seconds,
+        )
+        if settings.redis_url is not None
+        else None
+    )
     logging.basicConfig(level=settings.log_level)
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
-        recovered_runs = initialize_database()
-        if recovered_runs:
-            logger.warning("Marked %d interrupted evaluation run(s) as failed", recovered_runs)
-        yield
-        await task_manager.shutdown()
+        initialize_database()
+        try:
+            yield
+        finally:
+            if run_queue is not None:
+                await run_queue.close()
 
     application = FastAPI(
         title=settings.app_name,
@@ -49,7 +60,7 @@ def create_app() -> FastAPI:
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["Accept", "Content-Type"],
     )
-    application.state.task_manager = task_manager
+    application.state.run_queue = run_queue
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error(

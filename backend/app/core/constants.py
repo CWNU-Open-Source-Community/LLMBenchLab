@@ -10,6 +10,3 @@ DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_BASE_SECONDS = 0.25
 DEFAULT_RETRY_BACKOFF_CAP_SECONDS = 2.0
 RETRYABLE_PROVIDER_STATUS_CODES = (408, 429, 500, 502, 503, 504)
-INTERRUPTED_RUN_MESSAGE = (
-    "interrupted_by_process_restart: the in-process MVP runner cannot resume interrupted runs"
-)

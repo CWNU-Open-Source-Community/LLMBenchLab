@@ -1,5 +1,8 @@
-"""In-process evaluation execution for the Phase 1 MVP."""
+"""Runner package boundary.
 
-from app.runners.evaluation_runner import EvaluationRunner, EvaluationTaskManager
+Import concrete execution classes from their modules in Worker code. Keeping this
+package initializer empty prevents API imports of lease types from loading model
+adapters or execution code.
+"""
 
-__all__ = ["EvaluationRunner", "EvaluationTaskManager"]
+__all__: list[str] = []

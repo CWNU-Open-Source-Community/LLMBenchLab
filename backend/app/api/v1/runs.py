@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import PaginationDep, SessionDep, SettingsDep
+from app.core.config import Settings
 from app.core.constants import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
@@ -23,14 +26,15 @@ from app.core.constants import (
     PROTOCOL_VERSION,
     RETRYABLE_PROVIDER_STATUS_CODES,
 )
-from app.core.time import utc_now
 from app.models import Benchmark, EvaluationResponse, EvaluationRun, Model, Question, RunStatus
 from app.runners.run_leases import CancelDisposition, RunLeaseRepository
 from app.schemas.evaluation_response import EvaluationResponseList
 from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, EvaluationRunRead
+from app.task_queue import QueueUnavailable
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+logger = logging.getLogger(__name__)
 
 
 def _git_commit_sha() -> str | None:
@@ -57,6 +61,20 @@ def _get_run_or_404(session: SessionDep, run_id: str) -> EvaluationRun:
             detail={"code": "run_not_found", "message": "Evaluation run was not found"},
         )
     return run
+
+
+def _lease_repository(session: Session, settings: Settings) -> RunLeaseRepository:
+    return RunLeaseRepository(
+        sessionmaker(
+            bind=session.get_bind(),
+            class_=Session,
+            autoflush=False,
+            expire_on_commit=False,
+        ),
+        lease_for=timedelta(seconds=settings.worker_lease_seconds),
+        retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
+        retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
+    )
 
 
 @router.get("", response_model=EvaluationRunList, summary="分页列出 Run")
@@ -200,14 +218,35 @@ async def create_run(
     )
     session.add(run)
     session.commit()
-    session.refresh(run)
-    manager = request.app.state.task_manager
-    if not manager.schedule(run.id):
-        run.status = RunStatus.FAILED
-        run.error_message = "task_schedule_rejected"
-        run.finished_at = utc_now()
-        session.commit()
-        session.refresh(run)
+    run_queue = request.app.state.run_queue
+    if run_queue is not None:
+        repository = _lease_repository(session, settings)
+        try:
+            await run_queue.publish(run.id, correlation_id=str(uuid4()))
+        except QueueUnavailable:
+            logger.warning(
+                "Run queue notification unavailable",
+                extra={"event": "run_queue_publish_failed", "run_id": run.id},
+            )
+            try:
+                repository.record_notification_result(run.id, published=False)
+            except Exception:
+                logger.error(
+                    "Run queue failure evidence could not be recorded",
+                    extra={"event": "run_queue_audit_failed", "run_id": run.id},
+                )
+        else:
+            try:
+                repository.record_notification_result(run.id, published=True)
+            except Exception:
+                logger.error(
+                    "Run queue success evidence could not be recorded",
+                    extra={"event": "run_queue_audit_failed", "run_id": run.id},
+                )
+        session.expire_all()
+        refreshed = session.get(EvaluationRun, run.id)
+        if refreshed is not None:
+            run = refreshed
     return run
 
 
@@ -218,17 +257,7 @@ def get_run(run_id: str, session: SessionDep) -> EvaluationRun:
 
 @router.post("/{run_id}/cancel", response_model=EvaluationRunRead, summary="协作式取消 Run")
 def cancel_run(run_id: str, session: SessionDep, settings: SettingsDep) -> EvaluationRun:
-    repository = RunLeaseRepository(
-        sessionmaker(
-            bind=session.get_bind(),
-            class_=Session,
-            autoflush=False,
-            expire_on_commit=False,
-        ),
-        lease_for=timedelta(seconds=settings.worker_lease_seconds),
-        retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
-        retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
-    )
+    repository = _lease_repository(session, settings)
     disposition = repository.request_cancel(run_id)
     if disposition == CancelDisposition.NOT_FOUND:
         raise HTTPException(

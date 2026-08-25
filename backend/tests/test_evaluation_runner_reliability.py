@@ -28,8 +28,10 @@ class _FakeLeaseRepository:
         )
         self.failed: list[str] = []
         self.finish_cancelled_calls = 0
+        self.claim_calls = 0
 
     def claim(self, run_id: str, *, owner: str) -> RunLease | None:
+        self.claim_calls += 1
         assert run_id == self.lease.run_id
         assert owner == self.lease.owner
         return self.lease
@@ -182,4 +184,46 @@ async def test_process_shutdown_awaits_all_question_task_cancellation(
     assert set(runner.started) == {"q1", "q2"}
     assert set(runner.cancelled) == {"q1", "q2"}
     assert runner.finished == []
-    assert runner.repository.failed == ["interrupted_by_process_shutdown"]
+    assert runner.repository.failed == []
+
+
+@pytest.mark.asyncio
+async def test_graceful_shutdown_does_not_start_question_waiting_for_semaphore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.runners.evaluation_runner.build_adapter", lambda *args, **kwargs: object()
+    )
+    runner = _ShutdownRunner(concurrency=1)
+    shutdown_requested = asyncio.Event()
+    execution = asyncio.create_task(
+        runner.execute("run-controlled", shutdown_requested=shutdown_requested)
+    )
+    await asyncio.wait_for(runner.first_started.wait(), timeout=2)
+
+    shutdown_requested.set()
+    runner.block.set()
+    await asyncio.wait_for(execution, timeout=2)
+
+    assert runner.started == ["q1"]
+    assert runner.cancelled == []
+    assert runner.finished == []
+    assert runner.repository.failed == []
+
+
+@pytest.mark.asyncio
+async def test_preexisting_shutdown_never_claims_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.runners.evaluation_runner.build_adapter", lambda *args, **kwargs: object()
+    )
+    runner = _ShutdownRunner(concurrency=1)
+    shutdown_requested = asyncio.Event()
+    shutdown_requested.set()
+
+    await runner.execute("run-controlled", shutdown_requested=shutdown_requested)
+
+    assert runner.started == []
+    assert runner.repository.failed == []
+    assert runner.repository.claim_calls == 0

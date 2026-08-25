@@ -421,6 +421,28 @@ class RunLeaseRepository:
             self._clear_lease(run)
             return True
 
+    def record_notification_result(self, run_id: str, *, published: bool) -> bool:
+        """Record best-effort queue notification evidence without owning task state."""
+
+        with self._session_factory() as session, session.begin():
+            _acquire_sqlite_transition_lock(session)
+            now = self._clock(session)
+            values: dict[str, object] = {
+                "last_error": None if published else "queue_notification_unavailable"
+            }
+            if published:
+                values["last_enqueued_at"] = now
+            result = session.execute(
+                update(EvaluationRun)
+                .where(
+                    EvaluationRun.id == run_id,
+                    EvaluationRun.status == RunStatus.PENDING,
+                    EvaluationRun.attempt_count == 0,
+                )
+                .values(**values)
+            )
+            return result.rowcount == 1
+
     def fail_attempt(self, lease: RunLease, *, error_code: str) -> AttemptDisposition:
         safe_error = _safe_error_code(error_code)
         with self._session_factory() as session, session.begin():

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
 from sqlalchemy import select
 
 import app.runners.evaluation_runner as evaluation_runner_module
+from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.models import Benchmark, Question
 from app.runners.evaluation_runner import EvaluationRunner, _QuestionSnapshot
+from app.workers import WorkerService
 
 
 def _register_mock(
@@ -56,6 +59,22 @@ def _run_to_terminal(client, model_id: str, benchmark_id: str) -> dict:
 
 
 def _wait_for_terminal(client, run_id: str) -> dict:
+    initial = client.get(f"/api/v1/runs/{run_id}")
+    assert initial.status_code == 200
+    initial_payload = initial.json()
+    assert initial_payload["status"] == "pending"
+    assert initial_payload["attempt_count"] == 0
+    assert initial_payload["lease_owner"] is None
+    assert client.get(f"/api/v1/runs/{run_id}/responses").json()["total"] == 0
+    assert not hasattr(client.app.state, "task_manager")
+    worker = WorkerService(
+        SessionLocal,
+        get_settings(),
+        run_queue=None,
+        worker_id=f"test-worker:{run_id}",
+    )
+    assert asyncio.run(worker.run_once()) is True
+
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         current = client.get(f"/api/v1/runs/{run_id}")

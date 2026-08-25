@@ -18,6 +18,7 @@ trap cleanup EXIT INT TERM
 
 export LLMBENCHLAB_DATABASE_URL="sqlite:///${smoke_tmp}/smoke.db"
 export LLMBENCHLAB_LOG_LEVEL=WARNING
+export LLMBENCHLAB_REDIS_URL=
 
 echo "Running offline Mock smoke test with an isolated temporary SQLite database..."
 cd "$project_root/backend"

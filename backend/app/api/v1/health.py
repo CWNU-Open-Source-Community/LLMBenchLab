@@ -42,6 +42,6 @@ def info(settings: SettingsDep) -> InfoResponse:
         capabilities={
             "providers": ["mock", "openai_compatible"],
             "question_types": ["exact_match", "multiple_choice", "numeric"],
-            "runner": "in_process_mvp",
+            "runner": "independent_database_lease_worker",
         },
     )

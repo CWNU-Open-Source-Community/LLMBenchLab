@@ -48,4 +48,4 @@ fi
 echo "Applying database migrations..."
 ./scripts/migrate.sh
 
-echo "Setup complete. Start both services with: make dev"
+echo "Setup complete. Start the API, Worker, and frontend with: make dev"

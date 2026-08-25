@@ -1,13 +1,14 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help setup dev backend frontend test lint format smoke migrate docker-up docker-down
+.PHONY: help setup dev backend worker frontend test lint format smoke migrate docker-up docker-down
 
 help:
 	@echo "LLMBenchLab developer commands:"
 	@echo "  make setup        Install dependencies and initialize the local database"
-	@echo "  make dev          Start backend and frontend together (Ctrl-C stops both)"
+	@echo "  make dev          Start API, independent Worker, and frontend together"
 	@echo "  make backend      Start only the FastAPI development server"
+	@echo "  make worker       Start only the independent task Worker"
 	@echo "  make frontend     Start only the Vite development server"
 	@echo "  make test         Run backend and frontend test suites"
 	@echo "  make lint         Run backend lint/format checks and frontend lint/typecheck"
@@ -31,6 +32,12 @@ backend:
 		--host "$${API_HOST:-127.0.0.1}" \
 		--port "$${API_PORT:-8000}" \
 		--reload
+
+worker:
+	@set -a; \
+	if [[ -f .env ]]; then source ./.env; fi; \
+	set +a; \
+	cd backend && uv run python -m app.worker
 
 frontend:
 	@set -a; \

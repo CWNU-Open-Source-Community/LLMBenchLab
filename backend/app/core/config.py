@@ -38,12 +38,16 @@ class Settings(BaseSettings):
     task_stream: str = Field(default="llmbenchlab:runs:v1", min_length=1, max_length=128)
     task_consumer_group: str = Field(default="llmbenchlab-workers-v1", min_length=1, max_length=128)
     task_stream_max_length: int = Field(default=10_000, ge=100, le=10_000_000)
+    redis_max_connections: int = Field(default=10, ge=1, le=100)
+    redis_publish_timeout_seconds: float = Field(default=1.0, gt=0.0, le=10.0)
+    redis_operation_timeout_seconds: float = Field(default=2.0, gt=0.0, le=30.0)
     worker_lease_seconds: float = Field(default=30.0, ge=3.0, le=3600.0)
     worker_heartbeat_seconds: float = Field(default=10.0, ge=1.0, le=1200.0)
     worker_poll_seconds: float = Field(default=1.0, ge=0.05, le=60.0)
     worker_max_attempts: int = Field(default=3, ge=1, le=20)
     worker_retry_backoff_base_seconds: float = Field(default=1.0, ge=0.0, le=3600.0)
     worker_retry_backoff_cap_seconds: float = Field(default=30.0, ge=0.0, le=86_400.0)
+    worker_shutdown_grace_seconds: float = Field(default=30.0, ge=0.0, le=3600.0)
     redis_block_milliseconds: int = Field(default=1000, ge=50, le=60_000)
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
