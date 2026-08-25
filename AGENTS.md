@@ -24,7 +24,7 @@
 7. 对跨模块、数据库、公共 API、Benchmark 协议或安全边界的复杂任务，按 `PLANS.md` 建立并维护执行计划。
 8. 若架构、协议或关键取舍发生变化，实施前新增 ADR；若是修正既有决定，则新增替代 ADR 或更新尚未接受的 ADR，不得悄悄改变约定。
 
-初始勘察只做只读检查。禁止 `git reset --hard`、强制推送、修改 remote、上传仓库或删除范围不明的数据。
+初始勘察只做只读检查。禁止 `git reset --hard`、强制推送、未经授权修改 remote/上传仓库，或删除范围不明的数据。本仓库已由用户明确授权使用 `https://github.com/CWNU-Open-Source-Community/LLMBenchLab.git` 作为 `origin`；阶段收尾的普通 push 按第 5 节执行，仍不得强制推送。
 
 ## 3. 实施规则
 
@@ -86,8 +86,11 @@
 5. 更新当前阶段文档的状态、验收证据和遗留项。
 6. 更新 `docs/NEXT_TASK.md`，提供可直接执行的下一任务说明。
 7. 完成本次工作日志中的实际修改、实际命令、结果、已知问题、未完成项和下一步。
-8. 最终回复给出修改文件摘要、实际运行命令与结果、未运行验证、已知限制、安全检查和 `git status --short` 摘要。
-9. 除非用户明确要求，不提交、不推送、不创建 Issue/PR/Release。
+8. 每个阶段形成独立、可审查的 commit；提交前复核 staged diff 和秘密扫描，不把失败或未验证状态写成完成。
+9. 将阶段 commit push 到 `origin`。常规开发应 push 工作分支并通过 PR 触发 CI；仅在用户明确授权直接交付当前分支时 push `main`。禁止 force push。
+10. 等待**该精确 commit SHA** 的 GitHub Actions 必需 job 全部成功。CI 失败时读取日志、修复、重新 commit/push 并再次等待；在绿色之前阶段保持 `in_progress`。认证、权限或 GitHub 服务阻塞时必须如实记录，不能把本地通过替代为远程 CI 通过。
+11. 最终回复给出修改文件摘要、实际运行命令与结果、远程 commit/branch、CI 链接与结论、未运行验证、已知限制、安全检查和 `git status --short` 摘要。
+12. Issue、PR 合并、Release、tag、仓库设置或其他额外远程变更仍须在用户授权范围内执行；阶段 push/CI 的长期授权不等于这些操作的通用授权。
 
 ## 6. Definition of Done
 
@@ -100,5 +103,5 @@
 - 错误路径、空状态和边界输入得到处理；Demo 与正式结果明确区分。
 - `CHANGELOG.md`、`docs/PROJECT_STATUS.md`、当前阶段文档、`docs/NEXT_TASK.md` 和工作日志与仓库真实状态一致。
 - 变更范围干净，不覆盖用户工作，不包含无关生成物；已知限制和后续工作可追踪。
+- 每个阶段已有独立 commit 并 push 到 `origin`；该精确 SHA 的 GitHub Actions 必需 job 全部成功。仅本地测试通过不能替代远程门禁。
 - 若任务属于 Phase 验收，阶段文档列出的每项验收标准都有可复核证据；否则状态保持 `in_progress`。
-

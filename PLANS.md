@@ -105,5 +105,4 @@
 
 ## 完成判定
 
-只有 Objective 和 Scope 已兑现、Validation 有实际结果、Rollback 与文档联动已处理、Completion evidence 可复核时，计划状态才能改为 `completed`。外部条件阻塞时保留已完成证据，将状态设为 `blocked` 并精确写明恢复条件；不能以“代码已写”代替交付完成。
-
+只有 Objective 和 Scope 已兑现、Validation 有实际结果、Rollback 与文档联动已处理、Completion evidence 可复核，且各阶段 commit 已 push、对应精确 SHA 的远程 CI 全部成功时，计划状态才能改为 `completed`。外部条件阻塞时保留已完成证据，将状态设为 `blocked` 或保持阶段 `in_progress` 并精确写明恢复条件；不能以“代码已写”或“本地测试通过”代替交付完成。

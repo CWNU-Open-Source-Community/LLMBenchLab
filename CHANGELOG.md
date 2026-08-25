@@ -21,6 +21,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - `/live`, DB-only `/health`, dependency-aware `/ready`, database-derived task gauges, request/Run correlation, and sanitized JSON for LLMBenchLab application loggers.
 - A six-service local Compose topology (`postgres`, `redis`, one-shot `migrate`, `api`, `worker`, and `frontend`) and CI jobs for SQLite, real PostgreSQL/Redis integration, and full-stack fault acceptance.
 - An explicit stopped-SQLite to offline-empty-PostgreSQL importer with read-only source validation, transactional locking/copy, content-free reconciliation digests, and distinct rollback/commit-uncertainty/post-commit-verification outcomes.
+- Public organization repository at `CWNU-Open-Source-Community/LLMBenchLab`, a visible CI badge, and a repository-wide stage gate requiring each commit to be pushed and its exact GitHub Actions SHA to pass all required jobs.
 
 ### Changed
 

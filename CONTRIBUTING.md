@@ -60,6 +60,8 @@ make smoke
 
 Frontend changes must pass ESLint, TypeScript checking, Vitest, and the production build. Backend changes must pass Ruff lint and format checks plus pytest. End-to-end tests and CI must use the Mock adapter with an isolated temporary SQLite database and must never call a paid or real provider API.
 
+Each implementation stage must end in a focused commit pushed to `origin`. Keep or open a pull request for a working branch so CI runs, then verify that the run `headSha` is exactly the stage commit and that all required jobs succeed. A stage is not complete while its remote CI is failing, cancelled, skipped, or still running; local success and an older green commit are not substitutes.
+
 For deployment changes, also run `docker compose config`. If a check cannot run in your environment, include the command, reason, and remaining risk in the pull request; do not report it as passing.
 
 ## Pull requests

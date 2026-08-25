@@ -26,7 +26,7 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 ## 开始前必须完成
 
 1. 阅读 `README.md`、`AGENTS.md`、`docs/PROJECT_STATUS.md`、`docs/ROADMAP.md`、`docs/phases/PHASE-2-RELIABILITY.md`、ADR-0005、现有 lease/Worker/queue/metrics 实现和本工作日志。
-2. 检查 Git 状态，保护所有未提交工作；创建新的工作日志并列出阶段提交边界。
+2. 检查 Git 状态，保护所有未提交工作；创建新的工作日志并列出阶段 commit、push 与远程 CI 边界。
 3. 先写新的 ADR，再写实现。ADR 必须明确配额事实来源、预留/结算/释放、重试与恢复、时钟、原子性、过载响应、公平性、审计保留和回滚语义。
 4. 不得把 Redis 的瞬时计数当成预算或任务事实来源；若使用 Redis 加速，必须有数据库可恢复裁决和故障语义。
 
@@ -73,6 +73,7 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 - [ ] 单个 Run 可通过关联 ID 串联 admission、queue、claim/recovery、question evidence、settlement 和 terminal state。
 - [ ] 真实 PostgreSQL/Redis 负载实验产出环境、命令、原始脱敏证据和容量基线；不冒充生产 SLA。
 - [ ] `make lint`、`make test`、`make smoke`、双方言迁移、真实基础设施 integration 和全栈故障回归继续通过。
+- [ ] 每个阶段 commit 已 push 到 `origin`，且该精确 SHA 的 GitHub Actions 必需 job 全部成功；失败时不得把阶段或 Phase 标记为完成。
 - [ ] `llmbenchlab-protocol-v1` 固定回归通过；所有测试仅使用 Mock/Stub/故障注入，没有真实 Provider 调用。
 - [ ] README、Architecture、API、Testing、Deployment、Security、Roadmap、Project Status、Changelog、Phase 2、Next Task 和新工作日志与证据一致。
 
@@ -103,5 +104,5 @@ docker compose config --quiet
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-请在 LLMBenchLab 仓库执行 docs/NEXT_TASK.md 定义的“Phase 2 并发治理、审计与性能基线”。开始前阅读所有指定文档、ADR-0005 和现有 Worker/lease/queue/metrics，检查 Git 状态并创建新工作日志。先写 ADR，明确数据库事实来源下的并发、速率、预算预留/结算/释放、背压、公平、审计、恢复与回滚语义，再按 P2-05、P2-06、P2-07 实施，并在每个阶段执行 commit。不得改变 llmbenchlab-protocol-v1，不得调用真实模型，不得覆盖用户未提交工作，不得 push。必须用真实 PostgreSQL/Redis、多 Worker 并发、故障与负载证据验收；任何关键项未通过时保持 Phase 2 in_progress，并如实同步全部状态、运维、测试和工作日志文档。
+请在 LLMBenchLab 仓库执行 docs/NEXT_TASK.md 定义的“Phase 2 并发治理、审计与性能基线”。开始前阅读所有指定文档、ADR-0005 和现有 Worker/lease/queue/metrics，检查 Git 状态并创建新工作日志。先写 ADR，明确数据库事实来源下的并发、速率、预算预留/结算/释放、背压、公平、审计、恢复与回滚语义，再按 P2-05、P2-06、P2-07 实施。不得改变 llmbenchlab-protocol-v1，不得调用真实模型，不得覆盖用户未提交工作，不得 force push。每个阶段必须执行独立 commit，push 到 `origin`，并等待该精确 SHA 的 GitHub Actions 必需 job 全部成功；CI 失败时修复后重新 commit/push，绿色前不得宣称阶段完成。必须用真实 PostgreSQL/Redis、多 Worker 并发、故障与负载证据验收；任何关键项未通过时保持 Phase 2 in_progress，并如实同步全部状态、运维、测试和工作日志文档。
 ```

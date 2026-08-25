@@ -96,7 +96,9 @@
 - 真实密钥扫描：[未发现/发现及处置]
 - 真实 API 调用：[否/是，若是说明授权和成本]
 - 日志/API 脱敏：[检查结果]
-- 危险 Git 操作或 push：[应为“无”]
+- 危险 Git 操作（force push/reset 等）：[应为“无”]
+- 阶段 push：[remote、branch、commit SHA、结果]
+- 远程 CI：[精确 SHA、run URL、必需 job 与结论；未成功时不得标 completed]
 - 遗留安全风险：[链接 `docs/SECURITY.md` 或具体说明]
 
 ## 结果与下一步
@@ -108,4 +110,3 @@
 ```text
 [任务结束时 `git status --short --branch` 的输出或准确摘要]
 ```
-

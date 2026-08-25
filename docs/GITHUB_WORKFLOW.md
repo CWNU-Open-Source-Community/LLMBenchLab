@@ -7,6 +7,7 @@
 
 - `main` 始终代表已通过必需检查、可供下一位贡献者使用的基线。
 - 变更通过短生命周期分支和 PR 合入；不直接向 `main` 推送功能或修复。
+- 每个阶段必须形成独立 commit、push 到 `origin`，并让该精确 SHA 的必需 CI 全部成功后才能标记完成。工作分支需有打开的 PR 才会触发当前 CI；用户明确授权的 `main` 直接交付由 `main` push 触发。
 - 一个 PR 解决一个清晰问题，包含代码、测试、迁移和相关文档的完整闭环。
 - 自动测试只使用 Mock 和临时 SQLite，不调用真实/付费 Provider。
 - 不提交 API Key、`.env`、Authorization、Cookie、私有题目/回答、SQLite 或日志。
@@ -25,7 +26,7 @@
 
 - Require a pull request before merging。
 - Require status checks to pass and branches to be up to date。
-- 必需检查：`Backend lint and test`、`Frontend lint, test, and build`。
+- 必需检查：`Backend lint and test`、`Backend PostgreSQL and Redis integration`、`Real Compose reliability acceptance`、`Frontend lint, test, and build`。
 - Block force pushes 和 branch deletion。
 - Require conversation resolution。
 - 有第二位维护者时要求至少一次批准；高风险安全/协议/迁移变更必须由非作者 Review。
@@ -236,9 +237,10 @@ Reviewer 先验证行为和风险，再讨论样式。至少检查：
 当前 `.github/workflows/ci.yml`：
 
 - 对所有 Pull Request 和 `main` push 触发。
+- 普通工作分支仅 push 不会触发当前 workflow；应创建或更新指向 `main` 的 PR，再等待该 SHA 的 PR CI。用户明确授权直接交付 `main` 时由 push 事件触发。
 - 顶层 `GITHUB_TOKEN` 权限仅 `contents: read`。
 - 同一 workflow/ref 的旧运行会被取消，避免浪费资源。
-- 每个 job 超时 15 分钟。
+- backend 与 backend-integration job 超时 20 分钟，full-stack reliability 超时 35 分钟，frontend 超时 15 分钟。
 
 ### 8.1 Backend job
 
@@ -247,11 +249,26 @@ Reviewer 先验证行为和风险，再讨论样式。至少检查：
 1. `uv sync --frozen --extra dev`
 2. `uv run ruff check .`
 3. `uv run ruff format --check .`
-4. `uv run pytest`
+4. 临时 SQLite `upgrade -> 0001 -> head` 与 `alembic check`
+5. `uv run pytest -m "not integration"`
 
-数据库位于 `${{ runner.temp }}` 的临时 SQLite；只设置一个未使用的环境变量**名称**，没有 Key。pytest 包含 Mock Smoke。
+数据库位于 `${{ runner.temp }}` 的临时 SQLite；只设置一个未使用的环境变量**名称**，没有 Key。pytest 包含 Mock Smoke，真实基础设施用例在独立 job 执行。
 
-### 8.2 Frontend job
+### 8.2 Backend infrastructure integration job
+
+`Backend PostgreSQL and Redis integration` 使用 PostgreSQL 16、Redis 7、Python 3.12 和专用测试数据库：
+
+1. PostgreSQL `head -> 0001 -> head` 与 `alembic check`。
+2. 收集全部 `integration` marker 用例，覆盖真实 PostgreSQL lease/竞态、Redis Streams 和 SQLite→PostgreSQL importer。
+3. 生成 JUnit；用例数必须大于 0 且不得有 skip，否则 job 失败。
+
+它只连接 CI service containers，不配置 Provider Key，也不调用真实模型。
+
+### 8.3 Full-stack reliability job
+
+`Real Compose reliability acceptance` 运行 `scripts/phase2_acceptance.py`，构建隔离的 PostgreSQL、Redis、migrate、API、双 Worker 和 frontend，执行八个真实故障场景。脚本只使用 Mock，使用唯一 Compose project 与随机 loopback 端口，成功或失败都精确清理；脱敏 evidence 作为短期 artifact 上传。
+
+### 8.4 Frontend job
 
 `Frontend lint, test, and build` 使用 Ubuntu、Node 22 和 npm lockfile cache：
 
@@ -262,7 +279,7 @@ Reviewer 先验证行为和风险，再讨论样式。至少检查：
 
 `npm run build` 先执行 `tsc -b` 再执行 Vite build，因此也承担生产类型检查；构建期 API base 为同源 `/api/v1`。
 
-### 8.3 CI 安全与维护
+### 8.5 CI 安全与维护
 
 - CI 禁止加入真实 Provider Secret；增加 Key 来“修复”测试是流程违规。
 - 不使用 `pull_request_target` 执行 fork 代码，不给 PR job 写权限。
@@ -271,7 +288,15 @@ Reviewer 先验证行为和风险，再讨论样式。至少检查：
 - Workflow/Action/lockfile 变更必须经过同代码一样的 Review；脚本输出不得回显环境。
 - 必需检查名称变化时同步更新 branch protection，否则可能意外失去门禁或永久阻塞。
 
-CI 成功不代表 Docker、真实 Provider或公网部署已验证。PR 必须列出超出 CI 的实际/未运行验证。
+CI 已覆盖本地可靠性 Compose，但成功仍不代表真实 Provider、生产编排、公网安全、HA、容量或灾难恢复已验证。PR 必须列出超出 CI 的实际/未运行验证。
+
+### 8.6 阶段完成门禁
+
+- push 后用 GitHub Actions run 的 `headSha` 核对它对应本阶段 commit，不能拿旧 commit 的绿色结果替代。
+- 四个必需 job 必须全部为 `success`；`skipped`、`cancelled`、`neutral` 或仅部分 job 通过都不算阶段完成。
+- CI 失败时保留失败 run，读取首个有因果信息的日志，修复后创建新 commit 并再次 push；禁止 rerun 偶然变绿来掩盖确定性缺陷。
+- 若失败只由 GitHub/组织权限/runner 服务等外部条件造成，记录 run URL、阻塞事实和恢复条件，阶段保持 `in_progress`；本地通过不能替代远程门禁。
+- 最终工作日志与交付回复必须记录 remote、branch、commit SHA、run URL 和四个 job 结论。
 
 ## 9. Release 规则
 

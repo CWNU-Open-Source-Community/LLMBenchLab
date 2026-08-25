@@ -1,5 +1,9 @@
 # LLMBenchLab
 
+[![CI](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/workflows/ci.yml/badge.svg)](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/workflows/ci.yml)
+
+GitHub：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)
+
 LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测工作台。它把模型注册、版本化 Benchmark、后台评测、逐题证据、汇总指标和排行榜放进一条可审计的本地流程，并以“默认离线、严格评分、结果可复现”为首要约束。
 
 当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行基础：PostgreSQL 是 Compose/部署目标和任务事实来源，Redis Streams 提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。

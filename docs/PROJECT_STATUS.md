@@ -13,6 +13,8 @@
 
 `0.1.0` development baseline（尚未发布正式 Release），REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`。
 
+公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)。`main` 跟踪 `origin/main`；阶段性任务必须独立 commit、push，并由该精确 SHA 的四个 GitHub Actions 必需 job 全部通过后才可声明完成。
+
 ## 已完成功能
 
 - 完整的 Charter、Requirements、Architecture、Benchmark Protocol、Dataset Format、Roadmap、Phase 0–6、ADR、治理规则和开源协作文件。
@@ -28,6 +30,7 @@
 - LLMBenchLab 应用 JSON 日志、请求/Run/Question correlation ID、`/live`、`/health`、`/ready`、数据库派生任务 gauges，以及数据库/队列依赖能力 Worker probe。
 - PostgreSQL/SQLite `0002` migration 往返；显式 SQLite→PostgreSQL 单向导入器以只读源、空目标、单目标事务和五表 count/PK/content digest 做对账，并区分提交前回滚、COMMIT 结果未知与提交后验证失败。
 - 统一 Make 命令、setup/dev/smoke/故障验收脚本、锁文件和 GitHub Actions；六服务本地 Compose 由 `postgres`、`redis`、一次性 `migrate`、`api`、`worker`、`frontend` 组成，API/frontend 只绑定 loopback，PostgreSQL/Redis 不发布宿主端口。
+- 项目已发布到 CWNU Open Source Community 组织；初始 `main` commit `d2b9bc8` 的远程 CI 四个 job 全部成功，包括真实 PostgreSQL/Redis integration 与 Compose 8/8 故障验收。
 
 ## 进行中功能
 
@@ -79,6 +82,8 @@
 所有模型相关自动化路径均使用 Mock、MockTransport 或 stub fetch；基础设施用例只连接隔离的 PostgreSQL/Redis，没有调用真实 Provider，也不要求 Provider API Key。详细命令和结果见工作日志与 [TESTING.md](TESTING.md)。
 
 ## 最近工作日志
+
+[2026-08-25-github-publication-and-ci-policy.md](worklogs/2026-08-25-github-publication-and-ci-policy.md)（公开组织仓库、首次远程 CI 与阶段 commit/push/CI 门禁）
 
 [2026-08-25-phase-2-reliable-execution-foundation.md](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)（可靠执行基础实现、真实故障验证与剩余阶段边界）
 
