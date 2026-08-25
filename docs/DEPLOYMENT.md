@@ -2,38 +2,40 @@
 
 ## 1. 当前定位
 
-LLMBenchLab MVP 支持两种运行方式：本机 Python/Node 开发模式，以及可选的 Docker Compose 单机模式。两者都使用 SQLite 和进程内后台任务，只适合个人、本地、低并发使用。
+LLMBenchLab 当前有两条单机运行路径：
 
-> 当前没有认证、授权、限流、生产 Worker 或 SSRF 完整防护。不要把 MVP 直接暴露到公网，也不要以多副本/多主机方式运行。
+- 本地开发兼容路径：SQLite、可选 Redis、FastAPI API、独立 Worker 和 Vite。它便于开发与离线 Mock 验收，但 SQLite 只支持单 Worker 低并发，不能替代 PostgreSQL 并发证据。
+- Phase 2 Compose 可靠执行路径：PostgreSQL 是唯一任务事实来源，Redis Streams 是 at-least-once 通知层，API 与 Worker 是独立进程，migrate 是唯一 Alembic upgrade owner，Nginx 提供前端。
 
-## 2. 端口与数据位置速查
+可靠执行基础已经覆盖租约、心跳、fencing、幂等 Response、取消、有限重试、数据库 reconciliation 和故障恢复；`llmbenchlab-protocol-v1` 评分含义没有改变。Phase 2 总状态仍为 `in_progress`：Provider/Model/Run 级限流、预算、完整背压与公平调度、完整历史可观测性/审计、性能基线和生产高可用尚未完成。
 
-| 模式 | 前端 | API | SQLite | 说明 |
+> Compose 是本地故障验证配置，不是生产方案。它没有认证、授权、TLS、正式 secret manager、自动备份/PITR、告警或 HA；不要直接暴露公网，也不要把示例密码当作生产秘密。
+
+## 2. 地址、进程与数据速查
+
+| 模式 | Web | API | 数据/队列 | 说明 |
 | --- | --- | --- | --- | --- |
-| 本地 Make | `http://127.0.0.1:5173` | `http://127.0.0.1:8000` | `backend/data/llmbenchlab.db` | 默认只监听 loopback |
-| Docker Compose | `http://localhost:8080` | `http://localhost:8000` | volume 内 `/data/llmbenchlab.db` | 前端 Nginx 将 `/api/` 代理到 backend |
+| 本地 Make | `http://127.0.0.1:5173` | `http://127.0.0.1:8000` | `backend/data/llmbenchlab.db`；Redis 可选 | `make dev` 启动 API、独立 Worker、frontend；默认 loopback |
+| Docker Compose | `http://127.0.0.1:8080` | `http://127.0.0.1:8000` | `postgres-data`、`redis-data` named volumes | API/frontend 仅 loopback；PostgreSQL/Redis 无 host port |
 
-API 健康检查为 `/api/v1/health`；OpenAPI UI 为 API 地址下的 `/docs`。Compose 前端容器另有仅供容器健康检查使用的 `/healthz`。
+API 系统端点：
 
-## 3. 本地运行
+- `/api/v1/live`：仅 API 进程 liveness，不访问数据库、Redis 或 Provider。
+- `/api/v1/health`：兼容端点，只检查数据库连接。
+- `/api/v1/ready`：检查数据库、Alembic head 与 Redis，返回组件化、脱敏状态。
+- `/api/v1/tasks/metrics`：数据库派生的当前任务 gauges。
+- `/docs`：OpenAPI UI。
 
-### 3.1 前置要求
+前端容器的 `/healthz` 只表示 Nginx/静态站点可响应。
+
+## 3. 本地开发运行
+
+### 3.1 前置要求与初始化
 
 - Python 3.11 或更新版本。
 - `uv`。
 - Node.js 22 或兼容版本与 npm。
-- Git；Docker 仅 Compose 模式需要。
-
-确认版本：
-
-```bash
-python3 --version
-uv --version
-node --version
-npm --version
-```
-
-### 3.2 一次性初始化
+- Git；Docker 只在 Compose 和 Phase 2 真实故障验收时需要。
 
 从仓库根目录运行：
 
@@ -41,50 +43,35 @@ npm --version
 make setup
 ```
 
-脚本会：
+脚本只在 `.env` 不存在时复制 `.env.example`，按 lockfile 安装依赖，执行安全迁移 preflight，并将本地 SQLite 升级到 Alembic head。已有 `.env` 不会覆盖；`.env`、数据库、WAL/SHM 与自动收养备份都被 Git 忽略。
 
-1. 检查 Python、uv、Node 和 npm。
-2. 仅在 `.env` 不存在时，从 `.env.example` 创建它；已有 `.env` 永不覆盖。
-3. 用锁文件安装后端开发依赖与前端依赖。
-4. 创建 `backend/data/`，执行安全迁移前置检查，再升级到 Alembic head。
-
-`.env` 已被 Git 忽略。创建后应人工检查，不要把真实 Key 加入 `.env.example`。
-
-### 3.3 启动
-
-一个终端同时启动前后端：
+### 3.2 启动 API、Worker 与前端
 
 ```bash
 make dev
 ```
 
-脚本会监控两个子进程；任一服务退出时会停止另一服务，`Ctrl-C` 可整体关闭。需要分别查看日志或调试时，在两个终端运行：
+`scripts/dev.sh` 同时管理三个进程；任一进程退出会停止另外两个。需要分开查看日志时使用三个终端：
 
 ```bash
 make backend
 ```
 
 ```bash
+make worker
+```
+
+```bash
 make frontend
 ```
 
-默认地址：
+只启动 `make backend` 时，API 可以提交 Run，但没有进程内 Runner；新 Run 保持 `pending`，直到独立 Worker 启动。默认 `REDIS_URL` 为空时 Worker 仍会扫描数据库并执行到期 Run，Redis 只是可选低延迟通知层。
 
-- Web：`http://127.0.0.1:5173`
-- API：`http://127.0.0.1:8000`
-- OpenAPI：`http://127.0.0.1:8000/docs`
+SQLite 本地路径只允许单 Worker。不要启动多个 SQLite Worker，也不要用 SQLite kill/restart 代替真实 PostgreSQL 并发验收。
 
-启动后检查：
+### 3.3 直接运行子项目
 
-```bash
-curl -sS http://127.0.0.1:8000/api/v1/health
-```
-
-Mock Demo 不需要 API Key。载入 Demo 和创建离线 Run 的完整步骤见 [TESTING.md](TESTING.md)。
-
-### 3.4 直接运行子项目
-
-统一 Make 命令应是首选。排障时可直接运行：
+统一 Make 命令应是首选。排障时可显式运行：
 
 ```bash
 set -a
@@ -97,7 +84,17 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-另一个终端：
+另一个终端载入同一非秘密配置后启动 Worker：
+
+```bash
+set -a
+source ./.env
+set +a
+cd backend
+uv run python -m app.worker
+```
+
+前端：
 
 ```bash
 cd frontend
@@ -105,282 +102,358 @@ npm ci
 VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1 npm run dev -- --host 127.0.0.1
 ```
 
-相对 SQLite URL 根据当前工作目录解析。仓库脚本先进入 `backend/`，因此
-`sqlite:///./data/llmbenchlab.db` 指向 `backend/data/llmbenchlab.db`；从其他目录直接启动时必须相应调整 URL。
+相对 SQLite URL 根据当前工作目录解析；仓库脚本先进入 `backend/`，所以 `sqlite:///./data/llmbenchlab.db` 指向 `backend/data/llmbenchlab.db`。
 
 ## 4. 环境变量
 
-配置优先从进程环境读取；根目录脚本会用 shell 载入根 `.env`。Pydantic 设置支持
-`LLMBENCHLAB_` 前缀，并为常用变量提供短别名。
+Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CORS 和日志保留短别名。根脚本会载入未提交的 `.env`。
 
-| 变量 | 示例/默认值 | 使用方 | 说明 |
-| --- | --- | --- | --- |
-| `DATABASE_URL` / `LLMBENCHLAB_DATABASE_URL` | `sqlite:///./data/llmbenchlab.db` | 后端/Alembic | SQLAlchemy URL；容器使用绝对 `/data` 路径 |
-| `FRONTEND_ORIGIN` | `http://localhost:5173` | 后端 | 单个允许的 CORS Origin；仅在未设置多 Origin 变量时生效；Compose 使用此项 |
-| `CORS_ORIGINS` / `LLMBENCHLAB_CORS_ORIGINS` | `http://localhost:5173,http://127.0.0.1:5173` | 后端 | 优先于 `FRONTEND_ORIGIN`；本地示例同时允许两种 loopback 拼写，改端口时须同步，`*` 会被拒绝 |
-| `LOG_LEVEL` / `LLMBENCHLAB_LOG_LEVEL` | `INFO` | 后端 | `CRITICAL/ERROR/WARNING/INFO/DEBUG` |
-| `LLMBENCHLAB_ENVIRONMENT` | `development` | 后端 | `/info` 中的环境标签 |
-| `LLMBENCHLAB_DEBUG` | `false` | 后端 | 本地调试；有秘密时不要开启 |
-| `API_HOST` | `127.0.0.1` | Make/脚本 | Uvicorn 监听地址，不是 Pydantic 应用设置 |
-| `API_PORT` | `8000` | Make/Compose | 本地监听或 Compose host port |
-| `FRONTEND_HOST` | `127.0.0.1` | Make/脚本 | Vite 监听地址 |
-| `FRONTEND_PORT` | `8080` | Compose | Nginx 的 host port |
-| `VITE_API_BASE_URL` | `http://localhost:8000/api/v1` | Vite build/dev | 编译期公开配置，不得放秘密 |
-| `DEMO_API_KEY_ENV` | `LLMBENCHLAB_DEMO_API_KEY` | 示例/CI 元数据 | 只是“环境变量名称”的示例，Mock 不读取它 |
+### 4.1 数据库、队列与 Worker
 
-`VITE_*` 会进入浏览器产物，永远不能存放 Key。`DEMO_API_KEY_ENV` 不是 Provider Key，也不会自动注册模型。
+| 变量 | 默认/示例 | 说明 |
+| --- | --- | --- |
+| `DATABASE_URL` / `LLMBENCHLAB_DATABASE_URL` | `sqlite:///./data/llmbenchlab.db` | SQLAlchemy URL；Compose 改为内部 PostgreSQL |
+| `REDIS_URL` / `LLMBENCHLAB_REDIS_URL` | 空 | 空表示关闭队列并只用 DB reconciliation；Compose 使用内部 Redis |
+| `LLMBENCHLAB_DATABASE_POOL_SIZE` | `5` | 数据库 pool size |
+| `LLMBENCHLAB_DATABASE_MAX_OVERFLOW` | `5` | 数据库 pool overflow |
+| `LLMBENCHLAB_DATABASE_POOL_TIMEOUT_SECONDS` | `30` | 连接池等待上限；Compose 默认压缩为 2 秒 |
+| `LLMBENCHLAB_READINESS_DATABASE_TIMEOUT_SECONDS` | `5` | `/ready` 等待 DB/head 线程结果的异步上限；不是驱动强制取消 |
+| `LLMBENCHLAB_TASK_STREAM` | `llmbenchlab:runs:v1` | Redis Stream 名称 |
+| `LLMBENCHLAB_TASK_CONSUMER_GROUP` | `llmbenchlab-workers-v1` | Consumer Group 名称 |
+| `LLMBENCHLAB_TASK_STREAM_MAX_LENGTH` | `10000` | Stream 近似裁剪上限；不能作为恢复正确性前提 |
+| `LLMBENCHLAB_REDIS_MAX_CONNECTIONS` | `10` | Redis 连接池上限 |
+| `LLMBENCHLAB_REDIS_PUBLISH_TIMEOUT_SECONDS` | `1` | API XADD 等待上限 |
+| `LLMBENCHLAB_REDIS_OPERATION_TIMEOUT_SECONDS` | `2` | ping/read/ACK 等操作上限；Compose 默认 1 秒 |
+| `LLMBENCHLAB_REDIS_BLOCK_MILLISECONDS` | `1000` | Worker 阻塞读取上限 |
+| `LLMBENCHLAB_WORKER_LEASE_SECONDS` | `30` | Run 租约时长 |
+| `LLMBENCHLAB_WORKER_HEARTBEAT_SECONDS` | `10` | 心跳周期；必须不大于 lease 的一半 |
+| `LLMBENCHLAB_WORKER_POLL_SECONDS` | `1` | DB reconciliation 周期 |
+| `LLMBENCHLAB_WORKER_MAX_ATTEMPTS` | `3` | 新 Run 的最大执行 attempt |
+| `LLMBENCHLAB_WORKER_RETRY_BACKOFF_BASE_SECONDS` | `1` | 重试退避基数 |
+| `LLMBENCHLAB_WORKER_RETRY_BACKOFF_CAP_SECONDS` | `30` | 重试退避上限 |
+| `LLMBENCHLAB_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | SIGTERM 后等待活动 Run 的应用 grace |
+| `LLMBENCHLAB_MOCK_GENERATION_DELAY_SECONDS` | `0` | 只用于确定性 Mock 故障测试；不改变报告 latency 或协议评分 |
 
-### 4.1 OpenAI-compatible Key
+配置校验要求 `heartbeat * 2 <= lease`，退避 base 不得大于 cap。不要为了让超时测试通过而把生产时间参数直接套到验收脚本；`phase2_acceptance.py` 使用隔离的短租约配置。
 
-为某个模型选择一个环境变量名，例如 `LOCAL_COMPAT_API_KEY`：
+### 4.2 API、前端与日志
 
-1. 在启动 backend 的同一进程环境或安全的秘密注入系统中设置它。
-2. Model API 的 `api_key_env` 只填写字符串 `LOCAL_COMPAT_API_KEY`。
-3. 不把真实值放进 API JSON、数据库、截图或 Git。
+| 变量 | 默认/示例 | 说明 |
+| --- | --- | --- |
+| `CORS_ORIGINS` / `LLMBENCHLAB_CORS_ORIGINS` | 两种 localhost `:5173` | 显式 allowlist；拒绝 `*` |
+| `FRONTEND_ORIGIN` | `http://localhost:5173` | 单 Origin 兼容别名；`CORS_ORIGINS` 优先 |
+| `LOG_LEVEL` / `LLMBENCHLAB_LOG_LEVEL` | `INFO` | `CRITICAL/ERROR/WARNING/INFO/DEBUG` |
+| `LLMBENCHLAB_ENVIRONMENT` | `development` | `/info` 环境标签 |
+| `LLMBENCHLAB_DEBUG` | `false` | 只用于受控本地调试 |
+| `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Make/脚本监听；Compose 只消费 host port |
+| `FRONTEND_HOST` / `FRONTEND_PORT` | `127.0.0.1` / `8080` | Vite host / Compose Nginx host port |
+| `VITE_API_BASE_URL` | `http://localhost:8000/api/v1` | 浏览器公开的编译期值，绝不能放秘密 |
 
-Adapter 在每次请求时读取该变量；缺失会将单题记为 `missing_api_key`。配置真实 Provider 前必须审查目标 `base_url` 和 Benchmark 外发许可，详见 [SECURITY.md](SECURITY.md)。
+### 4.3 Compose 插值
 
-## 5. 数据库与迁移
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `LLMBENCHLAB_IMAGE_TAG` | `local` | backend/migrate/worker 共用镜像标签 |
+| `LLMBENCHLAB_COMPOSE_DATABASE_URL` | 内部 `postgres:5432/llmbenchlab` | 覆盖应用 DSN；默认密码只用于本地隔离 Compose |
+| `LLMBENCHLAB_COMPOSE_REDIS_URL` | `redis://redis:6379/0` | 内部队列地址 |
+| `LLMBENCHLAB_COMPOSE_WORKER_LEASE_SECONDS` | `30` | 映射到容器 Worker lease |
+| `LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS` | `10` | 映射到 heartbeat |
+| `LLMBENCHLAB_COMPOSE_WORKER_POLL_SECONDS` | `1` | 映射到 reconciliation |
+| `LLMBENCHLAB_COMPOSE_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | 应用 grace；容器另有 45 秒 stop grace |
+| `LLMBENCHLAB_COMPOSE_REDIS_OPERATION_TIMEOUT_SECONDS` | `1` | 容器 Redis 操作 timeout |
+| `LLMBENCHLAB_COMPOSE_DATABASE_POOL_TIMEOUT_SECONDS` | `2` | 容器连接池 timeout |
+| `LLMBENCHLAB_COMPOSE_READINESS_DATABASE_TIMEOUT_SECONDS` | `2` | 容器 readiness 等待上限 |
+| `LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS` | `0` | 可靠性测试专用 Mock delay |
 
-### 5.1 本地路径
+### 4.4 OpenAI-compatible Key
 
-默认数据库：
+模型表只保存环境变量名，例如 `LOCAL_COMPAT_API_KEY`。真正调用 Adapter 的是 Worker，因此秘密必须注入 Worker 进程；只给 API 注入不会生效。`make dev` 会让三个本地进程继承同一 `.env`，但真实部署应按进程最小权限拆分。
 
-```text
-backend/data/llmbenchlab.db
+Compose 默认不注入任何 Provider Key。用户主动手工验证时使用未提交 override 或 secret 系统，只给 Worker 注入选定变量：
+
+```yaml
+services:
+  worker:
+    environment:
+      LOCAL_COMPAT_API_KEY: ${LOCAL_COMPAT_API_KEY:?set_in_controlled_shell}
 ```
 
-文件、`*.db-wal`、`*.db-shm` 及迁移收养生成的 `*.bak` 均被 Git 忽略。不要提交数据库或备份；它们可能包含题目、参考答案、原始回答和错误内容。
+不要提交 override，不要把展开后的 `docker compose config` 发到公共日志，也不要把 Key 写入 `VITE_*`、Model API JSON、数据库或命令行。自动化、CI、Smoke 与 Phase 2 验收禁止调用真实 Provider。
 
-### 5.2 迁移
+## 5. 数据库、队列与 Alembic
 
-每次拉取包含 migration 的更新后，在启动前运行：
+### 5.1 事实来源与恢复边界
+
+- PostgreSQL 中的 Run 状态、取消意图、attempt、租约、Response、聚合、错误和 dead-letter 是唯一权威事实。
+- Redis Stream 消息只包含版本、`run_id` 和 correlation ID。通知丢失、重复或 ACK 不确定不能删除或改变数据库事实。
+- API 先提交数据库，再 best-effort XADD。Redis 失败时仍返回已持久化 Run；Worker 定期扫描数据库并恢复。
+- 每个执行写入校验 owner 与单调 `lease_token`；终态清除 owner/expiry/heartbeat，旧 token 永久失效。
+
+Redis 开启 AOF (`appendfsync everysec`) 只改善通知持久性，不是备份，也不能取代 PostgreSQL。
+
+### 5.2 Migration chain
+
+- `20260824_0000`：可执行 legacy schema。
+- `20260824_0001`：Phase 1 schema、模型约束与题目 position。
+- `20260825_0002`：attempt、租约、心跳、backoff、queue audit 与 dead-letter 字段/约束/索引。
+
+本地 SQLite 更新：
 
 ```bash
 make migrate
 ```
 
-`20260824_0000` 是可执行的 ORM-era legacy-schema revision，会为全新空库创建五张旧结构表；`20260824_0001` 将其保留数据地升级为当前 schema/head。受支持的未版本化 legacy 库由 preflight 验证后 stamp 到 `0000`，未版本化 current-schema 库则 stamp 到 head；当前应用只能在 head 启动。检查状态：
+命令先执行 `app.db.prepare_migrations`，再 `alembic upgrade head`。受支持的未版本化 SQLite 会在严格结构/integrity/FK 检查和一致性备份后 stamp；未知 drift 在写 revision 前拒绝。普通 API/Worker 启动只检查 head，不运行 `create_all`、preflight 或 upgrade。
 
-```bash
-cd backend
-uv run alembic current
-uv run alembic heads
+Compose 中只有一次性 `migrate` 服务执行：
+
+```text
+python -m app.db.prepare_migrations && alembic upgrade head && alembic check
 ```
 
-Alembic 是普通运行环境唯一的 schema owner；应用启动不执行 `create_all`，并会在 revision 不是 head 时快速失败，提示先执行 setup/migrate。`make setup`、`make migrate` 与 backend 容器入口均先运行迁移前置检查，再执行 `alembic upgrade head`：
+`api` 与 `worker` 必须等待 migrate exit 0，然后仅执行 head check。不要把 Alembic 命令加回 API/Worker entrypoint，也不要同时运行多个 migration owner。
 
-- 空库直接进入正常 upgrade；已有 `0000` 或 head revision 的库先验证其对应结构，head 漂移也会拒绝。
-- 五张业务表已经存在但没有有效 revision：只接受与当前 schema 完全一致，或与已知 legacy schema 的六项差异完全一致的 SQLite。
-- 受支持的未版本化库：先执行 SQLite backup API，生成 `llmbenchlab.db.pre-alembic-<UTC>.bak`，再用 Alembic stamp 到经验证的 revision 并继续 upgrade。
-- 部分表、未知列/约束漂移、完整性错误、外键错误或不满足新约束的数据：在 stamp 前退出并给出错误，不猜测、不删库。
+`0002 -> 0001` downgrade 在发现 `pending` 或 `running` Run 时拒绝；它会删除可靠性元数据但保留五类核心实体与协议证据。它不是 PostgreSQL→SQLite 反向同步，也不恢复 Phase 1 进程内 Runner。
 
-直接手工操作时也必须先运行前置检查：
+### 5.3 备份与恢复证据边界
 
-```bash
-set -a
-source ./.env
-set +a
-cd backend
-uv run python -m app.db.prepare_migrations
-uv run alembic upgrade head
-```
+仓库当前没有自动 PostgreSQL 备份、PITR、跨主机灾难恢复或经过记录的生产恢复演练。升级、导入、truncate、volume 删除或 schema downgrade 前，操作方必须按自己的 PostgreSQL/SQLite 平台创建并验证备份；不能把“volume 存在”或本地导入测试写成恢复演练通过。
 
-迁移失败时不要删除数据库、不要盲目 `stamp head`，也不要直接修改 `alembic_version`。保留日志和 `.bak`，先评估失败位置再恢复或重试。任何 downgrade 都要先确认数据丢失语义；`downgrade base` 会删除全部业务表，只应在临时验证库或已确认可丢弃且有备份的库执行。
+SQLite 自动收养生成的 `.bak` 只保护该 preflight 窗口，不是长期备份策略。Redis volume/AOF 也不是任务事实备份。
 
-## 6. Docker Compose
+## 6. Docker Compose 六服务拓扑
 
-### 6.1 启动和停止
+Compose 定义六个 service，其中五个常驻，`migrate` 为一次性任务：
+
+| Service | 角色 | 启动/健康语义 |
+| --- | --- | --- |
+| `postgres` | PostgreSQL 16，任务和评测唯一事实来源 | `pg_isready`；`postgres-data`；无 host port |
+| `redis` | Redis 7 Streams 通知层，AOF everysec | `redis-cli ping`；`redis-data`；无 host port |
+| `migrate` | 唯一 Alembic preflight/upgrade/check owner | 等 PostgreSQL healthy；成功后 exit 0，不常驻 |
+| `api` | FastAPI CRUD、Run commit 与 best-effort publish | 等 migrate 成功；启动只 head check；`/ready` 为容器 health；loopback API port |
+| `worker` | 独立租约 Worker、DB reconciliation、Redis consume/ACK | 等 migrate 成功；启动只 head check；dependency probe；容器 stop grace 45 秒 |
+| `frontend` | Nginx 静态站与 `/api/` 同源代理 | 等 API healthy；loopback frontend port |
+
+### 6.1 启动、检查和停止
 
 ```bash
 make docker-up
 ```
 
-该命令执行前台 `docker compose up --build`。Compose 包含：
+该命令执行 `docker compose up --build --wait --wait-timeout 180 --remove-orphans`。检查：
 
-- `backend`：Python 3.12、非 root 用户，启动时先做迁移前置检查再升级，SQLite volume 挂载到 `/data`。
-- `frontend`：Node 22 build 后由 Nginx 提供静态文件；`/api/` 同源代理到 `backend:8000`。
-- named volume `sqlite-data`：持久保存 `/data/llmbenchlab.db`。
+```bash
+docker compose ps -a
+docker compose logs migrate
+docker compose logs api
+docker compose logs worker
+curl -sS http://127.0.0.1:8000/api/v1/live
+curl -sS http://127.0.0.1:8000/api/v1/health
+curl -sS http://127.0.0.1:8000/api/v1/ready
+curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
+curl -sS http://127.0.0.1:8080/healthz
+```
 
-默认访问：
-
-- Web（推荐）：`http://localhost:8080`
-- 直接 API：`http://localhost:8000/api/v1/health`
-
-停止并保留数据：
+`migrate` 应显示成功退出；它不是故障容器。停止并保留 PostgreSQL/Redis volumes：
 
 ```bash
 make docker-down
 ```
 
-该命令等价于 `docker compose down`，不会删除 named volume。`docker compose down -v` 会删除数据库 volume，是破坏性操作；只有明确要丢弃数据且已有所需备份时才能运行。
+`docker compose down -v` 会删除 `postgres-data` 与 `redis-data`，属于破坏性操作。除隔离验收脚本管理的唯一项目外，不要自动执行；仓库没有可据此宣称安全恢复的备份演练。
 
-### 6.2 Compose 配置校验与状态
+### 6.2 网络与安全
 
-```bash
-docker compose config
-docker compose ps
-docker compose logs backend
-docker compose logs frontend
-```
+API 与 frontend 明确绑定 `127.0.0.1`；PostgreSQL/Redis 只在 Compose 内部网络，无宿主端口。默认 PostgreSQL 密码 `llmbenchlab-local-only` 与 CI 密码都只是隔离测试固定值，不满足生产 secret 管理。
 
-`docker compose config` 仅证明 YAML 和插值有效。完整验收还需构建成功、两个容器健康，以及 Mock Smoke/API 手工链路通过。
+Loopback 绑定不能提供用户隔离；宿主机上的其他进程仍可访问。Compose 没有 TLS、鉴权、网络策略、容器只读文件系统、正式证书或多租户权限，不能直接部署到共享服务器/公网。
 
-### 6.3 Compose 安全注意
+### 6.3 Worker 停止与故障
 
-当前 `ports` 短语法通常绑定宿主机所有接口，而不只是 loopback。它适合隔离的开发机，但在公共 Wi-Fi、云主机或共享服务器上可能被同网段访问。公开部署前必须改成明确的 loopback binding 或受保护的反向代理，并加入鉴权；CORS 不能阻止非浏览器访问。
+Worker 收到 SIGTERM 后在应用 `LLMBENCHLAB_WORKER_SHUTDOWN_GRACE_SECONDS` 内等待活动 Run；Compose 给容器 45 秒 stop grace。若应用 grace 先耗尽，它取消本地 task，不 ACK 未安全收敛的消息，数据库租约保留到自然过期，由 peer 以新 token 接管。
 
-Compose 默认只适合 Mock，不向 backend 传递任意 Provider Key。若用户主动做真实 Provider 手工验证，应使用未提交的 Compose override 或部署 secret 注入，把**选定变量**传给 backend；不要把值写进 `compose.yaml`。示意 override：
+强制 SIGKILL 不会立即转移 owner，也不允许 peer 提前覆盖。Phase 2 验收精确杀死实际 lease owner，并证明 peer 在数据库 expiry 之后才接管。生产环境仍需滚动排空、Pod disruption、告警与容量策略。
 
-```yaml
-services:
-  backend:
-    environment:
-      LOCAL_COMPAT_API_KEY: ${LOCAL_COMPAT_API_KEY:?set_in_shell_before_start}
-```
+### 6.4 Redis 故障
 
-先在受控 shell/secret store 中提供值，再启动 Compose。不要提交包含值的 override，也不要把它打印到 `docker compose config` 的共享日志。
+Redis 不可用时：
 
-### 6.4 容器数据位置
+- `/ready` 返回 `503 degraded` 和 `queue_unavailable`，但数据库/head 正常时 `accepting_runs=true`。
+- `POST /runs` 仍先提交 PostgreSQL 并返回 `202`；Run 记录稳定的 queue notification error。
+- Worker 保持 DB reconciliation，可完成到期 Run；Redis 恢复后重新初始化 consumer group/消费。
 
-应用内数据库 URL 是：
+因此不能用 `/ready=503` 推断所有 Run 创建都应被拒绝，也不能把 Redis 当作结果数据库。
 
-```text
-sqlite:////data/llmbenchlab.db
-```
+## 7. SQLite→PostgreSQL 单向导入 runbook
 
-Compose 项目名固定为 `llmbenchlab`，Docker 通常将 volume 显示为
-`llmbenchlab_sqlite-data`；应以 `docker volume ls` 与 `docker compose config` 的实际输出为准，不要在脚本中猜测名称。
+导入器是显式、一次性的五表复制，不会自动在应用启动时运行，也不会反向同步。
 
-## 7. SQLite 备份与恢复
+### 7.1 前置条件
 
-备份是用户责任。变更 Schema、升级应用、移动 volume 或清理环境前必须备份，并定期做恢复演练。
+1. 停止源 SQLite 的 API、Worker 和所有写进程；同时停止目标 API/Worker 和用户入口。导入器只能保证自身连接只读，不能证明外部写进程已停止。
+2. 按组织要求创建并独立验证源与目标备份。仓库没有生产备份/恢复演练，不得把本 runbook 描述为已验证灾难恢复。
+3. 源必须是文件型 SQLite、处于当前 Alembic head；不能有 `pending` 或 `running` Run。
+4. 目标必须是当前 head 的 PostgreSQL，五张核心表必须为空。先由唯一 migrate owner 完成 schema，再保持 API/Worker 停止。
+5. 在受信环境运行；源可能包含题目、参考答案、原始模型输出和错误内容。保护源文件、终端输出和摘要日志。
 
-### 7.1 本地一致性备份
+导入器以 SQLite URI `mode=ro` 打开源、设置 `PRAGMA query_only=ON`，在显式读事务内执行 `integrity_check`、`foreign_key_check`、head/no-active 检查与 snapshot。任何一项失败都会在接触目标数据前停止。
 
-若系统安装了 `sqlite3`，可在应用运行时使用 SQLite backup API：
+### 7.2 准备空的 Compose 目标
+
+在尚未启动 API/Worker 的 Compose 项目中：
 
 ```bash
-mkdir -p backups
-sqlite3 backend/data/llmbenchlab.db ".backup 'backups/llmbenchlab-20260824.db'"
-sqlite3 backups/llmbenchlab-20260824.db 'PRAGMA integrity_check;'
+docker compose up -d postgres redis
+docker compose build migrate
+docker compose run --rm migrate
 ```
 
-预期完整性检查输出 `ok`。备份文件名应包含 UTC 时间和可选 commit SHA；把它放到受控、加密且不被 Git 跟踪的位置。不要只复制一个正在写入的 `.db` 而忽略可能存在的 WAL/SHM。
-
-没有 `sqlite3` CLI 时，先停止 backend，再复制主数据库文件：
+如果目标栈已经运行，先停止入口和执行进程，再确认没有 active Run：
 
 ```bash
-cp backend/data/llmbenchlab.db backups/llmbenchlab-20260824.db
+docker compose stop frontend api worker
+docker compose run --rm migrate
 ```
 
-### 7.2 本地恢复
+第二条命令只负责把 schema 确认到 head，不会清空已有业务表；非空目标会由 importer 拒绝。不要为通过 preflight 而执行 truncate。
 
-1. 停止 backend，确认没有进程持有数据库。
-2. 先保留当前文件，再复制经过验证的备份：
+### 7.3 运行导入
 
-   ```bash
-   cp backend/data/llmbenchlab.db backend/data/llmbenchlab.pre-restore.db
-   cp backups/llmbenchlab-20260824.db backend/data/llmbenchlab.db
-   sqlite3 backend/data/llmbenchlab.db 'PRAGMA integrity_check;'
-   make migrate
-   ```
-
-3. 启动服务，检查 `/api/v1/health`、模型/Benchmark/Run 数量和一条逐题记录。
-
-不要在数据库打开时覆盖文件。恢复不会恢复 `.env` 或 Provider Key；秘密应独立管理。
-
-### 7.3 Compose 备份
-
-最简单可靠的 MVP 做法是短暂停止 backend，前端可保持运行但 API 暂不可用：
+通用本地命令应从受控环境变量读取 credentialed DSN，避免密码进入 argv：
 
 ```bash
-mkdir -p backups
-docker compose stop backend
-docker compose cp backend:/data/llmbenchlab.db ./backups/llmbenchlab-compose-20260824.db
-docker compose start backend
+cd backend
+export LLMBENCHLAB_IMPORT_TARGET_URL='<credentialed-postgresql-dsn-from-secret-store>'
+uv run python -m app.db.import_sqlite \
+  --source /absolute/path/to/llmbenchlab.db \
+  --target-env LLMBENCHLAB_IMPORT_TARGET_URL
 ```
 
-验证复制出的文件：
+不要把示例占位符替换后提交到 shell history、文档或日志。`--target` 仅允许 passwordless PostgreSQL URL；若 userinfo 或 query 含 password，CLI 在连接前拒绝。也可用受控 `PGPASSFILE` 或 libpq service，让 argv 仍不含秘密。
+
+对内部 Compose PostgreSQL，可用 migrate 镜像作为一次性维护容器，并把源文件只读挂载：
 
 ```bash
-sqlite3 backups/llmbenchlab-compose-20260824.db 'PRAGMA integrity_check;'
+docker compose run --rm \
+  --volume /absolute/path/to/llmbenchlab.db:/import/source.db:ro \
+  migrate python -m app.db.import_sqlite \
+  --source /import/source.db \
+  --target-env DATABASE_URL
 ```
 
-恢复时停止 backend，先从容器复制一份现状备份，再把目标备份复制到一个临时文件名；由一次性 backend 容器完成替换和迁移，避免主服务同时写入：
+执行时仍必须保持 API/Worker 停止。不要把整个源目录可写挂载到容器。
+
+### 7.4 原子性、锁和对账
+
+目标流程在一个 PostgreSQL 事务内：
+
+1. 获取固定 transaction advisory lock，串行化两个 importer。
+2. 检查 head，随后对 `alembic_version` 与五张核心表获取 `ACCESS EXCLUSIVE` lock，再次检查 head 与空表。
+3. 按依赖顺序复制 `models`、`benchmarks`、`questions`、`evaluation_runs`、`evaluation_responses`。
+4. 提交前比较行数、主键集合 SHA-256 与 canonical row SHA-256；失败整体 rollback。
+5. COMMIT 成功确认后，在单个 `REPEATABLE READ`、`READ ONLY` 事务中做 post-commit snapshot。
+
+成功输出三组、每组五行的 content-free 摘要：`phase=source`、`phase=precommit_target`、`phase=postcommit_target`。每张表的 `row_count`、`pk_set_digest` 和 `canonical_row_digest` 必须三阶段一致。摘要不打印行内容或 URL，但行数/hash 仍是敏感运维元数据。
+
+### 7.5 Exit code 与恢复动作
+
+| Exit | 状态 | 数据语义 | 必需动作 |
+| --- | --- | --- | --- |
+| `0` | completed and reconciled | COMMIT 已确认，post-commit 摘要匹配 | 保存脱敏摘要；检查 head/ready 后再启动 API/Worker |
+| `2` | pre-commit failure | preflight/copy/提交前对账失败；目标事务若已开始会 rollback | 保留错误与源；确认目标仍为空并修复原因后，才考虑重新执行 |
+| `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 | 立即停止；保持应用停机，检查目标五表和摘要；禁止盲目重试、truncate 或覆盖 |
+| `3` | `committed_but_verification_failed` | COMMIT 已确认，但 post-commit snapshot/比较或摘要输出未完成 | 将目标视为已提交；保持只读检查并补做对账；禁止重新导入或清空 |
+
+exit 4 时，只有在独立检查证明五表仍为空后才可按新变更重新运行；若非空，按“可能已完整提交”保护现场。exit 3 已明确提交，不得把它当成 rollback。任何不确定状态都应升级给数据库负责人，而不是靠重复命令猜测。
+
+### 7.6 导入后与回退
+
+exit 0 后确认三阶段摘要、Alembic head 和**实际导入的目标环境**。如果目标就是第 7.2 节已停止的同一 Compose project，使用与导入时相同的 project 选择、环境插值和 `LLMBENCHLAB_COMPOSE_DATABASE_URL` 恢复该栈；默认 project 可运行：
 
 ```bash
-docker compose stop backend
-docker compose cp backend:/data/llmbenchlab.db ./backups/llmbenchlab-before-restore.db
-docker compose cp ./backups/llmbenchlab-compose-20260824.db backend:/data/llmbenchlab.restore.db
-docker compose run --rm --no-deps backend sh -c 'cp /data/llmbenchlab.restore.db /data/llmbenchlab.db && python -m app.db.prepare_migrations && alembic upgrade head'
-docker compose start backend
+make docker-up
+curl -sS http://127.0.0.1:8000/api/v1/ready
 ```
 
-随后检查健康和关键记录。恢复命令会覆盖 volume 中的主数据库，执行前必须再次核对备份路径与目标环境。
+如果 `LLMBENCHLAB_IMPORT_TARGET_URL` 指向外部/托管 PostgreSQL，不要运行上述命令来“恢复”它：Compose 不读取这个 importer 专用变量，默认会启动另一套本地 PostgreSQL。应通过该外部环境自己的部署流程，把 API、Worker 和唯一 migration owner 配置到刚核验过的同一 DSN，再启动服务并检查其 `/ready`、Alembic head 与数据库身份。启动前应保留导入摘要和只读核验结果，避免仅凭主机名或环境变量名称判断目标一致。
 
-### 7.4 备份范围与验证
+PostgreSQL 上后续产生的数据不会自动写回 SQLite。平台回退只能使用迁移前冻结的 SQLite 源/经独立验证的备份，或另行设计并验证导出工具；Alembic schema downgrade 不是反向数据迁移。Redis 可以重建，因为它不保存权威事实，但这不等于 PostgreSQL 可丢弃。
 
-一个可恢复快照至少记录：
+## 8. Health、日志、指标与 probe 边界
 
-- SQLite 文件及 `PRAGMA integrity_check` 结果。
-- 应用 commit/tag、Alembic revision、创建时间（UTC）。
-- 与结果解释有关的 Benchmark 源文件或 dataset hash。
-- 非秘密运行配置。秘密和 Key 只在独立秘密系统备份。
+### 8.1 API liveness/readiness
 
-定期抽样恢复到隔离目录/临时 volume，运行迁移、健康检查和只读数据核对。只有“文件存在”不等于备份可恢复。
-
-## 8. 升级、回滚和运行行为
-
-### 8.1 升级顺序
-
-1. 阅读 Changelog、migration 和协议变化。
-2. 停止创建新 Run，等待现有 Run 终态。
-3. 创建并验证 SQLite 备份。
-4. 安装锁定依赖/构建新镜像。
-5. 执行 `make migrate` 或让 Compose backend 启动命令迁移。
-6. 启动 API，检查 health/info 和 Alembic revision。
-7. 运行完全离线 Mock Smoke，再恢复正常使用。
-
-### 8.2 回滚
-
-代码回滚必须与数据库、API、前端和 `protocol_version` 兼容。优先从升级前备份恢复整个 SQLite，而不是盲目执行 Alembic downgrade。不同协议或 dataset hash 的结果不能因回滚被无提示混排。
-
-### 8.3 进程重启
-
-Runner 是 API 进程内 asyncio task。正常关闭会取消活动任务并标记失败；异常终止后，下次启动会把遗留 `running` Run 标为 `failed`，错误为
-`interrupted_by_process_restart...`。MVP 不会自动继续，也没有独立 Worker/队列。重启前应等待 Run 完成；中断后由用户显式创建新 Run。
-
-## 9. 生产部署前必须完成的改造
-
-| 领域 | 当前 MVP | 生产前要求 |
+| 端点 | 检查 | 失败语义 |
 | --- | --- | --- |
-| 身份与权限 | 无鉴权，所有端点可读写 | 登录/API Token、RBAC、对象级授权、管理员 Model/导入权限、审计 |
-| 网络 | 开发端口直出 | TLS 反向代理、可信 Host/代理、仅所需端口、网络分区和安全 headers |
-| SSRF | 只做 URL 语法校验 | Provider allowlist、IP/DNS/redirect 校验、出站代理/网络策略、元数据阻断 |
-| 数据库 | 单文件 SQLite | PostgreSQL、连接池、迁移演练、加密、备份/PITR 与恢复目标 |
-| 任务执行 | 单进程 task，不恢复 | Redis/可靠队列、独立 Worker、租约、幂等、心跳、重试/死信、优雅排空 |
-| 扩展 | 单实例低并发 | 全局并发/Provider rate limit、背压；完成协调前不得简单增加 API replicas |
-| 费用 | 人工价格估算，无预算 | 每用户/Provider 预算、最大题量/Token、成本预检、熔断和告警 |
-| 上传 | 应用层 ZIP 限制 | 代理请求体/超时限制、每用户配额、存储隔离、内容/许可证审批 |
-| 私有数据 | SQLite 明文、API 返回答案/raw | 静态加密、访问控制、DLP、保留/删除、导出审计、Provider 外发确认 |
-| Secrets | 本地环境变量 | Secret manager、短期凭据、轮换、最小权限、无日志注入 |
-| 可观测性 | 基础日志/health | 结构化关联日志、metrics、traces、ready/live、告警和审计事件 |
-| 供应链 | lockfile 与基础 CI | Action SHA/镜像 digest、漏洞门禁、SBOM、签名和 provenance |
-| Web 安全 | 显式 CORS、部分 Nginx headers | CSP、认证后 CSRF/session 设计、速率限制、渗透测试 |
-| 代码评测 | 不支持 | 专用无网络沙箱与资源限制；不得在 API 主机直接执行不可信代码 |
+| `/live` | API 进程可响应；返回应用版本与 UTC 时间 | 不探测外部依赖；数据库/Redis 全断仍可 200 |
+| `/health` | 数据库 `SELECT 1` | 数据库失败 503；不检查 Alembic head 或 Redis |
+| `/ready` | DB `SELECT 1`、Alembic head、Redis ping（若配置） | DB/schema 失败为 `not_ready`/不接受 Run；仅 Redis 失败为 `degraded`/仍接受 Run |
 
-具体安全要求见 [SECURITY.md](SECURITY.md)，可靠任务架构属于 Phase 2，代码沙箱属于 Phase 3。
+`/ready` 用 `asyncio.to_thread` 执行同步数据库/head 检查，并以 `LLMBENCHLAB_READINESS_DATABASE_TIMEOUT_SECONDS` 限制等待；Redis 有独立 operation timeout。asyncio timeout 只能停止等待，不能杀死已经运行的数据库 driver 线程，因此实际资源占用还受 PostgreSQL `connect_timeout`、SQLAlchemy pool timeout 和驱动行为约束。不要据此宣称硬实时 timeout。
 
-## 10. 当前部署限制
+Compose API healthcheck 使用 `/ready`，所以 Redis 停止时容器会显示 unhealthy，即使数据库 reconciliation 仍可接受和完成 Run；运维告警必须读取组件字段而不是只看一个颜色。
 
-- 仅单机 SQLite；并发写入和容量有限，未做性能/容量 SLA。
-- 进程内任务无法跨重启恢复，不能安全地用常规滚动发布承载活动 Run。
-- 没有多用户、认证、授权、速率限制或费用硬上限。
-- 任意受信任用户可配置 `base_url`，SSRF 未在应用层解决。
-- Benchmark 与 Responses API 暴露题目、参考答案、metadata 和原始回答。
-- SQLite/volume/备份默认未加密，无自动备份、保留或灾难恢复服务。
-- Compose 是开发便利配置：端口可能对局域网开放，未配置 TLS、生产代理或集中日志。
-- OpenAI-compatible 兼容性取决于目标服务对 Chat Completions 的实现；真实 Provider 不属于自动验收。
-- 上游不返回 usage 时 Token 和费用为未知；估算价格由用户配置，不是账单真值。
-- Demo 数据只验证链路，不代表正式模型能力。
+### 8.2 Worker probe
+
+```bash
+docker compose exec worker python -m app.worker_probe
+```
+
+probe 检查数据库连接、Alembic head 与队列能力：DB/head 或队列配置错误 exit 1；Redis 运行时不可用但 DB reconciliation 可用时输出 `degraded` 且 exit 0。它是依赖 capability/readiness probe，不观察 Worker 主循环、当前 lease heartbeat、事件循环卡死或执行吞吐，不能称为完整 Worker liveness。
+
+### 8.3 结构化日志
+
+LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、request/correlation ID、run/question、worker、attempt、lease token、message ID、结果和异常类型。它不应记录 Authorization、DSN/Redis URL、请求正文、Provider 请求/响应正文、完整题目或原始模型输出。API 接受安全的 `X-Request-ID`；Run correlation 默认稳定使用 Run ID。
+
+这个保证只覆盖 LLMBenchLab 配置的应用 logger。Uvicorn/error/access handler 仍可能使用原生日志格式；不得把当前实现描述为所有容器日志统一 JSON。秘密也不能放入 URL，因为反向代理/access logger 可能记录 URL。
+
+### 8.4 Task metrics
+
+`/api/v1/tasks/metrics` 从 PostgreSQL 当前行派生：pending、due pending、running、expired running、active cancellation、retry scheduled、dead-lettered、queue notification error 和 total attempts。它是只读 gauges，不参与调度、不覆盖数据库状态。
+
+当前没有 Prometheus exporter、持久历史 counter、claim conflict/heartbeat/queue error 时序、恢复延迟 histogram、trace、告警或完整审计流。生产监控和 Phase 2 P2-06 仍需补齐。
+
+## 9. 升级、重启与回滚
+
+### 9.1 升级顺序
+
+1. 阅读 Changelog、ADR 和 migration；确认协议版本没有被无提示改变。
+2. 停止创建新 Run，等待 active Run 完成或显式取消。
+3. 停止 API/Worker；按平台流程创建并独立验证备份。仓库当前没有可引用的生产恢复演练。
+4. 安装锁定依赖或构建镜像。
+5. 只由 `make migrate` 或 Compose `migrate` 服务执行 preflight/upgrade/check。
+6. 启动 API/Worker/frontend，检查 head、`live/health/ready`、Worker probe 和 task gauges。
+7. 运行 `make smoke`；涉及可靠性/Compose 变更时运行 `make phase2-acceptance`。
+
+### 9.2 API、Worker 与 Redis 重启
+
+- API 重启不会拥有、取消或重新创建 Worker 租约；Run/Response 保持在数据库。
+- Worker 优雅停止先使用 grace；异常退出则等待 lease 自然过期。新 Worker 以递增 token 恢复缺失 Response，旧 token 写入被拒绝。
+- Redis 重启、清空或 ACK 丢失可能造成延迟/重复通知，但 DB reconciliation 和幂等唯一约束维持正确性。
+- 最后一题已提交但 finalize 前崩溃时，reconciliation 从完整 Response 重新聚合，不再次调用 Provider。
+
+这些语义已在隔离双 Worker Compose 验收中覆盖，但不构成多主机 HA、容量或恢复时间 SLA。
+
+### 9.3 Schema/code 回滚
+
+代码回滚必须与当前 schema、API 和 `protocol_version` 兼容。回退 `0002` 前必须停止 API/Worker 并确认没有 `pending/running`；downgrade 删除的租约/attempt 元数据不可逆，必须先接受其数据损失语义。
+
+不同 protocol version、Benchmark version 或 dataset hash 不能因回滚无提示混排。优先使用经过平台验证的完整备份恢复，而不是盲目 downgrade；本仓库当前没有 PostgreSQL→SQLite 自动回退或生产恢复演练。
+
+## 10. 当前限制与生产前工作
+
+| 领域 | 当前可靠执行基础 | 生产前仍需 |
+| --- | --- | --- |
+| 身份与权限 | 无鉴权，所有端点可读写 | 登录/API Token、RBAC、对象授权、管理员导入/Model 权限、审计 |
+| 网络 | API/frontend loopback；PG/Redis 内部 Compose 网络 | TLS 反向代理、可信 Host/代理、网络策略、认证与安全 headers |
+| PostgreSQL | 单实例、named volume、迁移/故障测试 | 托管/HA、TLS、最小权限角色、加密、备份/PITR、RPO/RTO 与真实恢复演练 |
+| Redis | 单实例 AOF、非权威通知层 | 认证/TLS、HA/容量/保留策略、监控；继续保持 DB 事实来源 |
+| Worker | 租约/心跳/fencing/重试/取消，默认单 Worker | 全局/Provider 限流、预算、完整背压、公平调度、滚动排空与容量规划 |
+| Secrets | 环境变量名入库，值只在 Worker 运行时读取 | Secret manager、短期凭据、轮换、每进程最小注入 |
+| SSRF/数据外发 | `base_url` 基本校验 | allowlist、DNS/IP/redirect 验证、出站代理、元数据阻断、外发审批 |
+| 可观测性 | 应用 JSON 日志、组件健康、DB gauges | 统一运行时日志、历史 metrics/traces、告警、完整审计、SLO |
+| 数据保护 | 显式单向 importer 与 hash 对账 | 保留/删除策略、静态加密、备份/PITR、灾备演练、受控导出 |
+| 供应链 | lockfile、基础 CI、版本标签镜像 | Action SHA/镜像 digest、漏洞门禁、SBOM、签名与 provenance |
+| 性能/HA | 真实故障正确性验收 | 压测、容量/成本基线、多主机故障、滚动升级和恢复时间验证 |
+
+Compose 可靠性验收只证明当前最小垂直切片在指定故障下保持数据库事实、逐题唯一性和协议 v1 评分；它不授权公网发布，也不把 Phase 2 标记为 completed。详细测试命令见 [TESTING.md](TESTING.md)，安全边界见 [SECURITY.md](SECURITY.md)，架构决定见 [ADR-0005](decisions/ADR-0005-durable-task-execution.md)。

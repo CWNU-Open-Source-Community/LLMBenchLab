@@ -4,6 +4,8 @@
 `http://127.0.0.1:8000/api/v1`。交互式 OpenAPI 文档位于 `/docs`，ReDoc 位于
 `/redoc`，原始规范位于 `/openapi.json`。
 
+Phase 2 可靠执行基础保持了 `/api/v1` 和 `llmbenchlab-protocol-v1` 评分含义，但将任务执行从 API 进程移到了数据库租约驱动的独立 Worker。Phase 2 仍为 `in_progress`；这些接口不代表已具备公网、HA、完整限流/预算/背压、历史可观测或审计能力。
+
 > MVP 没有身份认证或权限控制，只适合受信任的本机环境。不要把服务直接暴露到公网。
 
 ## 1. 通用约定
@@ -15,7 +17,7 @@
 - `score`、`completion_rate` 和 `answered_accuracy` 的单位均为百分比 `0..100`；逐题
   `score` 为 `0..1`。
 - Token usage 或费用无法从上游取得时为 `null`，不能解释为零。
-- 当前没有自定义请求 ID、幂等键或速率限制。
+- 调用方可传 `X-Request-ID`；服务只接受 1–128 字符、仅含字母数字与 `-._:` 的值，非法或缺失时生成 UUID。所有响应（包括通用 500）均回传 `X-Request-ID`，CORS 允许并暴露该 header。它用于诊断关联，不是请求幂等键。当前仍没有速率限制。
 
 ### 1.1 分页
 
@@ -95,13 +97,27 @@ Benchmark 校验错误还会提供文件、行、列或 JSON Pointer：
 }
 ```
 
-未捕获的服务端异常可能返回 `500`。调用方不应依赖英文 `message` 做分支，应优先使用稳定的业务 `code` 与 HTTP 状态码。
+未捕获的服务端异常返回不包含异常文本或内部细节的 `500`：
+
+```json
+{
+  "detail": {
+    "code": "internal_server_error",
+    "message": "An internal server error occurred"
+  }
+}
+```
+
+响应 header 中包含对应 `X-Request-ID`。调用方不应依赖英文 `message` 做分支，应优先使用稳定的业务 `code` 与 HTTP 状态码。
 
 ## 2. 接口总览
 
 | 方法 | 路径 | 成功状态 | 说明 |
 | --- | --- | ---: | --- |
+| GET | `/live` | 200 | API 进程存活，不访问外部依赖 |
 | GET | `/health` | 200 | 本地 API/数据库健康检查 |
+| GET | `/ready` | 200/503 | 数据库、Alembic head 和 Redis 组件就绪状态 |
+| GET | `/tasks/metrics` | 200 | 数据库当前任务 gauges |
 | GET | `/info` | 200 | 服务、协议和能力信息 |
 | GET | `/models` | 200 | 分页列出模型 |
 | POST | `/models` | 201 | 注册模型 |
@@ -114,7 +130,7 @@ Benchmark 校验错误还会提供文件、行、列或 JSON Pointer：
 | POST | `/benchmarks/import` | 201 | 上传并导入 Benchmark ZIP |
 | POST | `/benchmarks/reload-demo` | 200 | 幂等载入内置 Demo |
 | GET | `/runs` | 200 | 分页列出 Run |
-| POST | `/runs` | 202 | 创建并在进程内后台启动 Run |
+| POST | `/runs` | 202 | 持久化 Run 并 best-effort 发送 Worker 通知 |
 | GET | `/runs/{run_id}` | 200 | 轮询 Run 状态与汇总 |
 | POST | `/runs/{run_id}/cancel` | 200 | 请求协作式取消 |
 | GET | `/runs/{run_id}/responses` | 200 | 分页读取逐题证据 |
@@ -123,7 +139,25 @@ Benchmark 校验错误还会提供文件、行、列或 JSON Pointer：
 
 ## 3. 系统接口
 
-### 3.1 `GET /health`
+### 3.1 `GET /live`
+
+纯 API 进程存活检查，只读已缓存的配置，不访问数据库、Redis 或 Provider。
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/live
+```
+
+`200 OK`：
+
+```json
+{
+  "status": "live",
+  "version": "0.1.0",
+  "timestamp": "2026-08-25T06:00:00Z"
+}
+```
+
+### 3.2 `GET /health`
 
 只检查 API 和本地数据库，不访问任何模型 Provider，因此不需要 API Key，也不会产生模型费用。
 
@@ -155,7 +189,83 @@ curl -sS http://127.0.0.1:8000/api/v1/health
 }
 ```
 
-### 3.2 `GET /info`
+### 3.3 `GET /ready`
+
+就绪检查并行验证数据库连接、当前 Alembic heads 与 Redis ping，不访问 Provider，也不等待任何 Run 完成。
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/ready
+```
+
+数据库在 head 且 Redis 可用时返回 `200 OK`：
+
+```json
+{
+  "status": "ready",
+  "database": "ok",
+  "schema": "ok",
+  "queue": "ok",
+  "accepting_runs": true,
+  "database_reconciliation": "available",
+  "errors": [],
+  "version": "0.1.0",
+  "timestamp": "2026-08-25T06:00:00Z"
+}
+```
+
+Redis 不可用而数据库/head 可用时返回 `503 Service Unavailable`，但语义是可恢复的队列降级：
+
+```json
+{
+  "status": "degraded",
+  "database": "ok",
+  "schema": "ok",
+  "queue": "unavailable",
+  "accepting_runs": true,
+  "database_reconciliation": "available",
+  "errors": ["queue_unavailable"],
+  "version": "0.1.0",
+  "timestamp": "2026-08-25T06:00:00Z"
+}
+```
+
+此时 `POST /runs` 仍可先持久化并返回 `202`，独立 Worker 可仅靠数据库对账执行。数据库不可用或 schema 不在 head 时返回 `503`/`not_ready`，`accepting_runs=false`、`database_reconciliation=unavailable`。Redis URL 未配置的本地 DB-only 模式显示 `queue=disabled`，数据库/head 正常即为 `ready`。
+
+数据库检查通过 `asyncio.to_thread` 运行，readiness timeout 只限制 HTTP 等待时间，不能取消已进入线程的同步驱动调用。实际连接/资源上界仍由数据库 driver 与 pool timeout 约束。
+
+### 3.4 `GET /tasks/metrics`
+
+返回数据库当前任务事实派生的 gauges：
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
+```
+
+```json
+{
+  "pending": 2,
+  "due_pending": 1,
+  "running": 1,
+  "expired_running": 0,
+  "active_cancellation_requests": 0,
+  "retry_scheduled": 1,
+  "dead_lettered": 0,
+  "runs_with_queue_notification_error": 1,
+  "total_attempts": 3,
+  "timestamp": "2026-08-25T06:00:00Z"
+}
+```
+
+- `pending`：所有 pending Run；`due_pending` 仅包含 `next_attempt_at` 为空或已到期的部分。
+- `running` 与 `expired_running`：当前 running 以及按数据库时间已过租约的子集。
+- `active_cancellation_requests`：尚在 pending/running 且已请求取消的 Run。
+- `retry_scheduled`、`dead_lettered`：已安排后续 attempt 和已进入权威 dead-letter 终态的 Run。
+- `runs_with_queue_notification_error`：`last_error=queue_notification_unavailable` 的当前 Run 数。
+- `total_attempts`：当前 Run 表中 `attempt_count` 的总和。
+
+这些都是查询时点的 DB-derived gauges，不是完整事件 counters、历史延迟、审计记录或监控面板；它们绝不能覆盖数据库任务状态。
+
+### 3.5 `GET /info`
 
 请求：
 
@@ -175,7 +285,7 @@ curl -sS http://127.0.0.1:8000/api/v1/info
   "capabilities": {
     "providers": ["mock", "openai_compatible"],
     "question_types": ["exact_match", "multiple_choice", "numeric"],
-    "runner": "in_process_mvp"
+    "runner": "independent_database_lease_worker"
   }
 }
 ```
@@ -545,7 +655,7 @@ Run 响应示例（后续接口引用为 `RunRead`）：
     "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
     "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true},
     "evaluator": {"name": "builtin-objective", "version": "1.0", "mapping": {"exact_match": "exact_match_v1", "multiple_choice": "multiple_choice_v1", "numeric": "numeric_v1"}},
-    "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "restart_recovery": "mark_failed_without_resume"}
+    "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "task_delivery": "at_least_once", "task_max_attempts": 3, "restart_recovery": "database_lease_resume_missing_responses"}
   },
   "benchmark_hash_snapshot": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe",
   "prompt_template_snapshot": {"system": "你正在运行一个离线演示评测。Follow the requested answer format and return only the short final answer.", "user": "{prompt}\n{choices}"},
@@ -562,6 +672,16 @@ Run 响应示例（后续接口引用为 `RunRead`）：
   "output_tokens": 30,
   "estimated_cost": 0.0,
   "cancellation_requested": false,
+  "attempt_count": 1,
+  "max_attempts": 3,
+  "lease_owner": null,
+  "lease_token": 1,
+  "lease_expires_at": null,
+  "heartbeat_at": null,
+  "next_attempt_at": null,
+  "last_enqueued_at": "2026-08-24T08:03:00Z",
+  "last_error": null,
+  "dead_lettered_at": null,
   "started_at": "2026-08-24T08:03:01Z",
   "finished_at": "2026-08-24T08:03:02Z",
   "created_at": "2026-08-24T08:03:00Z",
@@ -570,6 +690,22 @@ Run 响应示例（后续接口引用为 `RunRead`）：
 ```
 
 状态集合：`pending`、`running`、`completed`、`failed`、`cancelled`。
+
+可靠执行字段的语义：
+
+| 字段 | 含义 |
+| --- | --- |
+| `attempt_count` | 已成功取得 Run 租约的次数；从 0 开始，不是逐题 Provider retry 次数 |
+| `max_attempts` | Run 租约 attempt 上限；新 Run 从 Worker 配置冻结 |
+| `lease_owner` | 当前 Worker ID；只在 `running` 且租约活动时非空 |
+| `lease_token` | 单调递增的 fencing generation；租约释放后保留最后值，防止旧 Worker 写入 |
+| `lease_expires_at` / `heartbeat_at` | 由数据库时间裁决的租约截止点和最近心跳；非 running 时为 `null` |
+| `next_attempt_at` | 可重试失败后的最早再领取时间；只用于 pending |
+| `last_enqueued_at` | 最近一次 Redis 通知成功的数据库时间；为空不代表 Run 不可恢复 |
+| `last_error` | 最近一次执行/通知层的稳定脱敏错误码；与终态展示的 `error_message` 不同 |
+| `dead_lettered_at` | attempt 耗尽且 Response 集不完整时的权威 dead-letter 时间；只用于 failed |
+
+`model_parameters_snapshot.execution.retry_policy` 是每题 Adapter 的有限重试；`task_delivery`、`task_max_attempts` 和 `restart_recovery` 是 Run/Worker 恢复语义。新 Run 固定为 `at_least_once` 和 `database_lease_resume_missing_responses`，恢复时跳过已有 Response。这不保证 Provider 调用或计费 exactly-once；若进程在 Provider 响应后、本地提交前崩溃，可能再次调用 Provider，但数据库仍只保留一条计分/费用 Response 证据。
 
 ### 6.2 `GET /runs`
 
@@ -596,7 +732,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs?run_status=completed&protocol_versio
         "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
         "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true},
         "evaluator": {"name": "builtin-objective", "version": "1.0", "mapping": {"exact_match": "exact_match_v1", "multiple_choice": "multiple_choice_v1", "numeric": "numeric_v1"}},
-        "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "restart_recovery": "mark_failed_without_resume"}
+        "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "task_delivery": "at_least_once", "task_max_attempts": 3, "restart_recovery": "database_lease_resume_missing_responses"}
       },
       "benchmark_hash_snapshot": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe",
       "prompt_template_snapshot": {"system": "你正在运行一个离线演示评测。Follow the requested answer format and return only the short final answer.", "user": "{prompt}\n{choices}"},
@@ -613,6 +749,16 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs?run_status=completed&protocol_versio
       "output_tokens": 30,
       "estimated_cost": 0.0,
       "cancellation_requested": false,
+      "attempt_count": 1,
+      "max_attempts": 3,
+      "lease_owner": null,
+      "lease_token": 1,
+      "lease_expires_at": null,
+      "heartbeat_at": null,
+      "next_attempt_at": null,
+      "last_enqueued_at": "2026-08-24T08:03:00Z",
+      "last_error": null,
+      "dead_lettered_at": null,
       "started_at": "2026-08-24T08:03:01Z",
       "finished_at": "2026-08-24T08:03:02Z",
       "created_at": "2026-08-24T08:03:00Z",
@@ -629,7 +775,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs?run_status=completed&protocol_versio
 
 ### 6.3 `POST /runs`
 
-创建后先持久化，再立即返回 Run；执行由当前 API 进程内的后台任务完成。
+创建顺序固定为：先在数据库提交 `pending` Run 及完整快照，再 best-effort 发布 Redis Streams 通知，然后返回 Run。API 不加载 Adapter，不执行题目；独立 Worker 从 Redis 通知或数据库 reconciliation 获取工作。
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8000/api/v1/runs \
@@ -645,9 +791,9 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/runs \
   }'
 ```
 
-`202 Accepted` 返回 `RunRead`，通常 `status="pending"`。客户端应轮询 `GET /runs/{id}`，
-不能把 `202` 当作评测已完成。调度被拒绝时同一响应中的状态可能已是 `failed`，
-`error_message="task_schedule_rejected"`。
+`202 Accepted` 返回 `RunRead`，通常 `status="pending"`。客户端应轮询 `GET /runs/{id}`，不能把 `202` 当作评测已完成。数据库 commit 失败时绝不发布通知，并返回通用脱敏 `500`。数据库 commit 成功但 Redis XADD 不可用时，不回滚或复制 Run；API 仍返回 `202`，Run 可能显示 `last_error="queue_notification_unavailable"`、`last_enqueued_at=null`，Worker 可仅靠数据库对账恢复。
+
+通知使用 at-least-once 语义。消息重复、ACK 结果不确定或 Redis 数据丢失都不改变数据库事实；终态或已被有效 lease 执行的重复消息是 no-op。
 
 错误：
 
@@ -688,10 +834,10 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-44444
 `200 OK` 返回最新 `RunRead`。行为如下：
 
 - `pending`：立即转为 `cancelled`。
-- `running`：写入 `cancellation_requested=true`；正在执行的单题可能结束，随后转为 `cancelled`。
+- `running`：原子写入 `cancellation_requested=true`；当前有效 Worker 在心跳/题目边界聚合已有证据并转为 `cancelled`。若 Worker 已死，数据库 reconciliation 在租约过期后收敛取消，不再领取执行。
 - 已为 `completed`、`failed` 或 `cancelled`：幂等返回原记录。
 
-不存在返回 `404 run_not_found`。取消不是硬中断，响应返回时不保证 Run 已进入终态。
+不存在返回 `404 run_not_found`。取消不是硬中断，响应返回时不保证 Run 已进入终态；已发出且无法撤销的 Provider 请求可能继续至返回或超时，但失效 token 不能再写入 Response/费用/进度。
 
 ### 6.6 `GET /runs/{run_id}/responses`
 
@@ -841,8 +987,7 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/summary
 
 - CORS 只允许配置中的显式前端 Origin，拒绝通配符；默认开发 Origin 为
   `http://localhost:5173` 和 `http://127.0.0.1:5173`。
-- 允许的方法为 `GET`、`POST`、`PATCH`、`DELETE`、`OPTIONS`，允许的请求头仅
-  `Accept`、`Content-Type`，不启用跨域凭据。
+- 允许的方法为 `GET`、`POST`、`PATCH`、`DELETE`、`OPTIONS`，允许的请求头为
+  `Accept`、`Content-Type`、`X-Request-ID`，并向浏览器暴露响应 `X-Request-ID`；不启用跨域凭据。
 - Run 创建后建议每 0.5–2 秒轮询一次，见到终态即停止；MVP 没有 WebSocket。
-- 进程重启后，遗留 `running` Run 会被标为 `failed`，不会自动续跑。客户端应显示
-  `error_message`，由用户显式创建新 Run。
+- API 重启不拥有也不改写 Run；Worker 重启或异常退出后，未完成 Run 在租约过期后被接管，已持久 Response 保留且不重复写入。客户端应继续轮询同一 Run ID，并可使用 `attempt_count`、`last_error`、`dead_lettered_at` 和终态 `error_message` 展示恢复轨迹。

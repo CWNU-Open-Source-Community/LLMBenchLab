@@ -208,7 +208,7 @@ Run 增加以下可靠性元数据：
 - 暂停真实 Redis 后创建 Run，断言 `202`、可恢复 pending/错误状态；恢复 Redis 后由数据库 reconciliation 完成。
 - 验证 pending/running 取消、lease 过期、旧 token heartbeat/Response/finalize 拒绝、有限重试和 dead-letter。
 - PostgreSQL 与 SQLite 均运行新 revision `upgrade -> downgrade -> upgrade` 和 `alembic check`；PostgreSQL 还要验证约束与并发语义。
-- SQLite→PostgreSQL 导入按表比较行数、主键集合和 canonical hash；源 SQLite hash 不变，目标冲突和中途失败整体拒绝/回滚。
+- SQLite→PostgreSQL 导入按表比较行数、主键集合和 canonical hash；源 SQLite hash 不变，目标冲突和提交前中途失败整体拒绝/回滚。另在真实 PostgreSQL 注入 COMMIT 确认丢失和已确认提交后的复核/输出失败，分别验证 `commit_outcome_unknown` 与 `committed_but_verification_failed` 不会被误报为普通回滚失败。
 - 完整执行 Phase 1 API/协议回归、15 题离线 Mock Smoke、前后端 lint/test/build 和完整 Compose `up --build --wait`。
 
 若任何真实 PostgreSQL/Redis/进程重启关键场景未运行或失败，不得把可靠执行基础标为完成；若限流、预算、背压等后续项未完成，Phase 2 总状态仍为 `in_progress`。
@@ -228,7 +228,8 @@ Run 增加以下可靠性元数据：
 1. 先固定/备份现有数据库并停止旧 API 写入。
 2. Alembic 新 revision 只新增可靠性字段、约束和索引；既有终态 Run/Response 不变。升级边界上的旧 `running` Run 仍受其冻结的 Phase 1 `restart_recovery=mark_failed_without_resume` 语义约束：普通中断 Run 聚合已有证据后收敛为 `failed`，已请求取消的 Run 收敛为 `cancelled`，二者都保留逐题 Response 和协议快照。只有由新代码创建、快照明确为 `database_lease_resume_missing_responses` 的 Run 才进入租约恢复路径。
 3. 启动 PostgreSQL、Redis 和一次性 migration 服务，再启动 API 与 Worker；不得让多个服务各自并发执行 Alembic。
-4. SQLite→PostgreSQL 为单向、显式导入：源需在当前 Alembic head 且停止写入，目标需为空；在一个目标事务内保持 ID/JSON/Decimal/UTC/协议快照，并在提交前后输出行数、主键集合和 canonical hash 对账。源文件保持只读。
+4. SQLite→PostgreSQL 为单向、显式导入：源需在当前 Alembic head 且停止写入，目标需为空且不得同时服务应用；在一个目标事务内保持 ID/JSON/Decimal/UTC/协议快照，并在提交前输出行数、主键集合和 canonical hash 对账。源文件保持只读，带凭据的目标 DSN 从环境变量读取而不进入 argv。
+5. 导入提交边界必须区分三种非成功结果：提交前异常回滚并返回 exit 2；PostgreSQL 未确认 `COMMIT` 时返回 `commit_outcome_unknown`/exit 4，因事务原子性目标可能为空或已完整；已确认提交后的稳定只读快照或摘要输出失败时返回 `committed_but_verification_failed`/exit 3，目标已经提交。后两者都禁止盲目重试，必须先核验目标；PostgreSQL→SQLite 不提供自动反向同步。
 
 ### schema downgrade
 
@@ -255,3 +256,4 @@ Run 增加以下可靠性元数据：
 | --- | --- | --- |
 | 2026-08-25 | Accepted | Phase 2 可靠执行基础在实现前固定一致性、失败与回滚语义 |
 | 2026-08-25 | Clarified upgrade/finalization | 保持旧 Phase 1 冻结恢复语义，并覆盖完整 Response 后、终态提交前崩溃的恢复窗口 |
+| 2026-08-25 | Clarified importer commit boundary | 区分提交前回滚、COMMIT 结果未知和已确认提交后的复核失败，避免运维盲目重试 |

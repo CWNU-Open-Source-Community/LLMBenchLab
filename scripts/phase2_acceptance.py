@@ -43,6 +43,11 @@ TASK_STREAM = "llmbenchlab:runs:v1"
 TASK_GROUP = "llmbenchlab-workers-v1"
 PROJECT_PATTERN = re.compile(r"^llmbenchlab-p2-[0-9a-f]{12}$")
 SAFE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+DATABASE_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<head>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<fraction>\d{1,6}))?"
+    r"(?P<offset>[+-]\d{2}:\d{2})?$"
+)
 LOCAL_PASSWORD = "llmbenchlab-local-only"
 DEFAULT_ARTIFACTS_ROOT = Path(".pytest_cache/artifacts/phase2-acceptance")
 
@@ -115,7 +120,15 @@ def allocate_loopback_port() -> int:
 
 
 def parse_datetime(value: str) -> dt.datetime:
-    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    normalized = value.strip()
+    normalized = normalized[:-1] + "+00:00" if normalized.endswith("Z") else normalized
+    match = DATABASE_TIMESTAMP_PATTERN.fullmatch(normalized)
+    if match is not None:
+        fraction = match.group("fraction")
+        normalized = match.group("head")
+        if fraction is not None:
+            normalized += "." + fraction.ljust(6, "0")
+        normalized += match.group("offset") or ""
     parsed = dt.datetime.fromisoformat(normalized)
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
@@ -470,6 +483,20 @@ class Phase2Acceptance:
         preexisting = self.compose("ps", "-a", "-q", timeout=20).stdout.strip()
         self.require(not preexisting, "generated project unexpectedly already has containers")
 
+        timestamp_variants = {
+            "2026-08-25T06:51:51Z": 0,
+            "2026-08-25T06:51:51.8+00:00": 800000,
+            "2026-08-25T06:51:51.87456+00:00": 874560,
+            "2026-08-25T06:51:51.874560+00:00": 874560,
+        }
+        for value, expected_microsecond in timestamp_variants.items():
+            parsed = parse_datetime(value)
+            self.require(
+                parsed.microsecond == expected_microsecond,
+                "database timestamp parser lost fractional precision",
+                {"value": value, "parsed": parsed.isoformat()},
+            )
+
         review = {
             "status": "passed",
             "at": utc_now(),
@@ -490,6 +517,7 @@ class Phase2Acceptance:
             "isolated_project_volumes": True,
             "artifacts_gitignored": str(relative_artifacts),
             "real_provider_credentials_removed": ["OPENAI_API_KEY", "LLMBENCHLAB_DEMO_API_KEY"],
+            "database_timestamp_variants_checked": len(timestamp_variants),
         }
         git_commit = self.run_command(
             ["git", "rev-parse", "HEAD"], timeout=10, record=False

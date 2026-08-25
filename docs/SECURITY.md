@@ -2,7 +2,7 @@
 
 ## 1. 适用范围与安全结论
 
-LLMBenchLab MVP 是供个人开发者在受信任机器上使用的本地评测工具，不是可直接暴露公网的服务。当前没有登录、授权、租户隔离、请求限流、TLS 终止或生产级秘密管理。任何能够访问 API 的人都能读取题目与参考答案、注册模型、导入数据集、启动可能产生费用的 Run，并读取原始模型输出。
+LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用的本地评测工具，不是可直接暴露公网的服务。Phase 2 已交付 PostgreSQL、Redis 通知和独立 Worker 组成的可靠执行基础，但当前仍没有登录、授权、租户隔离、请求限流、TLS 终止或生产级秘密管理。任何能够访问 API 的人都能读取题目与参考答案、注册模型、导入数据集、启动可能产生费用的 Run，并读取原始模型输出。
 
 安全默认姿势是：只监听本机或可信开发网络、优先使用 Mock、只导入自己审查过的数据集、只配置可信的 Provider 地址，并为数据库与备份应用操作系统权限保护。
 
@@ -15,7 +15,7 @@ LLMBenchLab MVP 是供个人开发者在受信任机器上使用的本地评测�
 - Provider API Key、访问令牌及其所在环境变量。
 - Benchmark 题目、参考答案、metadata、许可证与来源信息；未来可能包含私有数据。
 - 原始模型回答、解析结果、错误信息、运行配置快照和排行榜证据。
-- SQLite 数据库及其备份、宿主机文件和本地网络访问能力。
+- PostgreSQL/SQLite 中的数据库事实、SQLite 源库与备份、Redis AOF/队列元数据、宿主机文件和本地网络访问能力。
 - 用户的 Provider 配额、预算与账号信誉。
 - GitHub 仓库、Actions 权限、发布产物和依赖供应链。
 
@@ -27,10 +27,12 @@ LLMBenchLab MVP 是供个人开发者在受信任机器上使用的本地评测�
 | API 客户端/浏览器 | 仅来自显式配置的本地前端 | 无鉴权接口被滥用、数据被读取或篡改 |
 | Benchmark 作者 | 文件内容不可信，来源需人工判断 | 资源消耗、提示注入、答案污染、敏感数据外发 |
 | OpenAI-compatible Provider | 地址和服务由用户信任 | 收集提示、伪造响应、消耗预算、返回恶意文本 |
+| 独立 Worker | 受信任的执行边界，持有数据库/Redis 凭据并按需读取 Provider Key | 凭据泄漏、越权读写全部评测事实、重复外部调用 |
+| PostgreSQL / Redis | 只在受控内部网络可达，数据卷由受信操作者保护 | 数据事实被篡改、任务被干扰、运行元数据泄漏或服务不可用 |
 | GitHub/CI/依赖源 | 外部供应链 | 依赖投毒、Actions 权限滥用、秘密泄漏 |
-| 宿主机上的其他进程/用户 | 不在应用隔离范围内 | 读取进程环境、SQLite、日志或备份 |
+| 宿主机上的其他进程/用户 | 不在应用隔离范围内 | 读取进程环境、数据库卷、SQLite、日志或备份 |
 
-主要入口是 Model CRUD 中的 `base_url`、Benchmark ZIP 上传、Run 创建、题目/响应读取、前端渲染、日志、数据库/备份以及依赖安装与 CI。MVP 不执行 Benchmark 中的代码，这一点显著缩小了当前攻击面。
+主要入口是 Model CRUD 中的 `base_url`、Benchmark ZIP 上传、Run 创建、题目/响应读取、前端渲染、API/Worker 日志、PostgreSQL/Redis、SQLite→PostgreSQL 导入、数据库/备份以及依赖安装与 CI。当前系统不执行 Benchmark 中的代码，这一点显著缩小了攻击面。
 
 ### 2.3 重点风险与当前状态
 
@@ -42,15 +44,16 @@ LLMBenchLab MVP 是供个人开发者在受信任机器上使用的本地评测�
 | Prompt/数据外发 | 私有题目被发送给 Provider | 只有用户创建 Run 时才发送 | 无数据分级、DLP、Provider 策略或告知确认 |
 | XSS/内容注入 | 窃取页面数据或误导操作者 | React 默认文本转义；服务端不执行内容 | 未来引入 Markdown/HTML 时可能破坏边界；无 CSP |
 | 未授权访问 | 读写全部评测数据、启动付费 Run | 建议仅绑定本机；CORS 显式配置 | CORS 不是鉴权，非浏览器客户端不受其约束 |
-| 费用滥用 | 大量上游请求造成费用 | Run 并发较小，重试次数有限 | 无用户预算、速率限制、题量成本预检或熔断 |
-| 数据丢失/篡改 | 证据不可复现 | SQLite 外键、Hash 与 Run 快照 | 数据库未加密、无审计日志、备份需用户负责 |
-| 后台任务中断 | Run 不完整 | 启动时把遗留 `running` 标记 `failed` | 不会自动恢复；不是生产级可靠队列 |
+| 费用滥用 | 大量或重复上游请求造成费用 | Run 题内并发为 1–4、Run attempt 有限、本地 Response 幂等 | 无 Provider 速率限制、预算、完整背压或熔断；Provider 调用不是 exactly-once |
+| 数据丢失/篡改 | 证据不可复现 | 数据库约束、Hash、Run 快照、租约 fencing；PostgreSQL 是任务事实来源 | 数据库/备份未加密、无完整审计日志，访问与恢复仍由用户负责 |
+| 后台任务中断 | Run 不完整或重复执行 | 独立 Worker、数据库租约/心跳/fencing、有限重试、dead-letter、数据库对账 | 不构成生产 HA；外部 Provider 副作用不能由本地幂等约束去重 |
+| Redis 暴露或篡改 | 伪造/重放任务通知、拒绝服务、元数据泄漏 | Compose 不发布 Redis 宿主端口；消息不是事实来源且不含 Prompt/Key | 本地 Compose 未启用 Redis ACL/TLS；暴露到不可信网络会破坏可用性与保密性 |
 | 供应链攻击 | 执行恶意依赖/Action | Python/Node lockfile、CI 检查 | 尚无强制 SBOM、签名验证或持续漏洞门禁 |
 
 ### 2.4 明确不在 MVP 保证内的事项
 
 - 对拥有宿主机账号、容器宿主权限或数据库文件权限的攻击者提供隔离。
-- 保证第三方 Provider 不保存、训练或泄漏收到的 Prompt。
+- 保证第三方 Provider 不保存、训练或泄漏收到的 Prompt，或对 Provider 调用/计费提供 exactly-once。
 - 对结果真实性做密码学证明；Dataset SHA-256 用于一致性，不是发布者签名。
 - 公网抗攻击、多租户隔离、合规认证、灾难恢复 SLA。
 - 安全执行任意代码。当前格式没有代码题，任何 Benchmark 内容都不会被执行。
@@ -61,7 +64,7 @@ LLMBenchLab MVP 是供个人开发者在受信任机器上使用的本地评测�
 
 1. Model 记录保存 `api_key_env`，例如 `LOCAL_COMPAT_API_KEY`，而不是密钥值。
 2. 创建 Run 时快照保存的仍是环境变量名称。
-3. `OpenAICompatibleAdapter` 在请求发生前从当前进程环境读取对应值。
+3. `OpenAICompatibleAdapter` 只在独立 Worker 实际执行题目时从 Worker 进程环境读取对应值。
 4. Key 只在内存中用于构造 `Authorization: Bearer ...`，不进入 Model/Run/Response Schema。
 5. 环境变量不存在时，该题记录安全的 `missing_api_key` 错误，不会尝试无凭据联网。
 
@@ -76,10 +79,19 @@ LLMBenchLab MVP 是供个人开发者在受信任机器上使用的本地评测�
 
 数据库和 API 会公开环境变量**名称**。名称本身不应编码账号、项目机密或密钥片段。
 
+### 3.3 Worker 秘密边界
+
+- Provider Key 只应注入需要发起上游请求的 Worker，不应注入 frontend、浏览器、migrate 容器；API 只需处理 `api_key_env` 名称。当前本地 Compose 没有替用户注入任何真实 Provider Key，也不是 secrets manager。
+- 本地 `make dev` 会让 API、Worker 和 frontend 开发进程继承同一份 `.env`；只有 Worker 代码会读取已登记的 Provider Key，且 Vite 不会自动把非 `VITE_*` 变量打入客户端，但这仍不构成进程级秘密隔离。需要更严格边界时应分别启动进程，并只向 `make worker`/Worker 容器注入 Key。
+- Worker 同时需要数据库与 Redis 连接能力。生产设计应拆分 API/Worker/迁移数据库角色，限制 Worker 只能访问所需表和操作，并用独立的 Redis ACL、短期凭据及轮换流程代替共享本地凭据。
+- Worker 日志、崩溃转储、进程列表和诊断端点都属于秘密边界。不得把环境、DSN、Authorization header、Prompt 或原始 Provider 请求写入日志或 artifact。
+- at-least-once 只保证任务最终可再次处理；若 Worker 在 Provider 已响应而本地 Response 提交前崩溃，接管 Worker 可能重复上游调用和计费。本地 `(run_id, question_id)` 唯一约束不能消除这一外部副作用。
+
 ## 4. 日志与错误脱敏
 
-当前 OpenAI-compatible Adapter 的错误处理会：
+当前应用日志和 OpenAI-compatible Adapter 的错误处理会：
 
+- 对 LLMBenchLab 应用 logger 使用结构化 JSON、请求/Run correlation ID 和字段 allowlist；API 只记录代码定义的 route template，不记录原始查询串或请求体。
 - 用 `[REDACTED]` 替换当前 API Key 的精确值。
 - 识别常见 Bearer、Authorization、API key、token 和 secret 表达形式。
 - 把上游错误折叠为单行并截断到 500 字符。
@@ -88,8 +100,8 @@ LLMBenchLab MVP 是供个人开发者在受信任机器上使用的本地评测�
 仍需遵守以下规则：
 
 - 不记录 `os.environ`、HTTP headers、完整异常 locals、请求体或 `.env` 内容。
-- 生产前增加统一的结构化日志脱敏 filter，而不能只依赖 Adapter 局部清洗。
-- Uvicorn access log 会记录方法、路径和状态码；因此秘密不得出现在 URL、查询参数或路径。
+- 结构化 JSON/字段 allowlist 只覆盖 LLMBenchLab 应用 logger，不覆盖全部 Uvicorn、access log、SQLAlchemy、Redis client 或其他第三方 logger；部署侧必须另行统一采集、过滤和保留策略。
+- Uvicorn access log 仍可能记录方法、原始路径和状态码；因此秘密不得出现在 URL、查询参数或路径，反向代理 access log 也必须应用同一规则。
 - `DEBUG` 仅用于无秘密的本地排障。SQL echo、HTTP wire logging 和第三方 SDK debug logging 默认关闭。
 - 原始模型回答可能含供应商回显的敏感内容。它会作为评测证据持久化并通过 Responses API 返回，不能把“不是 API Key”误当成“可以公开”。
 - 异常报告、CI artifact 和截图发出前再次人工检查，不把数据库或 `.env` 整体上传。
@@ -168,24 +180,41 @@ MVP **没有代码执行能力**。在 Phase 3 之前不得通过 `subprocess`�
 
 仅“在 Docker 中运行”不等于安全沙箱。
 
-## 8. CORS 与网络暴露
+## 8. CORS、健康探针与网络暴露
 
 - CORS Origin 来自配置；通配符 `*` 会在启动配置校验时被拒绝。
-- 默认只允许本地 Vite Origin；允许的方法为 `GET/POST/PATCH/DELETE/OPTIONS`，允许头为 `Accept` 和 `Content-Type`，`allow_credentials=false`。
+- 默认只允许本地 Vite Origin；允许的方法为 `GET/POST/PATCH/DELETE/OPTIONS`，允许头为 `Accept`、`Content-Type` 和 `X-Request-ID`，并向浏览器暴露 `X-Request-ID`；`allow_credentials=false`。
 - CORS 只约束浏览器，不阻止 curl、脚本、服务端请求或被攻陷的同源页面，不能替代认证、授权或防火墙。
 - 生产前需要反向代理 TLS、认证/RBAC、请求体上限、速率限制、可信代理配置、安全响应头与审计日志。
 - 不要在未理解代理头行为时信任 `X-Forwarded-*`；限制可信代理并验证 Host。
 
-本地建议让 API 绑定 `127.0.0.1`。绑定 `0.0.0.0` 是容器/局域网可达配置，不代表安全发布。
+Compose 默认只把 API 和 frontend 端口发布到宿主 `127.0.0.1`，PostgreSQL 与 Redis 不发布宿主端口；容器内 API 的 `0.0.0.0` 监听只在 Compose 网络中使用。这些是本地暴露面缩减，不是认证、TLS、防火墙或生产网络策略。
 
-## 9. 数据库、响应与备份
+健康端点也不是访问控制或完整监控：
 
-- SQLite 数据库、备份和容器 volume 都是明文静态数据；用专用系统账号和最小文件权限保护，不放在云盘公共共享目录。
+- `/live` 只证明 API 进程能响应；`/health` 只检查数据库连接；`/ready` 检查数据库、Alembic head 与 Redis，并可能在 Redis 故障时返回 `503/degraded`，同时保留数据库提交和对账能力。
+- `/tasks/metrics` 只公开数据库当前状态派生的 gauges。它没有历史 counters、延迟、完整审计或租户隔离；在无鉴权部署中，这些计数本身也是可被读取的运行元数据。
+- Worker 容器 probe 只检查数据库/head 和队列依赖能力。Redis 不可用时它会报告 degraded 但以成功退出保留数据库对账路径；它**不证明 Worker 主事件循环仍在领取、心跳或推进任务**，不能替代 watchdog、进度告警或进程级 liveness。
+- API readiness 把同步数据库检查放入 `asyncio.to_thread` 并限制等待时间；asyncio 超时不会取消已进入线程的数据库驱动调用，实际资源占用仍由数据库连接/驱动/池 timeout 约束。不得把 HTTP 探针 timeout 当作数据库查询硬中止。
+
+Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL/TLS，不能暴露公网或共享开发网；更高信任级别部署必须启用 Redis ACL/认证、TLS、最小网络可达、磁盘权限与备份策略，并限制危险管理命令。Redis 消息只含内部 ID、版本与 correlation ID，不含 Prompt、答案、Provider Key 或权威 Run 状态；清空、丢失或重复消息应只影响延迟/可用性，数据库事实不能被 Redis 覆盖。
+
+## 9. 数据库、响应、迁移与备份
+
+- PostgreSQL/SQLite 数据库、Redis AOF、备份和容器 volume 都是明文静态数据；用专用系统账号和最小文件权限保护，不放在云盘公共共享目录。Compose 中的 `llmbenchlab-local-only` PostgreSQL 密码只是隔离本地开发占位，不是生产秘密。
 - 备份可能比在线数据库保留更久，应应用同等或更严格的访问、加密、保留和销毁策略。
 - Responses API 包含 raw response、Prompt、标准答案和错误；Questions API 包含参考答案和 metadata。不要把它们接入公开 Dashboard。
 - Run 快照用于复现，会保存模型/Benchmark 标识和环境变量名称。设计环境变量名时避免包含机密业务信息。
 - 删除 Model 会在存在历史 Run 时被拒绝，以保护证据；MVP 尚无合规删除、匿名化或数据生命周期功能。
 - 备份与恢复步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
+显式 SQLite→PostgreSQL importer 会复制五张核心表的**完整内容**，包括题目、参考答案、Prompt/模型快照、原始回答、错误和 `api_key_env` 名称。它只能在受信环境中针对停止写入、已在 Alembic head 的源库和空目标执行；源库、目标库、对账输出与中间备份必须按最高敏感数据等级保护。工具输出只包含行数和内容无关的 SHA-256 摘要，但摘要并不等于加密或访问控制。
+
+- 含凭据的目标 DSN 必须通过 `--target-env ENV_VAR`（默认 `LLMBENCHLAB_DATABASE_URL`）读取；`--target` 只接受无密码 URL。仍需防止环境、进程转储和 CI 配置泄露 DSN。
+- 退出码 `0` 表示提交后对账成功；退出码 `2` 表示提交前失败并回滚目标事务。
+- 退出码 `4` 表示 PostgreSQL 未确认 `COMMIT` 结果：原子事务保证目标应为“空”或“完整”，但客户端不知道是哪一种。**禁止盲目重试**，必须先检查目标五表、Alembic head 和已有对账证据。
+- 退出码 `3` 表示 `COMMIT` 已确认、但提交后验证或报告失败；导入已经提交。**禁止盲目重试或把它描述为回滚**，应先只读核验目标，必要时从已验证备份执行人工恢复。
+- 工具是单向导入，不提供 PostgreSQL→SQLite 自动回迁。schema downgrade 也不等于数据平台回滚。
 
 ## 10. 依赖与构建供应链
 
@@ -196,7 +225,7 @@ MVP **没有代码执行能力**。在 Phase 3 之前不得通过 `subprocess`�
 - GitHub Actions 及容器基础镜像也属于依赖。公开发布前应将 Action 固定到完整 commit SHA、镜像固定 digest、生成 SBOM，并启用 Dependabot/Renovate 或等价流程。
 - 自动升级不得绕过测试、协议兼容性和安全 Review。
 
-当前 MVP 的 lockfile 与 CI 只能降低漂移，尚未提供签名制品、SLSA provenance 或强制漏洞阻断门禁。
+当前开发基线的 lockfile 与 CI 只能降低漂移，尚未提供签名制品、SLSA provenance 或强制漏洞阻断门禁。
 
 ## 11. GitHub Secrets 与仓库卫生
 
@@ -229,7 +258,8 @@ Mock CI 不需要任何 Provider Key，也禁止配置真实模型凭据。未�
 
 - 身份认证、对象级授权、管理员权限、审计日志和安全会话/API Token 设计。
 - SSRF 应用层校验与网络层出站 allowlist。
-- PostgreSQL、可靠 Worker、幂等/恢复、全局并发、速率与预算上限。
+- Provider 级限流、全局预算、完整背压、公平调度、容量上限与生产级 Worker 隔离；当前可靠执行基础不等于生产 HA。
+- 完整历史 counters/延迟指标、不可抵赖审计事件、Worker 主循环 liveness、告警与经过演练的运行手册。
 - TLS、反向代理请求体限制、安全响应头、CSP、Host/代理信任配置。
 - 私有题目、参考答案、raw response 的访问控制、静态加密、保留与删除策略。
 - 集中 secrets manager、Key 轮换、备份加密与恢复演练。

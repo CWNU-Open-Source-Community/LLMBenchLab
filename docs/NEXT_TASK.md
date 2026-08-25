@@ -1,99 +1,107 @@
-# 下一任务：Phase 2 可靠任务执行基础
+# 下一任务：Phase 2 并发治理、审计与性能基线
 
-> 建议开始时间：Phase 1 合并并建立基线 commit 后  
-> 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)  
-> 前置状态：Phase 0、Phase 1 已完成；当前版本 `0.1.0` development baseline
+> 建议开始时间：可靠任务执行基础提交并通过最终门禁后
+> 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
+> 前置状态：Phase 0–1 `completed`；Phase 2 `in_progress`
 
 ## 背景
 
-Phase 1 已交付可离线运行的 FastAPI、React、SQLite 垂直链路。Run 由 API 进程内的 `EvaluationTaskManager` 执行，使用原子状态领取、低并发、单题错误隔离和协作式取消；进程重启时，遗留 `running` Run 会被标为 `failed`，不会自动续跑。这一设计适合个人本地 MVP，但不支持多 API 实例、可靠恢复或高写并发。
+Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，Redis Streams 只提供可丢失、可重复的 at-least-once 通知，独立 Worker 通过数据库租约、心跳和 fencing token 执行 Run。API/Worker 重启、实际租约 owner 强杀、Redis 中断、取消、重复投递、迁移往返及 SQLite→PostgreSQL 导入均有真实本地证据，且没有改变 `llmbenchlab-protocol-v1` 的评分含义。
 
-## 当前仓库状态
+这还不是完整的 Phase 2。当前缺少 Provider/Model/Run 级并发与速率治理、预算硬边界、完整背压与公平调度；现有 `/tasks/metrics` 只是数据库当前事实 gauges，不是历史 counters、延迟分布或审计事件；也尚无可复核的容量/性能基线。因此 Phase 2 必须继续保持 `in_progress`。
 
-- 五个核心实体、由 `0000` 与 `0001` 组成的两-revision Alembic 线性迁移链及 SQLite 默认配置已稳定。
-- `EvaluationRunner` 与 Adapter/Evaluator 已分层，130 个后端测试及离线 Smoke Test 通过。
-- REST API、六个前端页面、13 个 Vitest 用例、CI、Compose 与运行文档已完成。
-- `llmbenchlab-protocol-v1` 的评分和快照语义不得因任务执行架构变化而改变。
-- 尚无持久队列、Worker 心跳、租约、断点恢复、结构化审计事件或 PostgreSQL 数据迁移工具。
+## 当前仓库事实
+
+- 可靠性决策由 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 固定；数据库而非 Redis/进程内存裁决 Run、租约、attempt、取消和终态。
+- 新 Run 由 API 先提交数据库，再 best-effort XADD；通知失败仍可由 Worker 的数据库 reconciliation 恢复。
+- PostgreSQL 支持受限多 Worker；SQLite 只用于本地兼容和单 Worker 开发，不是多 Worker 部署目标。
+- 本地 Response 由 `(run_id, question_id)` 唯一约束和租约 token 保证幂等；Provider 调用或计费不承诺 exactly-once。
+- 应用日志已有请求/Run correlation 和脱敏 JSON，但只覆盖 LLMBenchLab 应用 logger；Worker probe 也只证明依赖能力，不证明主循环 liveness。
+- 已提交的可靠性基础 commits 为 `2be2392`、`3c975c7`、`2006d3f`、`b3289b1`、`103ab79`；详见当前工作日志与 Project Status。
 
 ## 目标
 
-在不改变 Phase 1 API 和评测协议语义的前提下，设计并实现 Phase 2 的最小可靠执行切片：以 PostgreSQL 为共享事实来源，以 Redis 支撑任务通知/协调，以独立 Worker 安全领取 Run，并证明 API 或 Worker 重启后任务可恢复且不会产生重复 Response。
+在不改变 API v1 与 `llmbenchlab-protocol-v1` 评分语义、不调用真实模型的前提下，完成 Phase 2 剩余的最小垂直切片：定义并实现可持久恢复的并发/速率/预算治理和确定性背压，补齐历史可观测 counters、延迟与审计事件，并用真实 PostgreSQL/Redis 的负载和故障实验形成容量/性能基线与 Runbook。
+
+## 开始前必须完成
+
+1. 阅读 `README.md`、`AGENTS.md`、`docs/PROJECT_STATUS.md`、`docs/ROADMAP.md`、`docs/phases/PHASE-2-RELIABILITY.md`、ADR-0005、现有 lease/Worker/queue/metrics 实现和本工作日志。
+2. 检查 Git 状态，保护所有未提交工作；创建新的工作日志并列出阶段提交边界。
+3. 先写新的 ADR，再写实现。ADR 必须明确配额事实来源、预留/结算/释放、重试与恢复、时钟、原子性、过载响应、公平性、审计保留和回滚语义。
+4. 不得把 Redis 的瞬时计数当成预算或任务事实来源；若使用 Redis 加速，必须有数据库可恢复裁决和故障语义。
 
 ## 范围
 
-1. 先新增 ADR，明确数据库事实来源、队列投递语义、租约、幂等、恢复和回滚策略。
-2. 增加 PostgreSQL 配置与迁移验证，同时保留 SQLite 作为 Phase 1 本地兼容模式，除非 ADR 明确替代路径。
-3. 抽取 Runner 调度接口，使 API 只持久化并投递任务，独立 Worker 执行现有逐题逻辑。
-4. 使用 Redis 实现任务通知、取消信号或租约协调；数据库仍是 Run/Response 的最终事实来源。
-5. 使用条件更新、幂等键和唯一约束保证同一 Run 只有一个有效执行者，同一题不会重复落库。
-6. 增加 lease、heartbeat、attempt、last_error 等必要字段及可回滚 Alembic 迁移。
-7. 实现 Worker/API 重启恢复、租约过期接管、取消、有限重试和死信/永久失败语义。
-8. 增加结构化日志、Run/Question 关联 ID、ready/liveness 检查与基础任务指标。
-9. 扩展 Compose 和 CI 集成测试，提供 PostgreSQL、Redis、API、Worker、frontend 的开发拓扑。
+### P2-05：并发、速率、预算与背压
+
+- 定义全局、Provider、Model 和 Run 层级的并发上限与优先级；说明限制的组合顺序和数据库事实字段。
+- 为请求/Token/费用预算定义原子预留、实际结算、释放与超限语义；未知 usage/pricing 不得静默按零结算。
+- 为 retry、租约接管、取消、dead-letter 和 Worker 崩溃定义不会永久占用额度、也不会重复结算本地证据的恢复路径。
+- 增加确定性背压：明确哪些请求延迟、拒绝或保持 pending，使用稳定且文档化的 API 错误/状态；不得丢失已经提交的 Run。
+- 增加有限公平调度，证明低流量 Model/Provider 不会被持续高流量来源无限饿死。
+
+### P2-06：历史指标与审计
+
+- 保留现有 DB gauges，同时增加可解释的历史 counters、队列/领取/重试/取消/dead-letter 事件和端到端/排队/执行延迟。
+- 定义 append-only 审计事件的 schema、关联 ID、保留、脱敏和完整性边界；不得把普通应用日志冒充不可篡改审计。
+- 让单个 Run 的 admission、排队、claim、heartbeat/recovery、题级结果、结算和终态可以用稳定标识串联。
+- 为指标与审计增加重启、重复投递、Redis 故障和迁移测试，避免 counter double-count 或证据漂移。
+
+### P2-07：容量、性能与 Runbook
+
+- 在真实 PostgreSQL/Redis、至少两个独立 Worker 和纯 Mock Adapter 下建立可重复负载脚本。
+- 记录硬件/容器资源、数据规模、并发、吞吐、p50/p95/p99 排队与完成延迟、错误/重试率、数据库与队列压力；结果必须可复核，不能写成生产 SLA。
+- 验证过载、Worker 缩放、租约到期、Redis 中断和数据库恢复时的治理/审计一致性。
+- 编写限流、预算告警、积压、dead-letter、commit outcome unknown、扩缩 Worker 和安全回滚 Runbook。
 
 ## 非目标
 
-- 不新增 MMLU-Pro、GPQA、IFEval 或代码执行数据集。
-- 不实现 LLM Judge、Arena、Agent、长上下文、多用户、鉴权或公共部署。
-- 不改变 `llmbenchlab-protocol-v1` 的得分、完成率、回答准确率和可比性规则。
-- 不追求 Kubernetes、多区域容灾、exactly-once 消息系统或无限水平扩展。
-- 自动测试仍不得调用真实 OpenAI-compatible 服务或要求 API Key。
-
-## 预计修改模块
-
-- `backend/app/runners/`：调度抽象、Worker、租约、恢复与幂等执行。
-- `backend/app/models/`、`backend/app/schemas/`：任务状态、attempt/lease/heartbeat 或审计实体。
-- `backend/alembic/versions/`：可升级、可降级的数据迁移。
-- `backend/app/api/v1/`：ready/任务诊断端点及兼容的 Run 创建/取消路径。
-- `backend/tests/`：PostgreSQL/Redis 集成、故障注入、并发领取、恢复和取消测试。
-- `compose.yaml`、`Makefile`、`.env.example`、`.github/workflows/ci.yml`：新服务与门禁。
-- `docs/`：ADR、Architecture、API、Testing、Deployment、Security、Phase 2 状态和工作日志。
+- 不接入或调用真实 OpenAI-compatible Provider，不要求真实 API Key，不产生付费调用。
+- 不新增大型 Benchmark、代码沙箱、LLM Judge、Arena、Agent、鉴权、多租户、计费系统或公共部署。
+- 不承诺 Kubernetes、多区域容灾、严格全局 exactly-once、无限水平扩展或生产 SLA。
+- 不改变逐题 evaluator、总分分母、完成率、回答准确率、排行榜隔离或历史快照语义；必要的不兼容变化必须另起协议/API 版本。
+- 不把本任务扩张为 Phase 3；Phase 2 未完成前不启动新的 Benchmark 产品范围。
 
 ## 验收标准
 
-- [ ] API 创建 Run 后无需在 API 进程内执行即可立即返回 `202` 与 Run ID。
-- [ ] 两个 Worker 同时竞争同一 Run 时，只有一个成功获得有效租约。
-- [ ] Worker 在题目之间崩溃并重启后，Run 能从持久证据恢复，不重复写入已完成题目。
-- [ ] API 重启不影响已投递任务；Redis 暂时不可用时有明确、可恢复的状态与错误。
-- [ ] 取消、任务级失败、题级失败、重试耗尽和租约过期均有确定状态转换及测试。
-- [ ] PostgreSQL schema upgrade/downgrade/check 通过；SQLite 兼容或迁移退出策略有文档和测试。
-- [ ] Phase 1 的 130 个后端测试、13 个前端测试及离线 Smoke Test 继续通过。
-- [ ] 新增集成测试不调用真实模型，测试数据与容器可重复清理。
-- [ ] Compose 可启动 PostgreSQL、Redis、API、Worker 和 frontend，并通过 ready/health 检查。
-- [ ] API 与 `llmbenchlab-protocol-v1` 保持兼容；任何必要的不兼容变化有版本化和迁移说明。
+- [ ] 新 ADR 在代码前接受，覆盖额度事实来源、原子预留/结算/释放、背压、公平、恢复、审计和回滚。
+- [ ] 在并发 API 提交和多 Worker 领取下，全局/Provider/Model/Run 上限都不会被突破；重启和租约接管后无永久占用。
+- [ ] rate/budget 超限具有稳定状态与 API 语义；已提交 Run 不因 Redis 故障或背压丢失。
+- [ ] retry、duplicate delivery、取消、dead-letter 和 commit-uncertain 场景不会重复结算本地 Token/费用证据。
+- [ ] 公平性测试证明受限低流量来源在持续竞争下能在文档化边界内获得执行机会。
+- [ ] gauges、历史 counters、延迟和 append-only 审计的边界清楚；重复投递/恢复不会 double-count。
+- [ ] 单个 Run 可通过关联 ID 串联 admission、queue、claim/recovery、question evidence、settlement 和 terminal state。
+- [ ] 真实 PostgreSQL/Redis 负载实验产出环境、命令、原始脱敏证据和容量基线；不冒充生产 SLA。
+- [ ] `make lint`、`make test`、`make smoke`、双方言迁移、真实基础设施 integration 和全栈故障回归继续通过。
+- [ ] `llmbenchlab-protocol-v1` 固定回归通过；所有测试仅使用 Mock/Stub/故障注入，没有真实 Provider 调用。
+- [ ] README、Architecture、API、Testing、Deployment、Security、Roadmap、Project Status、Changelog、Phase 2、Next Task 和新工作日志与证据一致。
 
-## 必须运行的测试
+只有 P2-05、P2-06、P2-07 的全部关键验收都通过，Phase 2 才可评估是否从 `in_progress` 改为 `completed`；任何关键项失败或未运行都必须保留为 `in_progress`。
+
+## 必须运行并记录的证据
 
 ```bash
 make lint
 make test
 make smoke
+make phase2-acceptance
 (cd backend && uv run alembic upgrade head)
 (cd backend && uv run alembic check)
 docker compose config --quiet
-docker compose up --build --wait
 ```
 
-此外必须运行并记录：双 Worker 并发领取测试、Worker kill/restart 恢复测试、API restart 测试、Redis 短暂不可用测试、取消与租约过期测试、PostgreSQL migration downgrade/upgrade 往返测试。若 Docker 不可用，必须明确列出未运行项，Phase 2 不得标记完成。
-
-## 需要更新的文档
-
-- 新增任务工作日志和至少一份可靠执行 ADR。
-- 更新 `docs/ARCHITECTURE.md`、`docs/API.md`、`docs/TESTING.md`、`docs/DEPLOYMENT.md`、`docs/SECURITY.md`。
-- 更新 `docs/phases/PHASE-2-RELIABILITY.md`、`docs/ROADMAP.md`、`docs/PROJECT_STATUS.md`。
-- 更新 `README.md`、`CHANGELOG.md` 和本文件。
+此外必须有：并发 admission/claim 压测、各层限额竞争、预算预留/结算/释放、Worker kill/lease takeover、Redis stop/start、取消与 dead-letter、duplicate delivery、counter/audit 重放、低流量公平性和容量基线。基础设施不可用时必须明确列出未运行项，不得用单元测试替代真实 PostgreSQL/Redis 证据。
 
 ## 风险
 
-- Redis 的 at-least-once 投递可能造成重复执行；必须以数据库条件更新、幂等键和唯一约束抵御。
-- Worker 崩溃可能发生在上游已收费但 Response 未提交之间；需要定义可审计的 retry/cost 语义，不能声称 exactly once。
-- PostgreSQL 与 SQLite 行为差异可能隐藏事务和约束问题；两种数据库必须分别验证，不能只依赖 SQLite 单测。
-- 取消、租约接管和超时存在竞争条件；状态机必须在 ADR 中列出合法转换，并用并发测试证明。
-- 新服务会提高个人部署复杂度；保留清晰的 MVP 本地模式和数据迁移/回滚说明。
+- 分布式配额若同时由数据库和 Redis 裁决会产生双重事实；ADR 必须指定唯一权威和可恢复缓存语义。
+- 预算预留在 Worker 崩溃、usage 未知或 commit acknowledgement 丢失时可能泄漏或重复结算；需要显式状态机与对账。
+- 粗粒度锁可保证正确但损害吞吐；性能优化不得先于原子性证明，也不得绕开 fencing。
+- 公平调度可能与吞吐、优先级和 Provider 限流冲突；必须记录权衡与饥饿上界。
+- 高基数指标或含题目/响应的审计会泄露敏感数据并推高存储；必须限制字段、脱敏与保留期。
 
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-请在 LLMBenchLab 仓库执行 docs/NEXT_TASK.md 定义的“Phase 2 可靠任务执行基础”。开始前严格阅读 README.md、AGENTS.md、docs/PROJECT_STATUS.md、docs/ROADMAP.md、docs/phases/PHASE-2-RELIABILITY.md 和现有 Runner/迁移；检查 Git 状态并创建新的工作日志。先写 ADR，明确 PostgreSQL、Redis、独立 Worker、数据库事实来源、at-least-once 投递、租约、心跳、幂等、恢复与回滚语义，再实施最小可靠垂直切片。不得改变 llmbenchlab-protocol-v1 的评分含义，不得调用真实模型，不得覆盖用户未提交工作，不得 push。必须用并发领取、Worker/API 重启、Redis 故障、取消、租约过期、迁移往返和既有回归测试提供真实证据；任何关键验收未通过时保持 Phase 2 in_progress，并如实更新 README、Architecture、API、Testing、Deployment、Security、Roadmap、Project Status、Changelog、Next Task 和工作日志。
+请在 LLMBenchLab 仓库执行 docs/NEXT_TASK.md 定义的“Phase 2 并发治理、审计与性能基线”。开始前阅读所有指定文档、ADR-0005 和现有 Worker/lease/queue/metrics，检查 Git 状态并创建新工作日志。先写 ADR，明确数据库事实来源下的并发、速率、预算预留/结算/释放、背压、公平、审计、恢复与回滚语义，再按 P2-05、P2-06、P2-07 实施，并在每个阶段执行 commit。不得改变 llmbenchlab-protocol-v1，不得调用真实模型，不得覆盖用户未提交工作，不得 push。必须用真实 PostgreSQL/Redis、多 Worker 并发、故障与负载证据验收；任何关键项未通过时保持 Phase 2 in_progress，并如实同步全部状态、运维、测试和工作日志文档。
 ```
