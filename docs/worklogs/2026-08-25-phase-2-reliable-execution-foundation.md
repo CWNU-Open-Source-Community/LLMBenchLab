@@ -83,7 +83,7 @@
 - Owner: Codex
 - Status: in_progress
 - Created: 2026-08-25 11:44 CST
-- Updated: 2026-08-25 14:15 CST
+- Updated: 2026-08-25 14:47 CST
 
 ### 实施步骤与提交边界
 
@@ -92,8 +92,8 @@
 3. [completed] 实现可靠执行字段、PostgreSQL/SQLite Alembic 迁移、原子租约与幂等持久化；双方言迁移、竞态、fencing 和回归门禁通过后提交。
 4. [completed] 实现数据库事实来源、Redis at-least-once 通知/消费和独立 Worker；单元、API、Runner 回归、真实 Redis 与独立进程证据通过后提交。
 5. [completed] 完成 Compose/CI、就绪/存活、结构化日志/指标以及 PostgreSQL 全栈并发领取、执行中重启、取消、租约过期等故障验证；相关门禁通过后提交。
-6. [in_progress] 增加显式、只读源、单事务且可对账的 SQLite→PostgreSQL 导入路径；用真实 PostgreSQL 验证成功、回滚、并发互斥和无残留后独立提交。
-7. [pending] 运行完整 lint/test/smoke/迁移/Compose 门禁，完成安全与 diff 审查，更新所有指定文档和本日志，并提交收尾。
+6. [completed] 增加显式、只读源、单事务且可对账的 SQLite→PostgreSQL 导入路径；用真实 PostgreSQL 验证成功、回滚、并发互斥和无残留后独立提交。
+7. [in_progress] 运行完整 lint/test/smoke/迁移/Compose 门禁，完成安全与 diff 审查，更新所有指定文档和本日志，并提交收尾。
 
 ### 提交记录
 
@@ -103,8 +103,8 @@
 | ADR | `2be2392` | `make lint` 通过；独立只读审查无 P0/P1；Phase 2 如实为 in_progress |
 | 持久化与迁移 | `3c975c7` | `make lint`；后端 153 passed/2 个显式基础设施 skip；前端 13 passed；Smoke 1 passed；SQLite migration 25 passed；真实 PostgreSQL migration/lease 通过 |
 | Worker 与队列 | `2006d3f` | `make lint`；后端 177 passed/4 个显式基础设施 skip；前端 13 passed；Smoke 1 passed；真实 Redis 2 passed；独立 API/Worker 重启与 Redis stop/start 通过；复审无 P0/P1 |
-| 故障验证与基础设施 | 本阶段提交（hash 在下一阶段回填） | 默认含 build 的自动 Compose 验收 8/8；后端非集成、前端 test/lint/build、Ruff/format、Compose config 与 diff 门禁通过；复审无 P0/P1 |
-| SQLite→PostgreSQL 导入 | 待提交 | 实现与专项证据待纳入独立提交 |
+| 故障验证与基础设施 | `b3289b1` | 默认含 build 的自动 Compose 验收 8/8；后端非集成、前端 test/lint/build、Ruff/format、Compose config 与 diff 门禁通过；复审无 P0/P1 |
+| SQLite→PostgreSQL 导入 | 本阶段提交（hash 在下一阶段回填） | 离线 14 passed；真实 PostgreSQL 导入、事务回滚、双源并发互斥、COMMIT 未确认/提交后故障语义与既有 lease 共 3 passed；全后端非集成 205 passed；无随机库/容器残留 |
 | 文档收尾 | 待提交 | 待执行 |
 
 ## 验证矩阵
@@ -121,6 +121,7 @@
 | Redis 故障 | 创建/执行期间停止 Redis 后恢复 | 状态明确且由 DB 恢复 | 自动 Compose 通过：Redis 容器保持 exited 时 `/ready` 503、`/live` 与 DB health 200；POST 202 后 Worker 仅靠 DB 对账完成，恢复后新 Run 入流且 PEL/lag 为 0 |
 | 取消/租约过期 | pending/running 取消、重复消息及过期接管 | 确定终态、旧 Worker 被 fencing、消息最终 ACK | 自动 Compose 通过：pending 取消为 0 Response；running 取消后计数冻结；显式重复 XADD 为 no-op，last-delivered-id 到达目标且 PEL=0；租约过期由 peer 自然接管 |
 | Compose | `python3 scripts/phase2_acceptance.py`（默认 build） | 五个长运行服务 ready/healthy，八类故障场景与清理通过 | `llmbenchlab-p2-2a59e6283eda` 8/8 passed；最终 ready、pending=0、lag=0；`down -v` 后容器/卷/网络均为空 |
+| SQLite→PostgreSQL | read-only source→随机空 PostgreSQL；提交前/COMMIT 确认/提交后注入失败；双源并发 | 成功时五表/协议事实一致；提交前失败全回滚；COMMIT 未确认状态不确定；提交后失败明确已提交；并发恰一成功；源不变 | 离线 14 passed、真实 PostgreSQL import + lease 3 passed；precommit 失败五表空；真实 commit 后确认丢失为 exit 4 且目标可已完整；postcommit snapshot/output 失败为 exit 3 且数据存在；并发败者因目标非空拒绝 |
 
 ## 决定、偏差与发现
 
@@ -148,6 +149,15 @@
 | 14:03 CST | manual evidence | 隔离 Compose 双 Worker 实测 API 执行中重启、实际租约 owner SIGKILL、Redis stop/start、pending/running 取消、重复投递和迁移往返 | 所有 Run 保持 15 个问题唯一与 protocol v1 口径；使用精确项目名 `down -v` 后无残留，未触碰用户已有 8080 进程 |
 | 14:11 CST | automated gate | 默认含 build 的 `scripts/phase2_acceptance.py` 在唯一项目 `llmbenchlab-p2-2a59e6283eda` 完成 8/8；证据敏感信息扫描通过 | 最终 ready、Redis pending/lag 为 0，head→0001→head 三份核心/协议哈希相同；清理后容器、卷、网络均为空 |
 | 14:15 CST | gate | 后端非集成回归、Ruff/format、前端 13 tests/lint/build、Compose config 和 diff check 通过；代码只读复审无 P0/P1 | 故障验证与基础设施阶段满足提交条件；Phase 2 因数据导入与文档/完整阶段门禁尚未收口而继续 in_progress |
+| 14:18 CST | implementation | 增加显式单向导入器：SQLite 以 URI `mode=ro` 与 `query_only` 读取一致快照；双方必须在 head、源无 active Run、目标五表为空；五表按依赖序复制 | 目标在单事务中获取 advisory lock 与 `ACCESS EXCLUSIVE`，提交前逐表 count/PK/content digest 对账；CLI 默认从环境变量读取含凭据 DSN，拒绝 argv password |
+| 14:21 CST | review/fix | 独立审查发现集成测试可能误清非专用库、含密码 DSN 进入 argv、真实 PG 缺少回滚/并发证据，以及 pre-head 共享锁到表独占锁的并发死锁 | 集成测试改为 loopback 管理库内 CREATE/DROP 随机专用库；CLI 增加 `--target-env`；真实 PG 注入中途失败和双源 Barrier；advisory transaction lock 在 preflight 前串行化 |
+| 14:23 CST | evidence correction | 首次把既有 PostgreSQL lease 测试与 importer 一起调用时，明确管理库尚未迁移，fixture 在 TRUNCATE 不存在表时退出 1 | 不将该次记为通过；先显式 `alembic upgrade head`/`check`，再运行 importer + lease，3 项全部通过 |
+| 14:26 CST | gate | 导入专项离线 12 passed；真实 PostgreSQL 3 passed；全后端非集成 203 passed；Ruff/format/diff 通过；随机库与明确命名容器均无残留 | 导入阶段满足提交条件；提交前故障全回滚，提交后再做独立只读对账，后者失败时必须按“可能已提交”运维语义处理 |
+| 14:29 CST | review/fix | 最终只读审查指出 P1：postcommit 使用默认 READ COMMITTED 多查询，且校验/输出失败会在已提交后仍被 CLI 笼统报为普通失败，可能诱导盲目重试 | 新增 `committed_but_verification_failed` 专用异常、CLI 状态与退出码 3；postcommit 改为单个 `REPEATABLE READ`、`READ ONLY` 快照；普通失败仍只表示提交前未完成 |
+| 14:35 CST | evidence | 真实 PG 分别注入 postcommit snapshot 和 output OSError，均得到专用已提交异常；目标摘要与源一致，直接重试因非空拒绝；隔离级别实测 `repeatable read`/read-only `on` | 离线 13、真实 PG + lease 3、全后端非集成 204 全通过；Ruff/format/diff 通过；修复后临时随机库与容器再次确认为空 |
+| 14:39 CST | review/fix | 复审指出第二个 P1：PostgreSQL 可能已执行 COMMIT，但客户端在收到确认前断连；隐式 context commit 会把这一不确定结果落入普通 exit 2 | 改为显式 `transaction.commit()`；其任何异常保守映射 `commit_outcome_unknown`/exit 4，提示目标可能为空或已完整、禁止盲重试；已确认 commit 后的连接清理异常归入 exit 3 |
+| 14:45 CST | evidence | 真实 PostgreSQL 在实际 commit 完成后注入 acknowledgement loss，得到 exit 4 对应异常；目标五表完整且直接重试因非空拒绝；Engine pool dispose 改为 best-effort，不覆盖已判定数据库结果 | 离线 14、真实 PG + lease 3、全后端非集成 205 全通过；Ruff/format/diff 通过；第三次临时随机库/容器清理再次为空 |
+| 14:47 CST | review | 最终只读复审确认两个 importer P1 均关闭，未发现剩余 P0/P1 | 显式 commit unknown、已确认 commit 后复核失败、稳定只读快照与 dispose 语义满足提交门禁 |
 
 ## 实际修改
 
@@ -168,6 +178,8 @@
 | 健康、就绪与探针 | `/live` 无外部依赖；`/health` 保持 DB-only；`/ready` 并行、有界检查 DB、Alembic head 与 Redis；Worker probe 区分 DB hard fail 与 Redis degraded | 已完成；明确 capability/readiness 边界，不冒充 Worker event-loop liveness |
 | 应用日志与指标 | LLMBenchLab 应用 logger 输出脱敏 JSON；请求 ID/Run correlation；Worker/Runner 生命周期事件；`/tasks/metrics` 由数据库实时事实导出积压、租约、取消、retry/dead-letter 等 gauge | 已完成；不把 Uvicorn access log 或这些 gauge 宣称为完整历史审计/延迟 counters |
 | CI / Make / 自动验收 | SQLite 与真实 PostgreSQL/Redis 分层 job；全栈 reliability job；`make phase2-acceptance`；隔离项目、随机 loopback 端口、八场景证据与强制清理 | 已完成；证据落于被忽略的 `.pytest_cache/artifacts` |
+| `app/db/import_sqlite.py` | 显式、单向、只读源导入；head/integrity/FK/active/empty preflight；五表单事务复制、PG advisory+table lock；content-free 三阶段摘要；安全 CLI | 已完成；只支持 stopped SQLite→空 PostgreSQL，不覆盖或合并；COMMIT 未确认用 `commit_outcome_unknown`/exit 4，已确认提交后的复核故障用 `committed_but_verification_failed`/exit 3 |
+| 导入测试 | SQLite 源只读/损坏/active/head/rollback/canonical；真实 PG 随机库成功、故障回滚、并发竞争、重复拒绝、协议字段和 secret output | 已完成；临时数据库和容器清理已二次确认 |
 
 ## 测试结果
 
@@ -194,10 +206,14 @@
 - 正式全栈八场景全部通过：拓扑/健康、protocol v1 基线、执行中 API restart、实际租约 owner SIGKILL 后自然过期接管、Redis stop/start 与 DB reconciliation、pending cancel、running cancel 加 duplicate delivery、PostgreSQL head→0001→head 往返。
 - 正式协议证据：所有完成 Run 均为离线 Mock；baseline 为 15 个唯一 Response、score/completion/answered accuracy 100、tokens 120/30、cost 0；故障场景未改变 `llmbenchlab-protocol-v1` 评分含义。
 - 正式队列/迁移/清理证据：最终 Redis consumer group `pending=0`、`lag=0`；迁移往返前/中/后三份核心事实与协议快照哈希一致；`down -v` 返回 0，项目容器、卷、网络均为空。证据位于被 Git 忽略的 `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-2a59e6283eda/evidence.json`，敏感值扫描无命中。
+- SQLite→PostgreSQL 离线专项：`14 passed`；覆盖 URL/方言、argv password 拒绝且不回显、只读源 SHA-256/mtime 保持、head/active/FK 拒绝、canonical 跨方言稳定、提交前故障回滚、五表复制，以及 CLI 对 COMMIT 未确认/已提交复核失败分别使用状态/退出码 4/3。
+- SQLite→PostgreSQL 真实 PostgreSQL 16：管理库显式 upgrade head/check 后，importer 与既有 lease integration 合计 `3 passed`。Importer 用例内部创建 `llmbenchlab_import_<32hex>_test`，验证第三表前注入失败后五表全空、两个不同源并发导入恰一成功、成功导入三阶段摘要相同、protocol v1/attempt/lease/JSON/Decimal 保持、重复导入拒绝及 CLI 环境变量路径。
+- 提交后故障语义：真实 PostgreSQL 分别在 postcommit snapshot 与 postcommit summary output 注入异常；二者均抛出 `SQLiteImportCommittedVerificationError`，目标数据与源摘要相同且盲目重试因非空被拒绝。snapshot 实测处于单一 `repeatable read`、read-only transaction；CLI 将此状态输出为 `committed_but_verification_failed` 并返回 3，不宣称已回滚。
+- COMMIT 确认丢失语义：真实 PostgreSQL 先完成实际 commit、再注入客户端 acknowledgement loss；Importer 抛出 `SQLiteImportCommitOutcomeUnknownError`，目标此例已完整且盲目重试被空目标前置条件拒绝。CLI 将这一保守状态输出为 `commit_outcome_unknown` 并返回 4，不声称回滚或已确认提交。
+- 导入阶段回归：后端非集成 `205 passed, 5 deselected`；Ruff check、Ruff format check 与 diff check 退出 0。首次组合真实测试因管理库未迁移而在 setup 失败，显式迁移后才获得上述 3 passed；没有隐藏该失败。
 
 ## 未运行验证
 
-- SQLite→PostgreSQL 显式导入尚未纳入阶段提交与最终门禁；必须以只读源、空的随机目标库、单事务回滚、并发互斥和提交前后对账证据单独收口。
 - `make lint`、`make test`、`make smoke` 的最终工作树整套门禁及所有指定文档的一致性审计将在导入阶段提交后再运行；本节不会用当前分项通过替代最终状态。
 - 真实模型调用明确禁止，不会运行。
 
@@ -207,8 +223,9 @@
 - PostgreSQL 测试只使用专用临时数据库名 `llmbenchlab_test`；测试 fixture 对其他库名要求显式 destructive 开关；临时容器已停止并自动删除。
 - Redis 只使用本机临时 `redis:7-alpine` 容器和随机测试 Stream；独立进程使用 `/tmp/llmbenchlab-stage3-process.*` 隔离数据库；容器、进程与临时目录均已停止/删除。
 - 正式 Compose 验收使用正则约束的唯一项目名、随机 loopback API/frontend 端口、内部 PostgreSQL/Redis 端口和隔离命名卷；脚本移除 Provider credential 环境变量，失败路径也执行精确 `down -v`，并验证项目级容器/卷/网络为空。
+- 导入 CLI 的 credentialed target 只从 `--target-env` 指定环境变量（默认 `LLMBENCHLAB_DATABASE_URL`）读取；`--target` 只接受无 password URL，错误输出不含 URL、行内容或密钥。真实测试只连接 loopback 管理 DSN，创建严格随机命名目标库并在 finally 使用精确名称 FORCE DROP；外部查询确认无随机库，明确命名的 `llmbenchlab-import-root-20260825-1418`、`...-1430` 与最终确认窗口复验容器 `...-1440` 均已删除。
 - 未执行 reset、覆盖用户数据库、push 或真实 Provider 调用；未读取或输出 Provider 密钥。
 
 ## 结果与下一步
 
-可靠性 schema、租约/fencing、幂等 Response、独立 Worker、Redis 通知/降级、健康/日志/DB 指标和 PostgreSQL 全栈故障恢复已通过；默认构建验收的 8/8 场景证明执行中 API/Worker 故障、Redis 中断、取消、重复投递和迁移往返都未改变 protocol v1 的逐题唯一性与评分口径。下一步独立提交本阶段，再收口 SQLite→PostgreSQL 导入、最终整套门禁和全部指定文档。Phase 2 的限流、预算、完整背压、历史可观测 counters/延迟、完整审计与性能基线仍未完成，因此继续保持 `in_progress`。
+可靠性 schema、租约/fencing、幂等 Response、独立 Worker、Redis 通知/降级、健康/日志/DB 指标、PostgreSQL 全栈故障恢复与显式 SQLite→PostgreSQL 导入均已通过各自真实门禁；protocol v1 的逐题唯一性与评分口径保持不变。下一步独立提交导入阶段，再运行最终整套门禁并同步全部指定文档。Phase 2 的限流、预算、完整背压、历史可观测 counters/延迟、完整审计与性能基线仍未完成，因此继续保持 `in_progress`。
