@@ -1,0 +1,70 @@
+name: Feature request
+description: Propose a focused improvement that fits the project roadmap.
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the user problem before prescribing an implementation. Large benchmark downloads, Judge/Arena, Agents, and distributed workers belong to later roadmap phases.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: Who needs this and what can they not do today?
+      placeholder: As a ..., I need ..., because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Describe observable behavior and success criteria.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds or smaller-scoped options.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Primary area
+      options:
+        - Benchmark protocol or dataset
+        - Model adapter
+        - Evaluation runner or scoring
+        - API or database
+        - Web interface
+        - Developer experience or documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility considerations
+      description: Note possible API, database, or Benchmark protocol changes. Write "None known" when appropriate.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I searched existing issues and the roadmap for related work.
+          required: true
+        - label: This request does not include credentials or private benchmark data.
+          required: true
+        - label: I described a bounded MVP or an incremental first step.
+          required: true
+

@@ -1,0 +1,25 @@
+{
+  "schema_version": "llmbenchlab-dataset-v1",
+  "id": "demo-general",
+  "name": "Demo General / 通用演示集",
+  "version": "1.0.0",
+  "description": "Demo 数据，不代表正式模型能力。Demo data only; results must not be presented as a formal measure of model capability. 本数据集仅用于验证 LLMBenchLab 的离线端到端链路。",
+  "dimension": "general",
+  "language": "mul",
+  "license": "MIT",
+  "source": "Original bilingual demonstration questions authored for LLMBenchLab",
+  "evaluator": {
+    "name": "builtin-objective",
+    "version": "1.0",
+    "mapping": {
+      "exact_match": "exact_match_v1",
+      "multiple_choice": "multiple_choice_v1",
+      "numeric": "numeric_v1"
+    }
+  },
+  "prompt_template": {
+    "system": "你正在运行一个离线演示评测。Follow the requested answer format and return only the short final answer.",
+    "user": "{prompt}\n{choices}"
+  },
+  "question_count": 15
+}

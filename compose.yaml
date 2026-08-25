@@ -1,0 +1,43 @@
+name: llmbenchlab
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    init: true
+    environment:
+      DATABASE_URL: sqlite:////data/llmbenchlab.db
+      FRONTEND_ORIGIN: http://localhost:${FRONTEND_PORT:-8080}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - sqlite-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: /api/v1
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+
+volumes:
+  sqlite-data:

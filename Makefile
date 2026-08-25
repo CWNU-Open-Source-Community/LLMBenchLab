@@ -1,0 +1,66 @@
+SHELL := /bin/bash
+.DEFAULT_GOAL := help
+
+.PHONY: help setup dev backend frontend test lint format smoke migrate docker-up docker-down
+
+help:
+	@echo "LLMBenchLab developer commands:"
+	@echo "  make setup        Install dependencies and initialize the local database"
+	@echo "  make dev          Start backend and frontend together (Ctrl-C stops both)"
+	@echo "  make backend      Start only the FastAPI development server"
+	@echo "  make frontend     Start only the Vite development server"
+	@echo "  make test         Run backend and frontend test suites"
+	@echo "  make lint         Run backend lint/format checks and frontend lint/typecheck"
+	@echo "  make format       Apply safe automatic formatting fixes"
+	@echo "  make smoke        Run the fully offline Mock vertical-slice smoke test"
+	@echo "  make migrate      Apply all Alembic migrations"
+	@echo "  make docker-up    Build and start the Compose stack"
+	@echo "  make docker-down  Stop the Compose stack"
+
+setup:
+	@./scripts/setup.sh
+
+dev:
+	@./scripts/dev.sh
+
+backend:
+	@set -a; \
+	if [[ -f .env ]]; then source ./.env; fi; \
+	set +a; \
+	cd backend && uv run uvicorn app.main:app \
+		--host "$${API_HOST:-127.0.0.1}" \
+		--port "$${API_PORT:-8000}" \
+		--reload
+
+frontend:
+	@set -a; \
+	if [[ -f .env ]]; then source ./.env; fi; \
+	set +a; \
+	cd frontend && npm run dev -- --host "$${FRONTEND_HOST:-127.0.0.1}"
+
+test:
+	@cd backend && uv run pytest
+	@cd frontend && npm test
+
+lint:
+	@cd backend && uv run ruff check .
+	@cd backend && uv run ruff format --check .
+	@cd frontend && npm run lint
+	@cd frontend && npm run typecheck
+
+format:
+	@cd backend && uv run ruff check . --fix
+	@cd backend && uv run ruff format .
+	@cd frontend && npm run lint -- --fix
+
+smoke:
+	@./scripts/smoke.sh
+
+migrate:
+	@./scripts/migrate.sh
+
+docker-up:
+	@docker compose up --build
+
+docker-down:
+	@docker compose down
