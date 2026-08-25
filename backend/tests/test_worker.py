@@ -166,16 +166,23 @@ async def test_worker_acks_only_after_runner_returns() -> None:
 
 
 @pytest.mark.asyncio
-async def test_worker_does_not_ack_unhandled_runner_failure() -> None:
+async def test_worker_does_not_ack_unhandled_runner_failure(caplog) -> None:
     queue = _FakeQueue([RunTaskDelivery("2-0", "run-2", "correlation-2")])
     runner = _FakeRunner()
     runner.raise_error = True
     service = _service(_FakeRepository(), runner, queue)
+    caplog.set_level("ERROR", logger="app.workers.service")
 
     assert await service.run_once() is True
 
     assert runner.calls == ["run-2"]
     assert queue.acked == []
+    failure = next(
+        record for record in caplog.records if record.event == "worker_run_unhandled_error"
+    )
+    assert failure.run_id == "run-2"
+    assert failure.correlation_id == "correlation-2"
+    assert failure.result == "not_acknowledged"
 
 
 @pytest.mark.asyncio

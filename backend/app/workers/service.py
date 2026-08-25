@@ -14,6 +14,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
+from app.core.logging import correlation_scope, normalize_correlation_id
 from app.runners.evaluation_runner import EvaluationRunner
 from app.runners.run_leases import ReapReport, RunLeaseRepository
 from app.task_queue import QueueUnavailable, RedisRunQueue, RunTaskDelivery
@@ -68,7 +69,7 @@ class WorkerService:
         if run_ids is None:
             return False
         if run_ids:
-            await self._runner.execute(run_ids[0])
+            await self._execute_run(run_ids[0])
             return True
         delivery = await self._next_delivery(block_milliseconds=0)
         if delivery is not None:
@@ -118,7 +119,7 @@ class WorkerService:
                     continue
                 if run_ids:
                     active = asyncio.create_task(
-                        self._runner.execute(run_ids[0], shutdown_requested=stop),
+                        self._execute_run(run_ids[0], shutdown_requested=stop),
                         name=f"run-{run_ids[0]}",
                     )
                     continue
@@ -141,11 +142,23 @@ class WorkerService:
                         continue
                     if stop.is_set():
                         return
+                    logger.info(
+                        "Worker received Run queue delivery",
+                        extra={
+                            "event": "run_queue_delivery_received",
+                            "correlation_id": normalize_correlation_id(delivery.correlation_id)
+                            or delivery.run_id,
+                            "worker_id": self.worker_id,
+                            "run_id": delivery.run_id,
+                            "message_id": delivery.message_id,
+                        },
+                    )
                     active_delivery = delivery
                     active = asyncio.create_task(
-                        self._runner.execute(
+                        self._execute_run(
                             delivery.run_id or "",
                             shutdown_requested=stop,
+                            correlation_id=delivery.correlation_id,
                         ),
                         name=f"run-{delivery.run_id}",
                     )
@@ -231,20 +244,75 @@ class WorkerService:
             )
             await self._ack(delivery)
             return
-        try:
-            ack_safe = await self._runner.execute(delivery.run_id or "")
-        except Exception:
-            logger.error(
-                "Worker Run task escaped its isolation boundary",
+        stable_correlation_id = normalize_correlation_id(delivery.correlation_id) or (
+            delivery.run_id or ""
+        )
+        with correlation_scope(stable_correlation_id):
+            logger.info(
+                "Worker received Run queue delivery",
                 extra={
-                    "event": "worker_run_unhandled_error",
+                    "event": "run_queue_delivery_received",
+                    "correlation_id": stable_correlation_id,
                     "worker_id": self.worker_id,
                     "run_id": delivery.run_id,
+                    "message_id": delivery.message_id,
                 },
             )
-            return
-        if ack_safe:
-            await self._ack(delivery)
+            try:
+                ack_safe = await self._execute_run(
+                    delivery.run_id or "",
+                    correlation_id=delivery.correlation_id,
+                )
+            except Exception:
+                return
+            if ack_safe:
+                await self._ack(delivery)
+
+    async def _execute_run(
+        self,
+        run_id: str,
+        *,
+        shutdown_requested: asyncio.Event | None = None,
+        correlation_id: str | None = None,
+    ) -> bool:
+        stable_correlation_id = normalize_correlation_id(correlation_id) or run_id
+        with correlation_scope(stable_correlation_id):
+            logger.info(
+                "Worker started Run handling",
+                extra={
+                    "event": "worker_run_started",
+                    "worker_id": self.worker_id,
+                    "run_id": run_id,
+                },
+            )
+            try:
+                ack_safe = await self._runner.execute(
+                    run_id,
+                    shutdown_requested=shutdown_requested,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Worker Run task escaped its isolation boundary",
+                    extra={
+                        "event": "worker_run_unhandled_error",
+                        "correlation_id": stable_correlation_id,
+                        "worker_id": self.worker_id,
+                        "run_id": run_id,
+                        "error_code": f"worker_run_error:{type(exc).__name__}",
+                        "result": "not_acknowledged",
+                    },
+                )
+                raise
+            logger.info(
+                "Worker finished Run handling",
+                extra={
+                    "event": "worker_run_finished",
+                    "worker_id": self.worker_id,
+                    "run_id": run_id,
+                    "result": "ack_safe" if ack_safe else "lease_expiry_recovery",
+                },
+            )
+            return ack_safe
 
     async def _settle_active(
         self,
@@ -256,10 +324,6 @@ class WorkerService:
         except asyncio.CancelledError:
             return
         except Exception:
-            logger.error(
-                "Worker Run task escaped its isolation boundary",
-                extra={"event": "worker_run_unhandled_error", "worker_id": self.worker_id},
-            )
             return
         if delivery is not None and ack_safe:
             await self._ack(delivery)
@@ -291,9 +355,22 @@ class WorkerService:
         if self._run_queue is None:
             return
         try:
-            await self._run_queue.ack(delivery.message_id)
+            acknowledged = await self._run_queue.ack(delivery.message_id)
         except QueueUnavailable:
             self._queue_failure("run_queue_ack_failed")
+        else:
+            logger.info(
+                "Run queue ACK observed",
+                extra={
+                    "event": "run_queue_ack_observed",
+                    "correlation_id": normalize_correlation_id(delivery.correlation_id)
+                    or delivery.run_id,
+                    "worker_id": self.worker_id,
+                    "run_id": delivery.run_id,
+                    "message_id": delivery.message_id,
+                    "result": "acknowledged" if acknowledged else "already_absent",
+                },
+            )
 
     async def _wait_for_active_or_stop(
         self,
@@ -345,6 +422,18 @@ class WorkerService:
             self._database_failure("worker_reap_database_unavailable")
             return None
         self._database_recovered()
+        if report.cancelled or report.dead_lettered or report.completed:
+            logger.info(
+                "Expired Run reconciliation completed",
+                extra={
+                    "event": "worker_reap_outcome",
+                    "worker_id": self.worker_id,
+                    "result": (
+                        f"cancelled={report.cancelled},completed={report.completed},"
+                        f"dead_lettered={report.dead_lettered}"
+                    ),
+                },
+            )
         return report
 
     def _due_run_ids(self) -> tuple[str, ...] | None:

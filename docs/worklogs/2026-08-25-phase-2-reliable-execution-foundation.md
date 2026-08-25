@@ -55,7 +55,7 @@
 - [x] 取消、任务异常、逐题异常、重试耗尽、dead-letter 和租约过期行为确定且有测试。
 - [x] PostgreSQL migration `upgrade -> downgrade -> upgrade`、`alembic check` 通过；SQLite 兼容/退出策略有测试和文档。
 - [x] `make lint`、`make test`、`make smoke` 以及既有 130 项后端、13 项前端回归不退化。
-- [ ] Compose 中 PostgreSQL、Redis、API、Worker、frontend 可 `up --build --wait`，健康/就绪检查通过，测试数据可清理。
+- [x] Compose 中 PostgreSQL、Redis、API、Worker、frontend 可 `up --build --wait`，健康/就绪检查通过，测试数据可清理。
 - [ ] README、Architecture、API、Testing、Deployment、Security、Roadmap、Project Status、Changelog、Next Task、Phase 2 与本日志反映真实证据。
 
 ## 假设
@@ -71,11 +71,11 @@
 | 风险 | 影响 | 计划缓解 | 当前结果 |
 | --- | --- | --- | --- |
 | 重复投递或租约接管后双写 | 重复响应、错误进度或聚合 | 唯一约束、条件更新、单调租约令牌、所有关键写入校验有效租约 | SQLite/真实 PostgreSQL 仓储级与真实 Redis queue-first/ACK 不确定结果验证通过 |
-| Worker 在 Provider 返回后、DB 提交前崩溃 | 可能重复远端调用/计费 | 明确 at-least-once 边界；本地证据幂等；只用 Mock 做故障测试 | Response/租约幂等自动化通过；Compose 进程中断证据待运行 |
+| Worker 在 Provider 返回后、DB 提交前崩溃 | 可能重复远端调用/计费 | 明确 at-least-once 边界；本地证据幂等；只用 Mock 做故障测试 | Response/租约幂等自动化与实际 lease owner SIGKILL/自然接管通过；不承诺 Provider exactly-once |
 | Redis 故障阻塞创建或丢任务 | Run 永久 pending | 先提交数据库；队列 best-effort；Worker 定期从数据库 reconciliation | 真实 Redis 停止时 API 0.047s 返回 202，DB-only reconciliation 完成；恢复后新 Run 正常入流 |
-| PostgreSQL 与 SQLite 锁/时间/DDL 语义不同 | 单机测试通过但部署失败 | 两种数据库专项测试；PostgreSQL 容器迁移往返和并发领取实测 | 迁移、约束、claim/cancel 竞态已在双方言通过；完整进程链待验证 |
+| PostgreSQL 与 SQLite 锁/时间/DDL 语义不同 | 单机测试通过但部署失败 | 两种数据库专项测试；PostgreSQL 容器迁移往返和并发领取实测 | 迁移、约束、claim/cancel 竞态已在双方言通过；PostgreSQL 全栈进程链与 head→0001→head 哈希往返通过 |
 | API 重启错误地终止 running Run | 破坏恢复语义 | 删除启动时“全部 running 标失败”；只由租约过期与重试策略恢复 | 独立 Uvicorn 真实重启后 terminal Run、15 个 Response ID 集与分数不变 |
-| Phase 2 变更评分口径 | 历史不可比 | 冻结协议 v1；复用既有聚合与响应模型；增加协议回归断言 | 177 项后端、13 项前端、离线 Smoke 与真实 Redis ACK/duplicate 快照通过 |
+| Phase 2 变更评分口径 | 历史不可比 | 冻结协议 v1；复用既有聚合与响应模型；增加协议回归断言 | 既有回归、离线 Smoke、真实 Redis ACK/duplicate 与正式 Compose 八场景协议快照通过 |
 | 初始仓库无 commit | 无法区分基线与 Phase 2 | 工作日志先创建但不纳入基线；Phase 1 文件单独首提，之后阶段提交 | `3db1e29` 已固定基线 |
 
 ## 执行计划
@@ -83,7 +83,7 @@
 - Owner: Codex
 - Status: in_progress
 - Created: 2026-08-25 11:44 CST
-- Updated: 2026-08-25 13:02 CST
+- Updated: 2026-08-25 14:15 CST
 
 ### 实施步骤与提交边界
 
@@ -91,8 +91,9 @@
 2. [completed] 编写 ADR，并把 Phase 2/Project Status 标为真实进行中；审查后提交文档阶段。
 3. [completed] 实现可靠执行字段、PostgreSQL/SQLite Alembic 迁移、原子租约与幂等持久化；双方言迁移、竞态、fencing 和回归门禁通过后提交。
 4. [completed] 实现数据库事实来源、Redis at-least-once 通知/消费和独立 Worker；单元、API、Runner 回归、真实 Redis 与独立进程证据通过后提交。
-5. [in_progress] 完成 Compose/CI、就绪/存活、结构化日志/指标以及 PostgreSQL 全栈并发领取、执行中重启、取消、租约过期等故障验证；相关门禁通过后提交。
-6. [pending] 运行完整 lint/test/smoke/迁移/Compose 门禁，完成安全与 diff 审查，更新所有指定文档和本日志，并提交收尾。
+5. [completed] 完成 Compose/CI、就绪/存活、结构化日志/指标以及 PostgreSQL 全栈并发领取、执行中重启、取消、租约过期等故障验证；相关门禁通过后提交。
+6. [in_progress] 增加显式、只读源、单事务且可对账的 SQLite→PostgreSQL 导入路径；用真实 PostgreSQL 验证成功、回滚、并发互斥和无残留后独立提交。
+7. [pending] 运行完整 lint/test/smoke/迁移/Compose 门禁，完成安全与 diff 审查，更新所有指定文档和本日志，并提交收尾。
 
 ### 提交记录
 
@@ -101,24 +102,25 @@
 | Phase 1 基线 | `3db1e29` | 152 个既有 Phase 0/1 文件；`.env`、DB、backup、node_modules/dist 均未纳入；无真实密钥模式命中 |
 | ADR | `2be2392` | `make lint` 通过；独立只读审查无 P0/P1；Phase 2 如实为 in_progress |
 | 持久化与迁移 | `3c975c7` | `make lint`；后端 153 passed/2 个显式基础设施 skip；前端 13 passed；Smoke 1 passed；SQLite migration 25 passed；真实 PostgreSQL migration/lease 通过 |
-| Worker 与队列 | 本阶段提交（hash 在下一阶段回填） | `make lint`；后端 177 passed/4 个显式基础设施 skip；前端 13 passed；Smoke 1 passed；真实 Redis 2 passed；独立 API/Worker 重启与 Redis stop/start 通过；复审无 P0/P1 |
-| 故障验证与基础设施 | 待提交 | 待执行 |
+| Worker 与队列 | `2006d3f` | `make lint`；后端 177 passed/4 个显式基础设施 skip；前端 13 passed；Smoke 1 passed；真实 Redis 2 passed；独立 API/Worker 重启与 Redis stop/start 通过；复审无 P0/P1 |
+| 故障验证与基础设施 | 本阶段提交（hash 在下一阶段回填） | 默认含 build 的自动 Compose 验收 8/8；后端非集成、前端 test/lint/build、Ruff/format、Compose config 与 diff 门禁通过；复审无 P0/P1 |
+| SQLite→PostgreSQL 导入 | 待提交 | 实现与专项证据待纳入独立提交 |
 | 文档收尾 | 待提交 | 待执行 |
 
 ## 验证矩阵
 
 | 验收项 | 命令或场景 | 预期 | 实际 |
 | --- | --- | --- | --- |
-| 代码质量 | `make lint` | 全部通过 | 通过：Ruff 68 files、ESLint、TypeScript 均退出 0 |
-| 完整回归 | `make test` | 后端/前端无退化 | 当前阶段通过：后端 177 passed/4 个显式基础设施 skipped；前端 13 passed |
+| 代码质量 | Ruff/format、ESLint、TypeScript、Compose config、diff check | 全部通过 | 当前工作树通过：Ruff/format、ESLint、TypeScript build、`docker compose config --quiet` 和 `git diff --check` 均退出 0 |
+| 完整回归 | 后端非集成、前端 test/lint/build | 后端/前端无退化 | 当前阶段通过：后端非集成测试全部通过（导入专项在下一阶段单独统计）；前端 13 passed，lint/build 通过；基础设施集成在隔离容器另行验证 |
 | 离线垂直链路 | `make smoke` | API + 独立 Worker + Mock 完成 | 通过 1 passed：API 提交后仍为 pending/0 Response，再由独立 WorkerService 完成 Mock Run；API 无 task manager |
 | 迁移往返 | SQLite 与 PostgreSQL `upgrade/downgrade/upgrade` + `alembic check` | 两种数据库均通过 | 通过：SQLite 25 项；真实 PostgreSQL 16 空库/旧 running 聚合/active downgrade 拒绝/往返/check 均通过 |
-| 并发领取 | 两个 Worker 同时领取同一 Run | 仅一个有效租约 | 仓储级通过：SQLite Barrier 与真实 PostgreSQL 两连接仅一个 claim；Compose 双 Worker 进程证据留待下一阶段 |
-| Worker 重启 | Worker 停止时提交 Run，再启动新 Worker 进程 | DB pending Run 被新进程领取，响应不重复 | 通过：停机期间保持 pending/attempt 0；新 PID 启动后 completed/attempt 1/15 Response/score 100；执行中强杀与 PostgreSQL 证据留待下一阶段 |
-| API 重启 | 独立 Worker 存活时停止并重新启动 Uvicorn | Run 事实不受 API 生命周期影响 | 通过：重启后 completed/attempt 1/score 100/15 Response，Response ID 集 SHA-256 固定 |
-| Redis 故障 | 创建/执行期间停止 Redis 后恢复 | 状态明确且由 DB 恢复 | 通过：停机时 POST 0.047s 返回 202、`queue_notification_unavailable`；Worker DB 对账完成；Redis 7 恢复后新 Run 入流完成且 PEL=0 |
-| 取消/租约过期 | pending/running 取消及过期接管 | 确定终态、旧 Worker 被 fencing | 仓储级通过：SQLite/PG claim-cancel、SQLite retry-cancel、过期接管、旧 heartbeat/Response 拒绝、完整证据恢复；进程证据待运行 |
-| Compose | `docker compose config`、`docker compose up --build --wait` | 五服务 ready/healthy | 待执行 |
+| 并发领取 | 两个 Worker 同时领取同一 Run | 仅一个有效租约 | SQLite Barrier 与真实 PostgreSQL 双连接仅一个 claim；自动 Compose 同时运行两个 Worker，单一租约 owner 完成，队列最终 pending/lag 均为 0 |
+| Worker 重启 | 执行中强杀实际租约 owner，不手工改租约 | 旧租约自然过期后由另一 Worker 接管，既有响应不重复 | 自动 Compose 通过：精确 SIGKILL owner，peer 以递增 token 接管；崩溃前 Response ID 保留，最终 15 个问题唯一且 protocol v1 聚合为 100 |
+| API 重启 | Run 执行中重启 API 容器 | Run 事实不受 API 生命周期影响 | 自动 Compose 通过：barrier 时已有持久响应；API 重启后 Run 完成、15 个 Response 唯一且协议快照通过 |
+| Redis 故障 | 创建/执行期间停止 Redis 后恢复 | 状态明确且由 DB 恢复 | 自动 Compose 通过：Redis 容器保持 exited 时 `/ready` 503、`/live` 与 DB health 200；POST 202 后 Worker 仅靠 DB 对账完成，恢复后新 Run 入流且 PEL/lag 为 0 |
+| 取消/租约过期 | pending/running 取消、重复消息及过期接管 | 确定终态、旧 Worker 被 fencing、消息最终 ACK | 自动 Compose 通过：pending 取消为 0 Response；running 取消后计数冻结；显式重复 XADD 为 no-op，last-delivered-id 到达目标且 PEL=0；租约过期由 peer 自然接管 |
+| Compose | `python3 scripts/phase2_acceptance.py`（默认 build） | 五个长运行服务 ready/healthy，八类故障场景与清理通过 | `llmbenchlab-p2-2a59e6283eda` 8/8 passed；最终 ready、pending=0、lag=0；`down -v` 后容器/卷/网络均为空 |
 
 ## 决定、偏差与发现
 
@@ -140,6 +142,12 @@
 | 12:56 CST | fault evidence | 运行中停止真实 Redis 后创建 Run：API 0.047s 返回 202，Worker 仅靠 DB 对账完成 15 条；恢复 Redis 后入流与 ACK 恢复 | Redis 故障不丢数据库任务，也不改变评分；临时容器、进程和数据库随后清理 |
 | 12:59 CST | review/fix | 三路只读复审发现 stop/read、stop/DB scan、active reaper、半开连接和 semaphore 等关停竞态 | read 与 stop 竞速取消；Redis 每类操作独立 deadline；active 时不 reap；Runner 在 semaphore 前后检查 stop，安全 drain 后由租约自然到期恢复且该 delivery 不 ACK |
 | 13:02 CST | gate | `make lint`、`make test`、`make smoke` 和真实 Redis 集成全部通过；最终代码复审无 P0/P1 | Worker/队列阶段满足提交门禁；Phase 2 仍因 Compose/可观测性/全栈故障门禁未完成而保持 in_progress |
+| 13:35 CST | implementation | Compose 固定为 PostgreSQL、Redis、一次性 migrate、API、独立 Worker 与 frontend；API/Worker 启动只检查 Alembic head，迁移仅由 migrate service 拥有 | 消除多进程并发跑迁移；数据库和 Redis 不发布宿主端口，API/frontend 只绑定 loopback |
+| 13:43 CST | observability | 增加应用 JSON 日志/请求与 Run correlation、`/live`、DB-only `/health`、DB+head+Redis `/ready`、数据库事实指标和 Worker 依赖能力探针 | Redis 不可用明确降级而非伪装 ready；探针不是 Worker 主循环 liveness，数据库驱动 timeout 仍是同步探测的最终上界 |
+| 13:52 CST | review/fix | 复审发现请求路径可能泄露、finish/cancel 竞态日志失真、Worker 异常 ACK 风险和旧 Compose orphan | 日志仅记录代码定义 route 模板；记录锁内真实终态；未处理异常不 ACK；Make Compose 命令增加精确 project orphan 清理但默认不删卷 |
+| 14:03 CST | manual evidence | 隔离 Compose 双 Worker 实测 API 执行中重启、实际租约 owner SIGKILL、Redis stop/start、pending/running 取消、重复投递和迁移往返 | 所有 Run 保持 15 个问题唯一与 protocol v1 口径；使用精确项目名 `down -v` 后无残留，未触碰用户已有 8080 进程 |
+| 14:11 CST | automated gate | 默认含 build 的 `scripts/phase2_acceptance.py` 在唯一项目 `llmbenchlab-p2-2a59e6283eda` 完成 8/8；证据敏感信息扫描通过 | 最终 ready、Redis pending/lag 为 0，head→0001→head 三份核心/协议哈希相同；清理后容器、卷、网络均为空 |
+| 14:15 CST | gate | 后端非集成回归、Ruff/format、前端 13 tests/lint/build、Compose config 和 diff check 通过；代码只读复审无 P0/P1 | 故障验证与基础设施阶段满足提交条件；Phase 2 因数据导入与文档/完整阶段门禁尚未收口而继续 in_progress |
 
 ## 实际修改
 
@@ -154,8 +162,12 @@
 | API 取消与创建快照 | 新 Run 冻结 attempt/恢复语义；取消使用跨方言原子状态机；创建先 commit 再 best-effort 通知，API 不加载/执行 Adapter | 已完成 |
 | Redis Streams | 版本化、限长 XADD；Consumer Group、PEL、游标式 XAUTOCLAIM、处理后 ACK；连接/读写均有上界，失败脱敏并降级 | 已完成；真实 Redis 7 验证通过 |
 | 独立 Worker | 单 Run 执行、数据库兜底扫描、租约 reaper、队列唤醒、ACK/自然到期恢复、SIGTERM/grace 与独立 CLI | 已完成；独立进程和故障实测通过 |
-| 本地脚本与配置 | `make worker`；`make dev` 监管 API/Worker/frontend；Redis 可选，Smoke 强制 DB-only，配置包含租约/心跳/poll/deadline | 已完成；Compose/部署配置留待下一阶段 |
+| 本地脚本与配置 | `make worker`；`make dev` 监管 API/Worker/frontend；Redis 可选，Smoke 强制 DB-only，配置包含租约/心跳/poll/deadline | 已完成；Compose/部署配置已在本阶段补齐 |
 | 测试 | 增加迁移/租约竞态、API commit/XADD 顺序与超时、Runner 关停、queue/Worker、fresh import、真实 Redis PEL/ACK/duplicate 用例 | 已完成并通过 |
+| `compose.yaml` / Docker / nginx | 五个长运行服务加一次性 migrate；PostgreSQL/Redis 持久卷与健康检查；API/frontend loopback 端口；Worker 优雅停止；nginx 指向 API | 已完成并在默认 build 全栈验收通过 |
+| 健康、就绪与探针 | `/live` 无外部依赖；`/health` 保持 DB-only；`/ready` 并行、有界检查 DB、Alembic head 与 Redis；Worker probe 区分 DB hard fail 与 Redis degraded | 已完成；明确 capability/readiness 边界，不冒充 Worker event-loop liveness |
+| 应用日志与指标 | LLMBenchLab 应用 logger 输出脱敏 JSON；请求 ID/Run correlation；Worker/Runner 生命周期事件；`/tasks/metrics` 由数据库实时事实导出积压、租约、取消、retry/dead-letter 等 gauge | 已完成；不把 Uvicorn access log 或这些 gauge 宣称为完整历史审计/延迟 counters |
+| CI / Make / 自动验收 | SQLite 与真实 PostgreSQL/Redis 分层 job；全栈 reliability job；`make phase2-acceptance`；隔离项目、随机 loopback 端口、八场景证据与强制清理 | 已完成；证据落于被忽略的 `.pytest_cache/artifacts` |
 
 ## 测试结果
 
@@ -177,11 +189,16 @@
 - 独立进程：Uvicorn 与 Worker 使用不同 PID；API-only Run 延迟后仍为 pending/attempt 0/0 Response，Worker 启动后 completed/attempt 1/lease token 1/15 Response；API 重启后 Response ID 集 SHA-256 为 `788612aa00ef6df499b5a26c5710c9d1cc567caafe888ba8aa11dda3b62f244c`，状态与 score 100 不变；Worker 停机期间的新 Run 在新 Worker PID 启动后完成。
 - 真实 Redis stop/start：停机时 POST 在 0.047 秒返回 202/pending，并持久化 `queue_notification_unavailable`；Worker 在 Redis 完全不可用时仅靠 DB 完成 15 Response/score 100；Redis 7 恢复后新 Run `last_enqueued_at` 非空、完成且 PEL 为 0。
 - 最终三路只读复审未发现 P0/P1；同步数据库驱动调用仍受数据库 driver/连接池 timeout 而非 asyncio grace 约束，列为部署支持边界。
+- 故障验证阶段本地门禁：Ruff check/format 通过；后端全部非集成测试通过；前端 `13 passed`、ESLint 与生产 build 通过；`docker compose config --quiet`、`git diff --check` 通过。Python 3.14 下 FastAPI/TestClient 与 pytest-asyncio 有已知上游弃用警告，不影响退出状态。
+- 正式全栈命令：`python3 scripts/phase2_acceptance.py`（默认执行 build），项目 `llmbenchlab-p2-2a59e6283eda`，2026-08-25 14:09–14:11 CST 完成，状态 `passed`。
+- 正式全栈八场景全部通过：拓扑/健康、protocol v1 基线、执行中 API restart、实际租约 owner SIGKILL 后自然过期接管、Redis stop/start 与 DB reconciliation、pending cancel、running cancel 加 duplicate delivery、PostgreSQL head→0001→head 往返。
+- 正式协议证据：所有完成 Run 均为离线 Mock；baseline 为 15 个唯一 Response、score/completion/answered accuracy 100、tokens 120/30、cost 0；故障场景未改变 `llmbenchlab-protocol-v1` 评分含义。
+- 正式队列/迁移/清理证据：最终 Redis consumer group `pending=0`、`lag=0`；迁移往返前/中/后三份核心事实与协议快照哈希一致；`down -v` 返回 0，项目容器、卷、网络均为空。证据位于被 Git 忽略的 `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-2a59e6283eda/evidence.json`，敏感值扫描无命中。
 
 ## 未运行验证
 
-- Compose 五服务、PostgreSQL 上 API/双 Worker 的进程级并发领取、执行中强杀/租约到期接管、ready/metrics 和 SQLite→PostgreSQL 显式导入尚未运行。
-- 当前 PostgreSQL 证据属于迁移/仓储级；独立 API/Worker/Redis 故障链使用隔离临时 SQLite，二者不会被合并冒充 PostgreSQL 全栈证据。
+- SQLite→PostgreSQL 显式导入尚未纳入阶段提交与最终门禁；必须以只读源、空的随机目标库、单事务回滚、并发互斥和提交前后对账证据单独收口。
+- `make lint`、`make test`、`make smoke` 的最终工作树整套门禁及所有指定文档的一致性审计将在导入阶段提交后再运行；本节不会用当前分项通过替代最终状态。
 - 真实模型调用明确禁止，不会运行。
 
 ## 安全检查
@@ -189,8 +206,9 @@
 - 未读取或输出 `.env` 内容；现有 `.env`、SQLite 数据库、备份、依赖目录保持忽略。
 - PostgreSQL 测试只使用专用临时数据库名 `llmbenchlab_test`；测试 fixture 对其他库名要求显式 destructive 开关；临时容器已停止并自动删除。
 - Redis 只使用本机临时 `redis:7-alpine` 容器和随机测试 Stream；独立进程使用 `/tmp/llmbenchlab-stage3-process.*` 隔离数据库；容器、进程与临时目录均已停止/删除。
+- 正式 Compose 验收使用正则约束的唯一项目名、随机 loopback API/frontend 端口、内部 PostgreSQL/Redis 端口和隔离命名卷；脚本移除 Provider credential 环境变量，失败路径也执行精确 `down -v`，并验证项目级容器/卷/网络为空。
 - 未执行 reset、覆盖用户数据库、push 或真实 Provider 调用；未读取或输出 Provider 密钥。
 
 ## 结果与下一步
 
-可靠性 schema、租约/fencing、幂等 Response、独立 Worker、Redis 通知/降级、真实进程重启及 ACK 不确定结果均已通过，且 protocol v1 的 Response ID、聚合、tokens 与 cost 在重复投递前后不变。下一步提交本阶段，再完成 PostgreSQL/Redis/API/Worker/frontend Compose、ready/metrics/日志及全栈执行中故障验证；这些关键门禁尚未完成，所以 Phase 2 继续保持 `in_progress`。
+可靠性 schema、租约/fencing、幂等 Response、独立 Worker、Redis 通知/降级、健康/日志/DB 指标和 PostgreSQL 全栈故障恢复已通过；默认构建验收的 8/8 场景证明执行中 API/Worker 故障、Redis 中断、取消、重复投递和迁移往返都未改变 protocol v1 的逐题唯一性与评分口径。下一步独立提交本阶段，再收口 SQLite→PostgreSQL 导入、最终整套门禁和全部指定文档。Phase 2 的限流、预算、完整背压、历史可观测 counters/延迟、完整审计与性能基线仍未完成，因此继续保持 `in_progress`。

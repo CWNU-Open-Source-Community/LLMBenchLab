@@ -99,10 +99,10 @@ class _ControlledRunner(EvaluationRunner):
         assert run_id == self.repository.lease.run_id
         return False
 
-    def _finish(self, lease: RunLease, status: RunStatus) -> bool:
+    def _finish(self, lease: RunLease, status: RunStatus) -> RunStatus | None:
         assert lease == self.repository.lease
         self.finished.append(status)
-        return True
+        return status
 
     async def _evaluate_question(
         self,
@@ -146,6 +146,13 @@ class _ShutdownRunner(_ControlledRunner):
     ) -> None:
         del lease, lease_lost
         await stop.wait()
+
+
+class _CancelledAtFinishRunner(_ControlledRunner):
+    def _finish(self, lease: RunLease, status: RunStatus) -> RunStatus | None:
+        assert lease == self.repository.lease
+        self.finished.append(status)
+        return RunStatus.CANCELLED
 
 
 @pytest.mark.asyncio
@@ -227,3 +234,24 @@ async def test_preexisting_shutdown_never_claims_run(
     assert runner.started == []
     assert runner.repository.failed == []
     assert runner.repository.claim_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_finish_log_uses_terminal_state_resolved_inside_database_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(
+        "app.runners.evaluation_runner.build_adapter", lambda *args, **kwargs: object()
+    )
+    runner = _CancelledAtFinishRunner(concurrency=2)
+    runner.block.set()
+    caplog.set_level("INFO", logger="app.runners.evaluation_runner")
+
+    assert await runner.execute("run-controlled") is True
+
+    assert runner.finished == [RunStatus.COMPLETED]
+    finish_record = next(
+        record for record in caplog.records if record.event == "run_attempt_finished"
+    )
+    assert finish_record.result == "cancelled"

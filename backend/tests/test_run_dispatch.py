@@ -6,7 +6,6 @@ import asyncio
 import time
 from datetime import timedelta
 
-import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -189,10 +188,15 @@ def test_database_commit_failure_never_calls_publisher(client, monkeypatch) -> N
         raise SQLAlchemyError("controlled commit failure")
 
     monkeypatch.setattr(Session, "commit", fail_commit)
-    with pytest.raises(SQLAlchemyError, match="controlled commit failure"):
-        _post_run(client, model_id, benchmark_id)
+    response = _post_run(client, model_id, benchmark_id)
 
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"]
+    assert response.json()["detail"]["code"] == "internal_server_error"
+    assert "controlled commit failure" not in response.text
     assert publisher.calls == []
+    with SessionLocal() as session:
+        assert session.scalar(select(func.count(EvaluationRun.id))) == 0
 
 
 def test_endpoint_bounds_half_open_redis_publish_and_returns_202(client, monkeypatch) -> None:

@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help setup dev backend worker frontend test lint format smoke migrate docker-up docker-down
+.PHONY: help setup dev backend worker frontend test lint format smoke migrate phase2-acceptance docker-up docker-down
 
 help:
 	@echo "LLMBenchLab developer commands:"
@@ -15,6 +15,7 @@ help:
 	@echo "  make format       Apply safe automatic formatting fixes"
 	@echo "  make smoke        Run the fully offline Mock vertical-slice smoke test"
 	@echo "  make migrate      Apply all Alembic migrations"
+	@echo "  make phase2-acceptance  Run isolated real-Compose reliability fault tests"
 	@echo "  make docker-up    Build and start the Compose stack"
 	@echo "  make docker-down  Stop the Compose stack"
 
@@ -66,8 +67,11 @@ smoke:
 migrate:
 	@./scripts/migrate.sh
 
+phase2-acceptance:
+	@python3 scripts/phase2_acceptance.py
+
 docker-up:
-	@docker compose up --build
+	@docker compose up --build --wait --wait-timeout 180 --remove-orphans
 
 docker-down:
-	@docker compose down
+	@docker compose down --remove-orphans

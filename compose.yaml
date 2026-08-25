@@ -1,19 +1,92 @@
 name: llmbenchlab
 
+x-backend-image: &backend-image
+  image: llmbenchlab-backend:${LLMBENCHLAB_IMAGE_TAG:-local}
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+
+x-app-environment: &app-environment
+  DATABASE_URL: ${LLMBENCHLAB_COMPOSE_DATABASE_URL:-postgresql+psycopg://llmbenchlab:llmbenchlab-local-only@postgres:5432/llmbenchlab?connect_timeout=2}
+  REDIS_URL: ${LLMBENCHLAB_COMPOSE_REDIS_URL:-redis://redis:6379/0}
+  CORS_ORIGINS: http://localhost:${FRONTEND_PORT:-8080},http://127.0.0.1:${FRONTEND_PORT:-8080}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LLMBENCHLAB_WORKER_LEASE_SECONDS: ${LLMBENCHLAB_COMPOSE_WORKER_LEASE_SECONDS:-30}
+  LLMBENCHLAB_WORKER_HEARTBEAT_SECONDS: ${LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS:-10}
+  LLMBENCHLAB_WORKER_POLL_SECONDS: ${LLMBENCHLAB_COMPOSE_WORKER_POLL_SECONDS:-1}
+  LLMBENCHLAB_WORKER_SHUTDOWN_GRACE_SECONDS: ${LLMBENCHLAB_COMPOSE_WORKER_SHUTDOWN_GRACE_SECONDS:-30}
+  LLMBENCHLAB_REDIS_OPERATION_TIMEOUT_SECONDS: ${LLMBENCHLAB_COMPOSE_REDIS_OPERATION_TIMEOUT_SECONDS:-1}
+  LLMBENCHLAB_DATABASE_POOL_TIMEOUT_SECONDS: ${LLMBENCHLAB_COMPOSE_DATABASE_POOL_TIMEOUT_SECONDS:-2}
+  LLMBENCHLAB_READINESS_DATABASE_TIMEOUT_SECONDS: ${LLMBENCHLAB_COMPOSE_READINESS_DATABASE_TIMEOUT_SECONDS:-2}
+
 services:
-  backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile
-    init: true
+  postgres:
+    image: postgres:16-alpine
     environment:
-      DATABASE_URL: sqlite:////data/llmbenchlab.db
-      FRONTEND_ORIGIN: http://localhost:${FRONTEND_PORT:-8080}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    ports:
-      - "${API_PORT:-8000}:8000"
+      POSTGRES_DB: llmbenchlab
+      POSTGRES_USER: llmbenchlab
+      POSTGRES_PASSWORD: llmbenchlab-local-only
     volumes:
-      - sqlite-data:/data
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U llmbenchlab -d llmbenchlab"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    stop_grace_period: 20s
+
+  migrate:
+    <<: *backend-image
+    init: true
+    environment: *app-environment
+    command:
+      - sh
+      - -c
+      - python -m app.db.prepare_migrations && alembic upgrade head && alembic check
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    <<: *backend-image
+    init: true
+    environment: *app-environment
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
     healthcheck:
       test:
         - CMD
@@ -21,11 +94,34 @@ services:
         - -c
         - >-
           import urllib.request;
-          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=2)
-      interval: 10s
-      timeout: 3s
-      retries: 5
+          urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=4)
+      interval: 5s
+      timeout: 5s
+      retries: 20
       start_period: 10s
+    stop_grace_period: 20s
+
+  worker:
+    <<: *backend-image
+    init: true
+    environment:
+      <<: *app-environment
+      LLMBENCHLAB_MOCK_GENERATION_DELAY_SECONDS: ${LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS:-0}
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.worker_probe"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+      start_period: 10s
+    stop_grace_period: 45s
 
   frontend:
     build:
@@ -34,10 +130,11 @@ services:
       args:
         VITE_API_BASE_URL: /api/v1
     depends_on:
-      backend:
+      api:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-8080}:80"
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
 
 volumes:
-  sqlite-data:
+  postgres-data:
+  redis-data:

@@ -7,7 +7,6 @@ import subprocess
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
@@ -218,30 +217,63 @@ async def create_run(
     )
     session.add(run)
     session.commit()
+    correlation_id = run.id
+    logger.info(
+        "Run persisted before queue notification",
+        extra={
+            "event": "run_created",
+            "correlation_id": correlation_id,
+            "run_id": run.id,
+            "result": "pending",
+        },
+    )
     run_queue = request.app.state.run_queue
     if run_queue is not None:
         repository = _lease_repository(session, settings)
         try:
-            await run_queue.publish(run.id, correlation_id=str(uuid4()))
+            message_id = await run_queue.publish(run.id, correlation_id=correlation_id)
         except QueueUnavailable:
             logger.warning(
                 "Run queue notification unavailable",
-                extra={"event": "run_queue_publish_failed", "run_id": run.id},
+                extra={
+                    "event": "run_queue_publish_failed",
+                    "correlation_id": correlation_id,
+                    "run_id": run.id,
+                    "result": "observed_unavailable",
+                },
             )
             try:
                 repository.record_notification_result(run.id, published=False)
             except Exception:
                 logger.error(
                     "Run queue failure evidence could not be recorded",
-                    extra={"event": "run_queue_audit_failed", "run_id": run.id},
+                    extra={
+                        "event": "run_queue_audit_failed",
+                        "correlation_id": correlation_id,
+                        "run_id": run.id,
+                    },
                 )
         else:
+            logger.info(
+                "Run queue notification published",
+                extra={
+                    "event": "run_queue_published",
+                    "correlation_id": correlation_id,
+                    "run_id": run.id,
+                    "message_id": message_id,
+                    "result": "published",
+                },
+            )
             try:
                 repository.record_notification_result(run.id, published=True)
             except Exception:
                 logger.error(
                     "Run queue success evidence could not be recorded",
-                    extra={"event": "run_queue_audit_failed", "run_id": run.id},
+                    extra={
+                        "event": "run_queue_audit_failed",
+                        "correlation_id": correlation_id,
+                        "run_id": run.id,
+                    },
                 )
         session.expire_all()
         refreshed = session.get(EvaluationRun, run.id)

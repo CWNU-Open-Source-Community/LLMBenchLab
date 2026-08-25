@@ -34,6 +34,7 @@ coverage/
 # Logs and local process state
 *.log
 *.pid
+artifacts/
 
 # Editors and operating systems
 .DS_Store

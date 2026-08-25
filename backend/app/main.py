@@ -3,6 +3,7 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from time import monotonic
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -12,27 +13,23 @@ from fastapi.responses import JSONResponse
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.constants import API_V1_PREFIX
+from app.core.logging import (
+    REQUEST_ID_HEADER,
+    configure_logging,
+    new_correlation_id,
+    normalize_correlation_id,
+    request_scope,
+)
 from app.db.init_db import initialize_database
-from app.task_queue import RedisRunQueue
+from app.task_queue import create_run_queue
+
+logger = logging.getLogger(__name__)
 
 
 def create_app() -> FastAPI:
     settings = get_settings()
-    run_queue = (
-        RedisRunQueue.from_url(
-            settings.redis_url,
-            stream=settings.task_stream,
-            consumer_group=settings.task_consumer_group,
-            max_length=settings.task_stream_max_length,
-            block_milliseconds=settings.redis_block_milliseconds,
-            max_connections=settings.redis_max_connections,
-            publish_timeout_seconds=settings.redis_publish_timeout_seconds,
-            operation_timeout_seconds=settings.redis_operation_timeout_seconds,
-        )
-        if settings.redis_url is not None
-        else None
-    )
-    logging.basicConfig(level=settings.log_level)
+    run_queue = create_run_queue(settings)
+    configure_logging(settings.log_level)
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI) -> AsyncIterator[None]:
@@ -58,9 +55,60 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins,
         allow_credentials=False,
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Accept", "Content-Type"],
+        allow_headers=["Accept", "Content-Type", REQUEST_ID_HEADER],
+        expose_headers=[REQUEST_ID_HEADER],
     )
     application.state.run_queue = run_queue
+
+    @application.middleware("http")
+    async def correlate_request(request: Request, call_next):
+        request_id = (
+            normalize_correlation_id(request.headers.get(REQUEST_ID_HEADER)) or new_correlation_id()
+        )
+        started = monotonic()
+        with request_scope(request_id):
+            try:
+                response = await call_next(request)
+            except Exception as exc:
+                route = request.scope.get("route")
+                route_template = getattr(route, "path", "<unmatched>")
+                logger.error(
+                    "API request failed",
+                    extra={
+                        "event": "api_request_failed",
+                        "request_id": request_id,
+                        "request_method": request.method,
+                        "request_path": route_template,
+                        "duration_ms": round((monotonic() - started) * 1000, 3),
+                        "error_code": f"api_error:{type(exc).__name__}",
+                        "result": "internal_server_error",
+                    },
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    content={
+                        "detail": {
+                            "code": "internal_server_error",
+                            "message": "An internal server error occurred",
+                        }
+                    },
+                    headers={REQUEST_ID_HEADER: request_id},
+                )
+            response.headers[REQUEST_ID_HEADER] = request_id
+            route = request.scope.get("route")
+            route_template = getattr(route, "path", "<unmatched>")
+            logger.info(
+                "API request completed",
+                extra={
+                    "event": "api_request_completed",
+                    "request_id": request_id,
+                    "request_method": request.method,
+                    "request_path": route_template,
+                    "status_code": response.status_code,
+                    "duration_ms": round((monotonic() - started) * 1000, 3),
+                },
+            )
+            return response
 
     @application.exception_handler(RequestValidationError)
     async def request_validation_error(

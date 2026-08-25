@@ -48,6 +48,27 @@ async def test_mock_adapter_supports_configured_errors() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mock_adapter_supports_bounded_offline_fault_delay() -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    result = await MockModelAdapter(sleep=fake_sleep).generate(
+        [],
+        {"mock_response": "A", "mock_generation_delay_seconds": 0.25},
+    )
+    assert result.text == "A"
+    assert delays == [0.25]
+
+    with pytest.raises(AdapterError, match="between 0 and 5 seconds"):
+        await MockModelAdapter(sleep=fake_sleep).generate(
+            [],
+            {"mock_generation_delay_seconds": 5.1},
+        )
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_sends_chat_completion_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

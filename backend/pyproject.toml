@@ -22,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 llmbenchlab-worker = "app.worker:main"
+llmbenchlab-worker-probe = "app.worker_probe:main"
 
 [project.optional-dependencies]
 dev = [

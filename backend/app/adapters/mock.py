@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from .base import AdapterError, GenerationConfig, Message, ModelAdapter, ModelGenerationResult
@@ -22,12 +23,36 @@ def _optional_non_negative_int(value: Any) -> int | None:
 class MockModelAdapter(ModelAdapter):
     """Return ``generation_config['mock_response']`` without doing any I/O."""
 
+    def __init__(self, *, sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> None:
+        self._sleep = sleep
+
     async def generate(
         self,
         messages: Sequence[Message],
         generation_config: GenerationConfig,
     ) -> ModelGenerationResult:
         del messages  # The configured response, rather than prompt text, is the contract.
+
+        delay_value = generation_config.get("mock_generation_delay_seconds", 0.0)
+        if isinstance(delay_value, bool):
+            raise AdapterError(
+                "mock_configuration_error",
+                "Mock generation delay must be between 0 and 5 seconds.",
+            )
+        try:
+            delay_seconds = float(delay_value)
+        except (TypeError, ValueError) as exc:
+            raise AdapterError(
+                "mock_configuration_error",
+                "Mock generation delay must be between 0 and 5 seconds.",
+            ) from exc
+        if not 0 <= delay_seconds <= 5 or delay_seconds != delay_seconds:
+            raise AdapterError(
+                "mock_configuration_error",
+                "Mock generation delay must be between 0 and 5 seconds.",
+            )
+        if delay_seconds:
+            await self._sleep(delay_seconds)
 
         mock_error = generation_config.get("mock_error")
         if mock_error:

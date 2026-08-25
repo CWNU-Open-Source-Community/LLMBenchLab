@@ -16,8 +16,8 @@ concurrency:
 jobs:
   backend:
     name: Backend lint and test
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     env:
       FRONTEND_ORIGIN: http://localhost:5173
       LOG_LEVEL: WARNING
@@ -35,7 +35,7 @@ jobs:
           python-version: "3.12"
 
       - name: Configure isolated temporary SQLite
-        run: echo "DATABASE_URL=sqlite:///${RUNNER_TEMP}/llmbenchlab-ci.db" >> "$GITHUB_ENV"
+        run: echo "LLMBENCHLAB_DATABASE_URL=sqlite:///${RUNNER_TEMP}/llmbenchlab-ci.db" >> "$GITHUB_ENV"
 
       - name: Install uv
         run: python -m pip install --disable-pip-version-check uv==0.11.32
@@ -49,12 +49,121 @@ jobs:
       - name: Ruff format check
         run: uv run ruff format --check .
 
+      - name: SQLite migration upgrade, downgrade, upgrade, and check
+        run: |
+          uv run python -m app.db.prepare_migrations
+          uv run alembic upgrade head
+          uv run alembic downgrade 20260824_0001
+          uv run alembic upgrade head
+          uv run alembic check
+
       - name: Backend tests (offline Mock and temporary SQLite)
-        run: uv run pytest
+        run: uv run pytest -m "not integration"
+
+  backend-integration:
+    name: Backend PostgreSQL and Redis integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      FRONTEND_ORIGIN: http://localhost:5173
+      LOG_LEVEL: WARNING
+      DEMO_API_KEY_ENV: LLMBENCHLAB_CI_UNUSED_API_KEY
+      LLMBENCHLAB_DATABASE_URL: postgresql+psycopg://llmbenchlab:llmbenchlab-ci-only@127.0.0.1:5432/llmbenchlab_test
+      LLMBENCHLAB_REDIS_URL: redis://127.0.0.1:6379/15
+      LLMBENCHLAB_TEST_POSTGRES_URL: postgresql+psycopg://llmbenchlab:llmbenchlab-ci-only@127.0.0.1:5432/llmbenchlab_test
+      LLMBENCHLAB_TEST_REDIS_URL: redis://127.0.0.1:6379/15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: llmbenchlab_test
+          POSTGRES_USER: llmbenchlab
+          POSTGRES_PASSWORD: llmbenchlab-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U llmbenchlab -d llmbenchlab_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.11.32
+
+      - name: Install locked backend dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: PostgreSQL migration upgrade, downgrade, upgrade, and check
+        run: |
+          uv run python -m app.db.prepare_migrations
+          uv run alembic upgrade head
+          uv run alembic downgrade 20260824_0001
+          uv run alembic upgrade head
+          uv run alembic check
+
+      - name: Real infrastructure integration tests (skips forbidden)
+        run: |
+          uv run pytest -m integration tests -ra \
+            --junitxml="${RUNNER_TEMP}/backend-integration.xml"
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree
+
+          report = Path(os.environ["RUNNER_TEMP"]) / "backend-integration.xml"
+          cases = list(ElementTree.parse(report).getroot().iter("testcase"))
+          skipped = [case for case in cases if case.find("skipped") is not None]
+          if not cases:
+              raise SystemExit("No backend integration tests were collected")
+          if skipped:
+              names = ", ".join(case.attrib.get("name", "unknown") for case in skipped)
+              raise SystemExit(f"Backend integration tests skipped unexpectedly: {names}")
+          print(f"Verified {len(cases)} backend integration tests with zero skips")
+          PY
+
+  full-stack-reliability:
+    name: Real Compose reliability acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Run isolated PostgreSQL, Redis, API, Worker, and frontend fault tests
+        run: python3 scripts/phase2_acceptance.py
+
+      - name: Upload sanitized reliability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase2-reliability-evidence-${{ github.run_id }}
+          path: .pytest_cache/artifacts/phase2-acceptance
+          if-no-files-found: warn
+          retention-days: 7
 
   frontend:
     name: Frontend lint, test, and build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:

@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     database_pool_size: int = Field(default=5, ge=1, le=50)
     database_max_overflow: int = Field(default=5, ge=0, le=100)
     database_pool_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    readiness_database_timeout_seconds: float = Field(default=5.0, gt=0, le=30.0)
     redis_url: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LLMBENCHLAB_REDIS_URL", "REDIS_URL"),
@@ -48,6 +49,7 @@ class Settings(BaseSettings):
     worker_retry_backoff_base_seconds: float = Field(default=1.0, ge=0.0, le=3600.0)
     worker_retry_backoff_cap_seconds: float = Field(default=30.0, ge=0.0, le=86_400.0)
     worker_shutdown_grace_seconds: float = Field(default=30.0, ge=0.0, le=3600.0)
+    mock_generation_delay_seconds: float = Field(default=0.0, ge=0.0, le=5.0)
     redis_block_milliseconds: int = Field(default=1000, ge=50, le=60_000)
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],

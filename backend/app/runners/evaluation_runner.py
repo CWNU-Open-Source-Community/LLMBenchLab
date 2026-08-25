@@ -85,6 +85,7 @@ class EvaluationRunner:
             retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
         )
         self._heartbeat_seconds = settings.worker_heartbeat_seconds
+        self._mock_generation_delay_seconds = settings.mock_generation_delay_seconds
 
     async def execute(
         self,
@@ -98,7 +99,27 @@ class EvaluationRunner:
             return False
         lease = self._claim(run_id)
         if lease is None:
+            logger.info(
+                "Run claim was a durable no-op",
+                extra={
+                    "event": "run_claim_noop",
+                    "run_id": run_id,
+                    "worker_id": self._worker_id,
+                    "result": "not_claimable",
+                },
+            )
             return True
+        logger.info(
+            "Run lease claimed",
+            extra={
+                "event": "run_claimed",
+                "run_id": run_id,
+                "worker_id": lease.owner,
+                "attempt": lease.attempt,
+                "lease_token": lease.token,
+                "result": "claimed",
+            },
+        )
         heartbeat_stop = asyncio.Event()
         lease_lost = asyncio.Event()
         heartbeat_task = asyncio.create_task(
@@ -158,30 +179,98 @@ class EvaluationRunner:
             final_status = (
                 RunStatus.CANCELLED if self._cancellation_requested(run_id) else RunStatus.COMPLETED
             )
-            self._finish(lease, final_status)
+            finished_status = self._finish(lease, final_status)
+            logger.info(
+                "Evaluation run finish transition resolved",
+                extra={
+                    "event": "run_attempt_finished",
+                    "run_id": run_id,
+                    "worker_id": lease.owner,
+                    "attempt": lease.attempt,
+                    "lease_token": lease.token,
+                    "result": finished_status.value if finished_status else "fence_lost",
+                },
+            )
             return True
         except asyncio.CancelledError:
             logger.warning(
                 "Evaluation run interrupted; durable lease expiry will recover it",
-                extra={"event": "run_shutdown_lease_expiry", "run_id": run_id},
+                extra={
+                    "event": "run_shutdown_lease_expiry",
+                    "run_id": run_id,
+                    "worker_id": lease.owner,
+                    "attempt": lease.attempt,
+                    "lease_token": lease.token,
+                    "result": "interrupted",
+                },
             )
             raise
         except _ShutdownRequested:
             logger.info(
                 "Evaluation run drained for shutdown; durable lease expiry will recover it",
-                extra={"event": "run_shutdown_lease_expiry", "run_id": run_id},
+                extra={
+                    "event": "run_shutdown_lease_expiry",
+                    "run_id": run_id,
+                    "worker_id": lease.owner,
+                    "attempt": lease.attempt,
+                    "lease_token": lease.token,
+                    "result": "drained",
+                },
             )
             return False
         except _LeaseUnavailable:
             if self._lease_repository.finish_cancelled(lease):
-                logger.info("Evaluation run %s stopped after cancellation", run_id)
+                logger.info(
+                    "Evaluation run stopped after cancellation",
+                    extra={
+                        "event": "run_cancelled",
+                        "run_id": run_id,
+                        "worker_id": lease.owner,
+                        "attempt": lease.attempt,
+                        "lease_token": lease.token,
+                        "result": "cancelled",
+                    },
+                )
             else:
-                logger.warning("Evaluation run %s stopped after losing its lease", run_id)
+                logger.warning(
+                    "Evaluation run stopped after losing its lease",
+                    extra={
+                        "event": "run_lease_lost",
+                        "run_id": run_id,
+                        "worker_id": lease.owner,
+                        "attempt": lease.attempt,
+                        "lease_token": lease.token,
+                        "result": "fenced",
+                    },
+                )
             return True
         except Exception as exc:  # Run-level isolation; details are deliberately sanitized.
-            logger.exception("Evaluation run %s failed", run_id)
-            self._lease_repository.fail_attempt(
+            logger.error(
+                "Evaluation run failed",
+                extra={
+                    "event": "run_attempt_failed",
+                    "run_id": run_id,
+                    "worker_id": lease.owner,
+                    "attempt": lease.attempt,
+                    "lease_token": lease.token,
+                    "error_code": f"runner_error:{type(exc).__name__}",
+                    "result": "retry_or_dead_letter",
+                },
+            )
+            disposition = self._lease_repository.fail_attempt(
                 lease, error_code=f"runner_error:{type(exc).__name__}"
+            )
+            logger.warning(
+                "Evaluation run failure transition resolved",
+                extra={
+                    "event": "run_attempt_failure_resolved",
+                    "run_id": run_id,
+                    "worker_id": lease.owner,
+                    "attempt": lease.attempt,
+                    "lease_token": lease.token,
+                    "error_code": f"runner_error:{type(exc).__name__}",
+                    "result": disposition.value,
+                },
             )
             return True
         finally:
@@ -207,9 +296,12 @@ class EvaluationRunner:
                     logger.error(
                         "Run lease heartbeat failed",
                         extra={
+                            "event": "run_heartbeat_failed",
                             "run_id": lease.run_id,
                             "worker_id": lease.owner,
+                            "attempt": lease.attempt,
                             "lease_token": lease.token,
+                            "result": "lease_lost",
                         },
                     )
                     lease_lost.set()
@@ -218,13 +310,27 @@ class EvaluationRunner:
                     logger.warning(
                         "Run lease heartbeat rejected",
                         extra={
+                            "event": "run_heartbeat_rejected",
                             "run_id": lease.run_id,
                             "worker_id": lease.owner,
+                            "attempt": lease.attempt,
                             "lease_token": lease.token,
+                            "result": "fenced",
                         },
                     )
                     lease_lost.set()
                     return
+                logger.debug(
+                    "Run lease heartbeat renewed",
+                    extra={
+                        "event": "run_heartbeat_renewed",
+                        "run_id": lease.run_id,
+                        "worker_id": lease.owner,
+                        "attempt": lease.attempt,
+                        "lease_token": lease.token,
+                        "result": "renewed",
+                    },
+                )
 
     @staticmethod
     async def _run_questions(
@@ -365,6 +471,7 @@ class EvaluationRunner:
         config = dict(generation)
         if model.provider_type == "mock":
             config["mock_response"] = question.metadata.get("mock_response", "")
+            config["mock_generation_delay_seconds"] = self._mock_generation_delay_seconds
             if "mock_error" in question.metadata:
                 config["mock_error"] = question.metadata["mock_error"]
             config.setdefault("mock_input_tokens", question.metadata.get("mock_input_tokens", 8))
@@ -389,7 +496,19 @@ class EvaluationRunner:
                 error_message=exc.error_message,
             )
         except Exception as exc:
-            logger.exception("Question %s failed in run %s", question.external_id, run_id)
+            logger.error(
+                "Question processing failed",
+                extra={
+                    "event": "question_processing_failed",
+                    "run_id": run_id,
+                    "question_id": question.id,
+                    "worker_id": lease.owner,
+                    "attempt": lease.attempt,
+                    "lease_token": lease.token,
+                    "error_code": f"question_internal_error:{type(exc).__name__}",
+                    "result": "error_response",
+                },
+            )
             response = EvaluationResponse(
                 run_id=run_id,
                 question_id=question.id,
@@ -413,10 +532,17 @@ class EvaluationRunner:
                 )
             except Exception as exc:
                 logger.error(
-                    "Evaluator %s failed for question %s in run %s",
-                    type(exc).__name__,
-                    question.external_id,
-                    run_id,
+                    "Evaluator failed for question",
+                    extra={
+                        "event": "question_evaluator_failed",
+                        "run_id": run_id,
+                        "question_id": question.id,
+                        "worker_id": lease.owner,
+                        "attempt": lease.attempt,
+                        "lease_token": lease.token,
+                        "error_code": f"evaluator_internal_error:{type(exc).__name__}",
+                        "result": "error_response",
+                    },
                 )
                 response = EvaluationResponse(
                     run_id=run_id,
@@ -456,6 +582,19 @@ class EvaluationRunner:
                 )
 
         disposition = self._lease_repository.persist_response(lease, response)
+        logger.info(
+            "Question evidence persistence resolved",
+            extra={
+                "event": "question_evidence_persisted",
+                "run_id": run_id,
+                "question_id": question.id,
+                "worker_id": lease.owner,
+                "attempt": lease.attempt,
+                "lease_token": lease.token,
+                "result": disposition.value,
+                "error_code": response.error_type or "none",
+            },
+        )
         if disposition == ResponseDisposition.FENCE_LOST:
             raise _LeaseUnavailable("response_fence_lost")
 
@@ -498,11 +637,11 @@ class EvaluationRunner:
                 )
             )
 
-    def _finish(self, lease: RunLease, status: RunStatus) -> bool:
+    def _finish(self, lease: RunLease, status: RunStatus) -> RunStatus | None:
         with self._session_factory() as session, session.begin():
             run = self._lease_repository.lock_owned_run(session, lease, allow_cancel_requested=True)
             if run is None:
-                return False
+                return None
             planned = run.total_questions
             completed_response_count = aggregate_run_evidence(session, run)
             if (
@@ -511,10 +650,11 @@ class EvaluationRunner:
                 and completed_response_count != planned
             ):
                 raise RuntimeError("run_response_set_incomplete")
-            run.status = RunStatus.CANCELLED if run.cancellation_requested else status
+            actual_status = RunStatus.CANCELLED if run.cancellation_requested else status
+            run.status = actual_status
             run.finished_at = utc_now()
             run.next_attempt_at = None
             run.lease_owner = None
             run.lease_expires_at = None
             run.heartbeat_at = None
-            return True
+            return actual_status

@@ -248,7 +248,10 @@ def test_sqlite_finish_and_cancel_race_resolves_to_one_terminal_state(lease_stor
     with ThreadPoolExecutor(max_workers=2) as executor:
         finish_future = executor.submit(finish)
         cancel_future = executor.submit(cancel)
-        assert finish_future.result(timeout=10) is True
+        assert finish_future.result(timeout=10) in {
+            RunStatus.COMPLETED,
+            RunStatus.CANCELLED,
+        }
         cancel_disposition = cancel_future.result(timeout=10)
 
     assert cancel_disposition in {

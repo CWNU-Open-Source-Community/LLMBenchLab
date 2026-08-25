@@ -11,7 +11,13 @@ from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, E
 from app.schemas.metrics import DashboardSummary, LeaderboardEntry, LeaderboardList
 from app.schemas.model import ModelCreate, ModelList, ModelRead, ModelUpdate
 from app.schemas.question import QuestionCreate, QuestionList, QuestionRead
-from app.schemas.system import HealthResponse, InfoResponse
+from app.schemas.system import (
+    HealthResponse,
+    InfoResponse,
+    LivenessResponse,
+    ReadinessResponse,
+    TaskMetricsResponse,
+)
 
 __all__ = [
     "BenchmarkCreate",
@@ -28,6 +34,7 @@ __all__ = [
     "InfoResponse",
     "LeaderboardEntry",
     "LeaderboardList",
+    "LivenessResponse",
     "ModelCreate",
     "ModelList",
     "ModelRead",
@@ -36,4 +43,6 @@ __all__ = [
     "QuestionCreate",
     "QuestionList",
     "QuestionRead",
+    "ReadinessResponse",
+    "TaskMetricsResponse",
 ]
