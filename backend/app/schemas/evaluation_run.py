@@ -42,6 +42,16 @@ class EvaluationRunRead(ORMModel):
     output_tokens: int | None
     estimated_cost: float | None
     cancellation_requested: bool
+    attempt_count: int
+    max_attempts: int
+    lease_owner: str | None
+    lease_token: int
+    lease_expires_at: datetime | None
+    heartbeat_at: datetime | None
+    next_attempt_at: datetime | None
+    last_enqueued_at: datetime | None
+    last_error: str | None
+    dead_lettered_at: datetime | None
     started_at: datetime | None
     finished_at: datetime | None
     created_at: datetime

@@ -19,7 +19,14 @@ def _ensure_sqlite_parent(database_url: str) -> None:
     Path(url.database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
 
 
-def create_database_engine(database_url: str, *, echo: bool = False) -> Engine:
+def create_database_engine(
+    database_url: str,
+    *,
+    echo: bool = False,
+    pool_size: int = 5,
+    max_overflow: int = 5,
+    pool_timeout: float = 30.0,
+) -> Engine:
     """Create an engine with safe SQLite defaults and foreign keys enabled."""
 
     _ensure_sqlite_parent(database_url)
@@ -29,6 +36,12 @@ def create_database_engine(database_url: str, *, echo: bool = False) -> Engine:
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
         if not url.database or url.database == ":memory:":
             kwargs["poolclass"] = StaticPool
+    else:
+        kwargs.update(
+            pool_size=pool_size,
+            max_overflow=max_overflow,
+            pool_timeout=pool_timeout,
+        )
 
     database_engine = create_engine(database_url, **kwargs)
 
@@ -45,7 +58,13 @@ def create_database_engine(database_url: str, *, echo: bool = False) -> Engine:
 
 
 settings = get_settings()
-engine = create_database_engine(settings.database_url, echo=settings.debug)
+engine = create_database_engine(
+    settings.database_url,
+    echo=settings.debug,
+    pool_size=settings.database_pool_size,
+    max_overflow=settings.database_max_overflow,
+    pool_timeout=settings.database_pool_timeout_seconds,
+)
 SessionLocal = sessionmaker(bind=engine, class_=Session, autoflush=False, expire_on_commit=False)
 
 

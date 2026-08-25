@@ -2,9 +2,9 @@
 
 import json
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -28,6 +28,23 @@ class Settings(BaseSettings):
         default="sqlite:///./data/llmbenchlab.db",
         validation_alias=AliasChoices("LLMBENCHLAB_DATABASE_URL", "DATABASE_URL"),
     )
+    database_pool_size: int = Field(default=5, ge=1, le=50)
+    database_max_overflow: int = Field(default=5, ge=0, le=100)
+    database_pool_timeout_seconds: float = Field(default=30.0, gt=0, le=300)
+    redis_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("LLMBENCHLAB_REDIS_URL", "REDIS_URL"),
+    )
+    task_stream: str = Field(default="llmbenchlab:runs:v1", min_length=1, max_length=128)
+    task_consumer_group: str = Field(default="llmbenchlab-workers-v1", min_length=1, max_length=128)
+    task_stream_max_length: int = Field(default=10_000, ge=100, le=10_000_000)
+    worker_lease_seconds: float = Field(default=30.0, ge=3.0, le=3600.0)
+    worker_heartbeat_seconds: float = Field(default=10.0, ge=1.0, le=1200.0)
+    worker_poll_seconds: float = Field(default=1.0, ge=0.05, le=60.0)
+    worker_max_attempts: int = Field(default=3, ge=1, le=20)
+    worker_retry_backoff_base_seconds: float = Field(default=1.0, ge=0.0, le=3600.0)
+    worker_retry_backoff_cap_seconds: float = Field(default=30.0, ge=0.0, le=86_400.0)
+    redis_block_milliseconds: int = Field(default=1000, ge=50, le=60_000)
     cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
         validation_alias=AliasChoices(
@@ -65,6 +82,21 @@ class Settings(BaseSettings):
         if normalized not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
             raise ValueError("log_level must be CRITICAL, ERROR, WARNING, INFO, or DEBUG")
         return normalized
+
+    @field_validator("redis_url", mode="before")
+    @classmethod
+    def normalize_optional_redis_url(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @model_validator(mode="after")
+    def validate_worker_timing(self) -> Self:
+        if self.worker_heartbeat_seconds * 2 > self.worker_lease_seconds:
+            raise ValueError("worker_heartbeat_seconds must be at most half the lease duration")
+        if self.worker_retry_backoff_base_seconds > self.worker_retry_backoff_cap_seconds:
+            raise ValueError("worker retry backoff base must not exceed its cap")
+        return self
 
 
 @lru_cache

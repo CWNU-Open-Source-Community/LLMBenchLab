@@ -78,7 +78,7 @@ Run 增加以下可靠性元数据：
 
 成功领取在同一语句/事务中把状态设为 `running`，写入 owner，令 `lease_token = lease_token + 1`，更新 heartbeat/expiry，令 `attempt_count = attempt_count + 1`，并保留首次 `started_at`。条件更新影响 0 行即领取失败，不得执行该 Run。
 
-心跳只能在 `status=running`、owner/token 匹配且租约尚未过期时续期。过期租约不能被旧 owner 复活。任何 Response 提交、进度更新、重试释放、取消收敛、完成或失败操作，都必须在同一事务中锁定/校验当前 Run 的 owner、token 和未过期租约；校验失败的 Worker立即停止该 Run，且不能再修改数据库。
+心跳只能在 `status=running`、owner/token 匹配且租约尚未过期时续期。过期租约不能被旧 owner 复活。任何 Response 提交、进度更新、重试释放、取消收敛、完成或失败操作，都必须在同一事务中锁定/校验当前 Run 的 owner、token 和未过期租约；校验失败的 Worker 立即停止该 Run，取消并等待尚未完成的题目协程，且不能再启动 Provider 调用或修改数据库。失租时已经在途且无法由客户端撤销的 Provider 请求仍可能产生一次外部副作用，这是 exactly-once 不可保证边界的一部分。
 
 `lease_token` 在租约释放后不归零，使任何旧 token 永久失效。终态或重新排队时清除 owner、expiry 和 heartbeat。
 
@@ -96,7 +96,8 @@ Run 增加以下可靠性元数据：
 ### 5. 重试、恢复、取消与 dead-letter
 
 - Run 级失败采用有限指数退避。attempt 未耗尽时，当前 token owner 把 Run 重新置 `pending`、设置 `next_attempt_at` 和脱敏 `last_error`、清除当前租约；reconciliation 在到期后再次领取/通知。
-- attempt 耗尽时，Run 进入既有 `failed` 终态，同时写 `dead_lettered_at`、`error_message` 和 `last_error`。Redis dead-letter Stream 如存在也只是派生通知；`failed + dead_lettered_at` 是权威 dead-letter。
+- 在取消优先之后，若持久化 Response 数已等于 `total_questions`，Worker 或 reconciliation 必须直接从数据库事实重新聚合为 `completed`，不能为了补做终态提交再消耗 attempt 或调用 Provider。这覆盖“最后一题已提交、Worker 在终态 commit 前崩溃”的窗口。
+- attempt 耗尽且 Response 集仍不完整时，Run 进入既有 `failed` 终态，同时写 `dead_lettered_at`、`error_message` 和 `last_error`。Redis dead-letter Stream 如存在也只是派生通知；`failed + dead_lettered_at` 是权威 dead-letter。
 - Worker 崩溃不立即改写状态；当前租约到期后由另一个 Worker 接管并递增 token/attempt。已持久化 Response 被跳过。
 - API 重启只重新检查 Alembic head 和依赖，不扫描或修改运行中任务。
 - pending Run 取消时立即进入 `cancelled`。running Run 只持久化 `cancellation_requested`；当前 Worker 在心跳或题目边界观察后以有效 token 聚合已有证据并进入 `cancelled`。若 Worker 已死亡，reconciliation 在租约过期后收敛取消，不再领取执行。
@@ -137,7 +138,8 @@ Run 增加以下可靠性元数据：
 | 心跳 | 当前 owner/token 且租约未过期 | heartbeat/expiry 前移 |
 | 逐题提交 | 当前有效租约，题目尚无 Response | 插入一条 Response，按事实同步进度 |
 | Run 级可重试失败 | 当前有效租约，attempt 未耗尽 | `pending`、设置 next attempt/last error、清租约 |
-| 重试耗尽 | 当前有效租约或 reconciliation 发现已耗尽的过期租约 | `failed`、dead-letter 时间/错误、清租约 |
+| 完整证据恢复 | 当前有效租约或 reconciliation 发现已耗尽的过期租约，且 Response 数等于计划题数 | `completed`、从 Response 聚合、清租约，不调用 Provider |
+| 重试耗尽 | 当前有效租约或 reconciliation 发现已耗尽的过期租约，且 Response 集不完整 | `failed`、dead-letter 时间/错误、清租约 |
 | pending 取消 | 非终态且尚未领取 | `cancelled`、finished time |
 | running 取消 | 取消意图已持久化，当前 token owner 或过期 reconciliation 收敛 | `cancelled`、聚合已有证据、清租约 |
 | 完成 | 当前有效租约，所有计划题已有 Response | `completed`、从 Response 聚合、清租约 |
@@ -224,7 +226,7 @@ Run 增加以下可靠性元数据：
 ### 升级
 
 1. 先固定/备份现有数据库并停止旧 API 写入。
-2. Alembic 新 revision 只新增可靠性字段、约束和索引；既有终态 Run/Response 不变。旧 `running` Run 转为可恢复 `pending`，保留已提交 Response，后续 Worker只处理缺失题。
+2. Alembic 新 revision 只新增可靠性字段、约束和索引；既有终态 Run/Response 不变。升级边界上的旧 `running` Run 仍受其冻结的 Phase 1 `restart_recovery=mark_failed_without_resume` 语义约束：普通中断 Run 聚合已有证据后收敛为 `failed`，已请求取消的 Run 收敛为 `cancelled`，二者都保留逐题 Response 和协议快照。只有由新代码创建、快照明确为 `database_lease_resume_missing_responses` 的 Run 才进入租约恢复路径。
 3. 启动 PostgreSQL、Redis 和一次性 migration 服务，再启动 API 与 Worker；不得让多个服务各自并发执行 Alembic。
 4. SQLite→PostgreSQL 为单向、显式导入：源需在当前 Alembic head 且停止写入，目标需为空；在一个目标事务内保持 ID/JSON/Decimal/UTC/协议快照，并在提交前后输出行数、主键集合和 canonical hash 对账。源文件保持只读。
 
@@ -252,4 +254,4 @@ Run 增加以下可靠性元数据：
 | 日期 | 变化 | 原因 |
 | --- | --- | --- |
 | 2026-08-25 | Accepted | Phase 2 可靠执行基础在实现前固定一致性、失败与回滚语义 |
-
+| 2026-08-25 | Clarified upgrade/finalization | 保持旧 Phase 1 冻结恢复语义，并覆盖完整 Response 后、终态提交前崩溃的恢复窗口 |

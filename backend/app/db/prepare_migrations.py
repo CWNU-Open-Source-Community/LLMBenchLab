@@ -27,10 +27,45 @@ from app.db.session import create_database_engine
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_CONFIG_PATH = BACKEND_ROOT / "alembic.ini"
 LEGACY_REVISION = "20260824_0000"
+PHASE_1_REVISION = "20260824_0001"
+
+_RELIABILITY_COLUMNS = {
+    "add_column:evaluation_runs.attempt_count",
+    "add_column:evaluation_runs.max_attempts",
+    "add_column:evaluation_runs.lease_owner",
+    "add_column:evaluation_runs.lease_token",
+    "add_column:evaluation_runs.lease_expires_at",
+    "add_column:evaluation_runs.heartbeat_at",
+    "add_column:evaluation_runs.next_attempt_at",
+    "add_column:evaluation_runs.last_enqueued_at",
+    "add_column:evaluation_runs.last_error",
+    "add_column:evaluation_runs.dead_lettered_at",
+}
+_RELIABILITY_CONSTRAINTS = {
+    "add_constraint:evaluation_runs.ck_evaluation_runs_attempt_count_nonnegative",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_max_attempts_positive",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_attempt_within_limit",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_lease_token_nonnegative",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_lease_matches_running_status",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_next_attempt_only_pending",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_dead_letter_only_failed",
+}
+_RELIABILITY_INDEXES = {
+    "add_index:evaluation_runs.ix_evaluation_runs_dispatch_due",
+    "add_index:evaluation_runs.ix_evaluation_runs_lease_expiry",
+}
+_RELIABILITY_CHECK_NAMES = {
+    fingerprint.rsplit(".", 1)[1] for fingerprint in _RELIABILITY_CONSTRAINTS
+}
+_RELIABILITY_INDEX_NAMES = {fingerprint.rsplit(".", 1)[1] for fingerprint in _RELIABILITY_INDEXES}
+_PHASE_1_DIFFERENCES = tuple(
+    sorted(_RELIABILITY_COLUMNS | _RELIABILITY_CONSTRAINTS | _RELIABILITY_INDEXES)
+)
 
 _LEGACY_DIFFERENCES = tuple(
     sorted(
-        {
+        set(_PHASE_1_DIFFERENCES)
+        | {
             "modify_nullable:models.input_price_per_million:False->True",
             "modify_nullable:models.output_price_per_million:False->True",
             "add_constraint:models.ck_models_mock_configuration_empty",
@@ -134,6 +169,9 @@ def _difference_fingerprint(difference: tuple[Any, ...]) -> str:
     if operation == "add_constraint":
         constraint = difference[1]
         return f"add_constraint:{constraint.table.name}.{constraint.name}"
+    if operation == "add_index":
+        index = difference[1]
+        return f"add_index:{index.table.name}.{index.name}"
     return f"unsupported:{operation}"
 
 
@@ -257,8 +295,10 @@ def _validate_sqlite_table_options(connection: Connection) -> None:
             )
 
 
-def _validate_relational_structure(connection: Connection, *, legacy: bool) -> None:
+def _validate_relational_structure(connection: Connection, *, schema_revision: str) -> None:
     inspector = sa.inspect(connection)
+    legacy = schema_revision == LEGACY_REVISION
+    pre_reliability = schema_revision in {LEGACY_REVISION, PHASE_1_REVISION}
     for table_name, table in Base.metadata.tables.items():
         table_sql = connection.exec_driver_sql(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
@@ -344,6 +384,11 @@ def _validate_relational_structure(connection: Connection, *, legacy: bool) -> N
                 "",
             )
             for index in table.indexes
+            if not (
+                pre_reliability
+                and table_name == "evaluation_runs"
+                and str(index.name) in _RELIABILITY_INDEX_NAMES
+            )
         }
         actual_indexes = {
             (
@@ -368,8 +413,10 @@ def _validate_relational_structure(connection: Connection, *, legacy: bool) -> N
             )
 
 
-def _validate_check_constraints(connection: Connection, *, legacy: bool) -> None:
+def _validate_check_constraints(connection: Connection, *, schema_revision: str) -> None:
     inspector = sa.inspect(connection)
+    legacy = schema_revision == LEGACY_REVISION
+    pre_reliability = schema_revision in {LEGACY_REVISION, PHASE_1_REVISION}
     for table_name, table in Base.metadata.tables.items():
         expected_entries = [
             (str(constraint.name), _normalized_check_sql(constraint.sqltext))
@@ -385,6 +432,10 @@ def _validate_check_constraints(connection: Connection, *, legacy: bool) -> None
                     "ck_models_mock_configuration_empty",
                     "ck_models_openai_configuration_required",
                 }
+            ]
+        if pre_reliability and table_name == "evaluation_runs":
+            expected_entries = [
+                entry for entry in expected_entries if entry[0] not in _RELIABILITY_CHECK_NAMES
             ]
         expected = tuple(sorted(expected_entries))
         table_sql = connection.exec_driver_sql(
@@ -405,11 +456,11 @@ def _validate_check_constraints(connection: Connection, *, legacy: bool) -> None
             )
 
 
-def _validate_sqlite_database(connection: Connection, *, legacy: bool) -> None:
+def _validate_sqlite_database(connection: Connection, *, schema_revision: str) -> None:
     _validate_sqlite_ddl_modifiers(connection)
     _validate_sqlite_table_options(connection)
-    _validate_relational_structure(connection, legacy=legacy)
-    _validate_check_constraints(connection, legacy=legacy)
+    _validate_relational_structure(connection, schema_revision=schema_revision)
+    _validate_check_constraints(connection, schema_revision=schema_revision)
     triggers = connection.exec_driver_sql(
         "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"
     ).all()
@@ -430,7 +481,7 @@ def _validate_sqlite_database(connection: Connection, *, legacy: bool) -> None:
         raise SchemaPreparationError(
             "SQLite foreign_key_check found violations; no migration marker was written."
         )
-    if not legacy:
+    if schema_revision != LEGACY_REVISION:
         return
     invalid_models = connection.execute(
         sa.text(
@@ -493,8 +544,12 @@ def prepare_database(
         domain_tables = set(Base.metadata.tables)
         present_domain_tables = table_names & domain_tables
 
-        if current_heads and current_heads != (LEGACY_REVISION,):
-            if set(current_heads) == set(expected_database_heads(config_path)):
+        expected_heads = expected_database_heads(config_path)
+        head_revision = expected_heads[0]
+        pre_reliability_heads = {(LEGACY_REVISION,), (PHASE_1_REVISION,)}
+
+        if current_heads and current_heads not in pre_reliability_heads:
+            if set(current_heads) == set(expected_heads):
                 if present_domain_tables != domain_tables:
                     missing = ", ".join(sorted(domain_tables - present_domain_tables))
                     raise SchemaPreparationError(
@@ -509,7 +564,7 @@ def prepare_database(
                         f"schema. Differences: {rendered_differences}"
                     )
                 if sqlite_locked:
-                    _validate_sqlite_database(connection, legacy=False)
+                    _validate_sqlite_database(connection, schema_revision=head_revision)
             return PreparationResult(action="versioned")
         if not present_domain_tables:
             return PreparationResult(action="empty")
@@ -521,31 +576,45 @@ def prepare_database(
             )
 
         target_revision: str | None
-        if current_heads == (LEGACY_REVISION,):
+        source_revision: str
+        if current_heads in pre_reliability_heads:
             if not sqlite_locked:
-                raise SchemaPreparationError(
-                    "Automatic legacy schema preparation is supported only for SQLite."
-                )
+                return PreparationResult(action="versioned")
+            source_revision = current_heads[0]
+            expected_differences = (
+                _LEGACY_DIFFERENCES if source_revision == LEGACY_REVISION else _PHASE_1_DIFFERENCES
+            )
             differences = _schema_differences(connection)
-            if differences != _LEGACY_DIFFERENCES:
+            if differences != expected_differences:
                 rendered_differences = ", ".join(sorted(differences)) or "unknown"
                 raise SchemaPreparationError(
-                    "The versioned legacy database does not match its expected schema; "
+                    "The versioned pre-reliability database does not match its expected schema; "
                     f"upgrade was not started. Differences: {rendered_differences}"
                 )
-            _validate_sqlite_database(connection, legacy=True)
+            _validate_sqlite_database(connection, schema_revision=source_revision)
             target_revision = None
-            action = "versioned_legacy"
+            action = (
+                "versioned_legacy" if source_revision == LEGACY_REVISION else "versioned_phase1"
+            )
         else:
+            if not sqlite_locked:
+                raise SchemaPreparationError(
+                    "Automatic adoption of unversioned application tables is supported only "
+                    "for SQLite."
+                )
             differences = _schema_differences(connection)
             if not differences:
                 target_revision = "head"
                 action = "stamped_current"
-                legacy = False
+                source_revision = head_revision
+            elif differences == _PHASE_1_DIFFERENCES:
+                target_revision = PHASE_1_REVISION
+                action = "stamped_phase1"
+                source_revision = PHASE_1_REVISION
             elif differences == _LEGACY_DIFFERENCES:
                 target_revision = LEGACY_REVISION
                 action = "stamped_legacy"
-                legacy = True
+                source_revision = LEGACY_REVISION
             else:
                 rendered_differences = ", ".join(sorted(differences)) or "unknown"
                 raise SchemaPreparationError(
@@ -553,12 +622,7 @@ def prepare_database(
                     "schema; no migration marker was written. Differences: "
                     f"{rendered_differences}"
                 )
-            if sqlite_locked:
-                _validate_sqlite_database(connection, legacy=legacy)
-            elif legacy:
-                raise SchemaPreparationError(
-                    "Automatic legacy schema adoption is supported only for SQLite."
-                )
+            _validate_sqlite_database(connection, schema_revision=source_revision)
 
         backup_path = _backup_sqlite_database(database_url)
         if target_revision is not None:
@@ -567,14 +631,10 @@ def prepare_database(
         elif connection.in_transaction():
             connection.rollback()
 
-        if target_revision == LEGACY_REVISION or action == "versioned_legacy":
-            stamped_revision = LEGACY_REVISION
-        else:
-            stamped_revision = expected_database_heads(config_path)[0]
         return PreparationResult(
             action=action,
             backup_path=backup_path,
-            stamped_revision=stamped_revision,
+            stamped_revision=source_revision,
         )
     except Exception:
         if connection.in_transaction():
@@ -599,6 +659,11 @@ def main() -> int:
             "Adopted a verified legacy SQLite schema at "
             f"{result.stamped_revision}; backup: {result.backup_path}"
         )
+    elif result.action == "stamped_phase1":
+        print(
+            "Adopted a verified Phase 1 SQLite schema at "
+            f"{result.stamped_revision}; backup: {result.backup_path}"
+        )
     elif result.action == "stamped_current":
         print(
             "Adopted a verified current SQLite schema at "
@@ -607,6 +672,11 @@ def main() -> int:
     elif result.action == "versioned_legacy":
         print(
             "Verified a versioned legacy SQLite schema before upgrade; "
+            f"backup: {result.backup_path}"
+        )
+    elif result.action == "versioned_phase1":
+        print(
+            "Verified a versioned Phase 1 SQLite schema before upgrade; "
             f"backup: {result.backup_path}"
         )
     return 0

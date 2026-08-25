@@ -13,6 +13,7 @@ import pytest
 from app.db.base import Base
 from app.db.prepare_migrations import (
     LEGACY_REVISION,
+    PHASE_1_REVISION,
     SchemaPreparationError,
     database_heads,
     prepare_database,
@@ -22,7 +23,7 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260824_0001"
+HEAD_REVISION = "20260825_0002"
 
 
 def _database_url(database_path: Path) -> str:
@@ -302,6 +303,190 @@ def test_prepare_adopts_current_unversioned_schema(tmp_path: Path) -> None:
     assert result.stamped_revision == HEAD_REVISION
     assert result.backup_path is not None and result.backup_path.is_file()
     assert _read_heads(database_path) == (HEAD_REVISION,)
+
+
+def test_prepare_adopts_phase1_unversioned_schema(tmp_path: Path) -> None:
+    database_path = tmp_path / "phase1-unversioned.db"
+    _run_alembic(database_path, "upgrade", PHASE_1_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DELETE FROM alembic_version")
+
+    result = prepare_database(_database_url(database_path))
+
+    assert result.action == "stamped_phase1"
+    assert result.stamped_revision == PHASE_1_REVISION
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (PHASE_1_REVISION,)
+
+    versioned_result = prepare_database(_database_url(database_path))
+    assert versioned_result.action == "versioned_phase1"
+    assert versioned_result.stamped_revision == PHASE_1_REVISION
+    assert versioned_result.backup_path is not None and versioned_result.backup_path.is_file()
+
+    _run_alembic(database_path, "upgrade", "head")
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    _run_alembic(database_path, "check")
+
+
+@pytest.mark.parametrize(
+    ("cancellation_requested", "expected_status", "expected_last_error"),
+    [
+        (False, "failed", "migrated_interrupted_run"),
+        (True, "cancelled", "migrated_cancelled_run"),
+    ],
+)
+def test_reliability_upgrade_settles_nonresumable_phase1_running_run(
+    tmp_path: Path,
+    cancellation_requested: bool,
+    expected_status: str,
+    expected_last_error: str,
+) -> None:
+    database_path = tmp_path / f"running-phase1-{expected_status}.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", PHASE_1_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE evaluation_runs SET status = 'running', cancellation_requested = ?, "
+            "model_parameters_snapshot = ?, started_at = CURRENT_TIMESTAMP WHERE id = 'run-1'",
+            (
+                cancellation_requested,
+                '{"execution":{"restart_recovery":"mark_failed_without_resume"}}',
+            ),
+        )
+        snapshot_before = connection.execute(
+            "SELECT protocol_version, model_parameters_snapshot FROM evaluation_runs "
+            "WHERE id = 'run-1'"
+        ).fetchone()
+        response_before = connection.execute(
+            "SELECT id, run_id, question_id, score FROM evaluation_responses "
+            "WHERE id = 'response-1'"
+        ).fetchone()
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    with sqlite3.connect(database_path) as connection:
+        aggregate = connection.execute(
+            "SELECT total_questions, completed_questions, correct_questions, error_questions, "
+            "score, completion_rate, answered_accuracy, average_latency_ms, input_tokens, "
+            "output_tokens, estimated_cost FROM evaluation_runs WHERE id = 'run-1'"
+        ).fetchone()
+        reliability = connection.execute(
+            "SELECT status, attempt_count, max_attempts, lease_token, lease_owner, "
+            "lease_expires_at, heartbeat_at, next_attempt_at, last_error, "
+            "cancellation_requested, finished_at IS NOT NULL, error_message "
+            "FROM evaluation_runs WHERE id = 'run-1'"
+        ).fetchone()
+        snapshot_after = connection.execute(
+            "SELECT protocol_version, model_parameters_snapshot FROM evaluation_runs "
+            "WHERE id = 'run-1'"
+        ).fetchone()
+        response_after = connection.execute(
+            "SELECT id, run_id, question_id, score FROM evaluation_responses "
+            "WHERE id = 'response-1'"
+        ).fetchone()
+    assert aggregate == (2, 1, 1, 0, 50.0, 0.0, None, None, None, None, None)
+    assert snapshot_after == snapshot_before
+    assert response_after == response_before
+    assert reliability == (
+        expected_status,
+        0,
+        3,
+        0,
+        None,
+        None,
+        None,
+        None,
+        expected_last_error,
+        cancellation_requested,
+        1,
+        None if cancellation_requested else "interrupted_by_reliability_migration",
+    )
+
+
+def test_reliability_downgrade_rejects_active_runs_before_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "active-downgrade.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("UPDATE evaluation_runs SET status = 'pending' WHERE id = 'run-1'")
+
+    failed = _invoke_alembic(database_path, "downgrade", PHASE_1_REVISION)
+
+    assert failed.returncode != 0
+    assert "drain, cancel, or fail active runs first" in failed.stderr
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluation_runs)")}
+        assert "lease_token" in columns
+        connection.execute("UPDATE evaluation_runs SET status = 'completed' WHERE id = 'run-1'")
+
+    _run_alembic(database_path, "downgrade", PHASE_1_REVISION)
+    assert _read_heads(database_path) == (PHASE_1_REVISION,)
+
+
+def test_reliability_metadata_round_trip_preserves_core_evidence(tmp_path: Path) -> None:
+    database_path = tmp_path / "reliability-round-trip.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        core_before = connection.execute(
+            "SELECT id, status, protocol_version, total_questions, completed_questions, "
+            "correct_questions, score, model_parameters_snapshot "
+            "FROM evaluation_runs WHERE id = 'run-1'"
+        ).fetchone()
+        response_before = connection.execute(
+            "SELECT id, run_id, question_id, reference_answer_snapshot, score, evaluator_name "
+            "FROM evaluation_responses WHERE id = 'response-1'"
+        ).fetchone()
+
+    _run_alembic(database_path, "downgrade", PHASE_1_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluation_runs)")}
+        assert "lease_token" not in columns
+        assert (
+            connection.execute(
+                "SELECT id, status, protocol_version, total_questions, completed_questions, "
+                "correct_questions, score, model_parameters_snapshot "
+                "FROM evaluation_runs WHERE id = 'run-1'"
+            ).fetchone()
+            == core_before
+        )
+        assert (
+            connection.execute(
+                "SELECT id, run_id, question_id, reference_answer_snapshot, score, "
+                "evaluator_name FROM evaluation_responses WHERE id = 'response-1'"
+            ).fetchone()
+            == response_before
+        )
+
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        reliability = connection.execute(
+            "SELECT attempt_count, max_attempts, lease_token FROM evaluation_runs "
+            "WHERE id = 'run-1'"
+        ).fetchone()
+    assert reliability == (0, 3, 0)
+    _run_alembic(database_path, "check")
+
+
+def test_reliability_constraints_reject_incoherent_lease_state(tmp_path: Path) -> None:
+    database_path = tmp_path / "reliability-constraints.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", "head")
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE evaluation_runs SET attempt_count = -1 WHERE id = 'run-1'")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute("UPDATE evaluation_runs SET status = 'running' WHERE id = 'run-1'")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE evaluation_runs SET next_attempt_at = CURRENT_TIMESTAMP WHERE id = 'run-1'"
+            )
 
 
 def test_prepare_is_idempotent_for_versioned_database(tmp_path: Path) -> None:

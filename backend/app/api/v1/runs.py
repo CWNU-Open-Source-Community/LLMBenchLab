@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session, sessionmaker
 
-from app.api.deps import PaginationDep, SessionDep
+from app.api.deps import PaginationDep, SessionDep, SettingsDep
 from app.core.constants import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
@@ -23,6 +25,7 @@ from app.core.constants import (
 )
 from app.core.time import utc_now
 from app.models import Benchmark, EvaluationResponse, EvaluationRun, Model, Question, RunStatus
+from app.runners.run_leases import CancelDisposition, RunLeaseRepository
 from app.schemas.evaluation_response import EvaluationResponseList
 from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, EvaluationRunRead
 
@@ -99,6 +102,7 @@ async def create_run(
     payload: EvaluationRunCreate,
     request: Request,
     session: SessionDep,
+    settings: SettingsDep,
 ) -> EvaluationRun:
     model = session.get(Model, payload.model_id)
     if model is None:
@@ -177,7 +181,9 @@ async def create_run(
                 "backoff_cap_seconds": DEFAULT_RETRY_BACKOFF_CAP_SECONDS,
                 "retryable_status_codes": list(RETRYABLE_PROVIDER_STATUS_CODES),
             },
-            "restart_recovery": "mark_failed_without_resume",
+            "task_delivery": "at_least_once",
+            "task_max_attempts": settings.worker_max_attempts,
+            "restart_recovery": "database_lease_resume_missing_responses",
         },
     }
     run = EvaluationRun(
@@ -190,6 +196,7 @@ async def create_run(
         prompt_template_snapshot=prompt_snapshot,
         code_commit_sha=_git_commit_sha(),
         total_questions=benchmark.question_count,
+        max_attempts=settings.worker_max_attempts,
     )
     session.add(run)
     session.commit()
@@ -210,16 +217,31 @@ def get_run(run_id: str, session: SessionDep) -> EvaluationRun:
 
 
 @router.post("/{run_id}/cancel", response_model=EvaluationRunRead, summary="协作式取消 Run")
-def cancel_run(run_id: str, session: SessionDep) -> EvaluationRun:
-    run = _get_run_or_404(session, run_id)
-    if run.status in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
-        return run
-    run.cancellation_requested = True
-    if run.status == RunStatus.PENDING:
-        run.status = RunStatus.CANCELLED
-        run.finished_at = utc_now()
-    session.commit()
-    session.refresh(run)
+def cancel_run(run_id: str, session: SessionDep, settings: SettingsDep) -> EvaluationRun:
+    repository = RunLeaseRepository(
+        sessionmaker(
+            bind=session.get_bind(),
+            class_=Session,
+            autoflush=False,
+            expire_on_commit=False,
+        ),
+        lease_for=timedelta(seconds=settings.worker_lease_seconds),
+        retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
+        retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
+    )
+    disposition = repository.request_cancel(run_id)
+    if disposition == CancelDisposition.NOT_FOUND:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "run_not_found", "message": "Evaluation run was not found"},
+        )
+    session.expire_all()
+    run = session.get(EvaluationRun, run_id)
+    if run is None:  # Defensive: the row cannot disappear because Runs are not deletable.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "run_not_found", "message": "Evaluation run was not found"},
+        )
     return run
 
 

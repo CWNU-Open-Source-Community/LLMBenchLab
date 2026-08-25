@@ -9,12 +9,14 @@ from uuid import uuid4
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     CheckConstraint,
     Enum,
     Float,
     ForeignKey,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -66,6 +68,25 @@ class EvaluationRun(Base):
         CheckConstraint("input_tokens >= 0", name="input_tokens_nonnegative"),
         CheckConstraint("output_tokens >= 0", name="output_tokens_nonnegative"),
         CheckConstraint("estimated_cost >= 0", name="estimated_cost_nonnegative"),
+        CheckConstraint("attempt_count >= 0", name="attempt_count_nonnegative"),
+        CheckConstraint("max_attempts >= 1", name="max_attempts_positive"),
+        CheckConstraint("attempt_count <= max_attempts", name="attempt_within_limit"),
+        CheckConstraint("lease_token >= 0", name="lease_token_nonnegative"),
+        CheckConstraint(
+            "(status = 'running' AND lease_owner IS NOT NULL "
+            "AND lease_expires_at IS NOT NULL AND heartbeat_at IS NOT NULL) OR "
+            "(status <> 'running' AND lease_owner IS NULL "
+            "AND lease_expires_at IS NULL AND heartbeat_at IS NULL)",
+            name="lease_matches_running_status",
+        ),
+        CheckConstraint(
+            "next_attempt_at IS NULL OR status = 'pending'",
+            name="next_attempt_only_pending",
+        ),
+        CheckConstraint(
+            "dead_lettered_at IS NULL OR status = 'failed'",
+            name="dead_letter_only_failed",
+        ),
         CheckConstraint(
             "status IN ('pending', 'running', 'completed', 'failed', 'cancelled')",
             name="status_values",
@@ -78,6 +99,19 @@ class EvaluationRun(Base):
             "benchmark_hash_snapshot",
         ),
         Index("ix_evaluation_runs_model_created", "model_id", "created_at"),
+        Index(
+            "ix_evaluation_runs_dispatch_due",
+            "status",
+            "cancellation_requested",
+            "next_attempt_at",
+            "created_at",
+        ),
+        Index(
+            "ix_evaluation_runs_lease_expiry",
+            "status",
+            "cancellation_requested",
+            "lease_expires_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -123,6 +157,16 @@ class EvaluationRun(Base):
     output_tokens: Mapped[int | None] = mapped_column()
     estimated_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
     cancellation_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(String(128))
+    lease_token: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    heartbeat_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    next_attempt_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_enqueued_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    last_error: Mapped[str | None] = mapped_column(Text)
+    dead_lettered_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)

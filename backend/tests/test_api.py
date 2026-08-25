@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from app.models import Model
+from app.models import (
+    Benchmark,
+    EvaluationResponse,
+    EvaluationRun,
+    Model,
+    Question,
+    RunStatus,
+)
 
 
 def test_health_and_info_do_not_require_provider(client) -> None:
@@ -167,6 +175,76 @@ def test_run_concurrency_cannot_exceed_runner_limit(client) -> None:
     )
     assert response.status_code == 422
     assert "concurrency" in response.text
+
+
+def test_cancel_retrying_run_clears_backoff_and_returns_aggregated_terminal_state(
+    client,
+    db_session,
+) -> None:
+    model = Model(id="cancel-model", name="Cancel Mock", provider_type="mock")
+    benchmark = Benchmark(
+        id="cancel-benchmark",
+        slug="cancel-benchmark",
+        name="Cancel benchmark",
+        version="1.0.0",
+        description="fixture",
+        dimension="general",
+        language="en",
+        license="MIT",
+        source="local",
+        evaluator_type="exact_match",
+        evaluator_config={},
+        prompt_template={},
+        dataset_hash="cancel-hash",
+        question_count=1,
+    )
+    question = Question(
+        id="cancel-question",
+        benchmark_id=benchmark.id,
+        external_id="q1",
+        position=0,
+        question_type="exact_match",
+        prompt="One?",
+        reference_answer="one",
+    )
+    run = EvaluationRun(
+        id="cancel-run",
+        model_id=model.id,
+        benchmark_id=benchmark.id,
+        status=RunStatus.PENDING,
+        model_parameters_snapshot={},
+        benchmark_hash_snapshot=benchmark.dataset_hash,
+        prompt_template_snapshot={},
+        total_questions=1,
+        completed_questions=1,
+        attempt_count=1,
+        max_attempts=2,
+        next_attempt_at=datetime.now(UTC) + timedelta(minutes=1),
+    )
+    response = EvaluationResponse(
+        run_id=run.id,
+        question_id=question.id,
+        raw_response="one",
+        parsed_answer="one",
+        reference_answer_snapshot="one",
+        score=1,
+        evaluator_name="exact_match_v1",
+    )
+    db_session.add_all([model, benchmark, question, run, response])
+    db_session.commit()
+
+    cancelled = client.post(f"/api/v1/runs/{run.id}/cancel")
+
+    assert cancelled.status_code == 200
+    payload = cancelled.json()
+    assert payload["status"] == "cancelled"
+    assert payload["cancellation_requested"] is True
+    assert payload["next_attempt_at"] is None
+    assert payload["completed_questions"] == payload["correct_questions"] == 1
+    assert payload["score"] == payload["completion_rate"] == 100.0
+    db_session.expire_all()
+    persisted = db_session.get(EvaluationRun, run.id)
+    assert persisted is not None and persisted.lease_owner is None
 
 
 def test_database_crud_round_trip(db_session) -> None:

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.adapters import AdapterError, build_adapter
+from app.core.config import get_settings
 from app.core.time import utc_now
 from app.evaluators import get_evaluator
 from app.models import (
@@ -21,6 +25,12 @@ from app.models import (
     EvaluationRun,
     Question,
     RunStatus,
+)
+from app.runners.run_leases import (
+    ResponseDisposition,
+    RunLease,
+    RunLeaseRepository,
+    aggregate_run_evidence,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,17 +58,42 @@ class _QuestionSnapshot:
     metadata: dict[str, Any]
 
 
+class _LeaseUnavailable(RuntimeError):
+    """Raised internally when a fenced Worker must stop processing a Run."""
+
+
 class EvaluationRunner:
     """Execute one claimed Run while isolating every question failure."""
 
-    def __init__(self, session_factory: sessionmaker[Session]) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker[Session],
+        *,
+        worker_id: str | None = None,
+        lease_repository: RunLeaseRepository | None = None,
+    ) -> None:
+        settings = get_settings()
         self._session_factory = session_factory
+        self._worker_id = worker_id or f"runner:{os.getpid()}:{uuid4()}"
+        self._lease_repository = lease_repository or RunLeaseRepository(
+            session_factory,
+            lease_for=timedelta(seconds=settings.worker_lease_seconds),
+            retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
+            retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
+        )
+        self._heartbeat_seconds = settings.worker_heartbeat_seconds
 
     async def execute(self, run_id: str) -> None:
-        """Atomically claim and execute ``run_id`` exactly once."""
+        """Claim and execute ``run_id`` with a renewable, fenced database lease."""
 
-        if not self._claim(run_id):
+        lease = self._claim(run_id)
+        if lease is None:
             return
+        heartbeat_stop = asyncio.Event()
+        lease_lost = asyncio.Event()
+        heartbeat_task = asyncio.create_task(
+            self._heartbeat(lease, heartbeat_stop, lease_lost), name=f"heartbeat-{run_id}"
+        )
 
         try:
             model, questions, generation, prompt_template, execution = self._load_snapshots(run_id)
@@ -82,11 +117,15 @@ class EvaluationRunner:
             semaphore = asyncio.Semaphore(concurrency)
 
             async def evaluate_bounded(question: _QuestionSnapshot) -> None:
+                if lease_lost.is_set():
+                    raise _LeaseUnavailable("heartbeat_fence_lost")
                 async with semaphore:
+                    if lease_lost.is_set():
+                        raise _LeaseUnavailable("heartbeat_fence_lost")
                     if self._cancellation_requested(run_id):
                         return
                     await self._evaluate_question(
-                        run_id,
+                        lease,
                         model,
                         question,
                         generation,
@@ -94,30 +133,107 @@ class EvaluationRunner:
                         adapter,
                     )
 
-            await asyncio.gather(*(evaluate_bounded(question) for question in questions))
+            await self._run_questions(
+                [evaluate_bounded(question) for question in questions],
+                lease_lost=lease_lost,
+            )
+            if lease_lost.is_set():
+                raise _LeaseUnavailable("heartbeat_fence_lost")
             final_status = (
                 RunStatus.CANCELLED if self._cancellation_requested(run_id) else RunStatus.COMPLETED
             )
-            self._finish(run_id, final_status)
+            self._finish(lease, final_status)
         except asyncio.CancelledError:
-            self._fail_run(run_id, "interrupted_by_process_shutdown")
+            self._lease_repository.fail_attempt(lease, error_code="interrupted_by_process_shutdown")
             raise
+        except _LeaseUnavailable:
+            if self._lease_repository.finish_cancelled(lease):
+                logger.info("Evaluation run %s stopped after cancellation", run_id)
+            else:
+                logger.warning("Evaluation run %s stopped after losing its lease", run_id)
         except Exception as exc:  # Run-level isolation; details are deliberately sanitized.
             logger.exception("Evaluation run %s failed", run_id)
-            self._fail_run(run_id, f"runner_error: {type(exc).__name__}")
-
-    def _claim(self, run_id: str) -> bool:
-        with self._session_factory() as session, session.begin():
-            result = session.execute(
-                update(EvaluationRun)
-                .where(
-                    EvaluationRun.id == run_id,
-                    EvaluationRun.status == RunStatus.PENDING,
-                    EvaluationRun.cancellation_requested.is_(False),
-                )
-                .values(status=RunStatus.RUNNING, started_at=utc_now(), error_message=None)
+            self._lease_repository.fail_attempt(
+                lease, error_code=f"runner_error:{type(exc).__name__}"
             )
-            return bool(result.rowcount == 1)
+        finally:
+            heartbeat_stop.set()
+            await heartbeat_task
+
+    def _claim(self, run_id: str) -> RunLease | None:
+        return self._lease_repository.claim(run_id, owner=self._worker_id)
+
+    async def _heartbeat(
+        self,
+        lease: RunLease,
+        stop: asyncio.Event,
+        lease_lost: asyncio.Event,
+    ) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=self._heartbeat_seconds)
+            except TimeoutError:
+                try:
+                    renewed = self._lease_repository.heartbeat(lease)
+                except Exception:
+                    logger.error(
+                        "Run lease heartbeat failed",
+                        extra={
+                            "run_id": lease.run_id,
+                            "worker_id": lease.owner,
+                            "lease_token": lease.token,
+                        },
+                    )
+                    lease_lost.set()
+                    return
+                if renewed is None:
+                    logger.warning(
+                        "Run lease heartbeat rejected",
+                        extra={
+                            "run_id": lease.run_id,
+                            "worker_id": lease.owner,
+                            "lease_token": lease.token,
+                        },
+                    )
+                    lease_lost.set()
+                    return
+
+    @staticmethod
+    async def _run_questions(
+        awaitables: list[Any],
+        *,
+        lease_lost: asyncio.Event,
+    ) -> None:
+        """Cancel and await sibling questions on the first error or known lease loss."""
+
+        question_tasks = [asyncio.create_task(awaitable) for awaitable in awaitables]
+
+        async def gather_questions() -> None:
+            await asyncio.gather(*question_tasks)
+
+        questions_task = asyncio.create_task(gather_questions())
+        lease_lost_task = asyncio.create_task(lease_lost.wait())
+        try:
+            await asyncio.wait(
+                {questions_task, lease_lost_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if lease_lost.is_set():
+                questions_task.cancel()
+                await asyncio.gather(questions_task, return_exceptions=True)
+                raise _LeaseUnavailable("heartbeat_fence_lost")
+            await questions_task
+        finally:
+            for task in question_tasks:
+                task.cancel()
+            questions_task.cancel()
+            lease_lost_task.cancel()
+            await asyncio.gather(*question_tasks, return_exceptions=True)
+            await asyncio.gather(
+                questions_task,
+                lease_lost_task,
+                return_exceptions=True,
+            )
 
     def _load_snapshots(
         self, run_id: str
@@ -146,7 +262,15 @@ class EvaluationRunner:
                 raise ValueError("run_model_snapshot_incomplete")
             rows = session.scalars(
                 select(Question)
-                .where(Question.benchmark_id == benchmark.id)
+                .where(
+                    Question.benchmark_id == benchmark.id,
+                    ~select(EvaluationResponse.id)
+                    .where(
+                        EvaluationResponse.run_id == run_id,
+                        EvaluationResponse.question_id == Question.id,
+                    )
+                    .exists(),
+                )
                 .order_by(Question.position)
             ).all()
             model_snapshot = _ModelSnapshot(
@@ -201,13 +325,14 @@ class EvaluationRunner:
 
     async def _evaluate_question(
         self,
-        run_id: str,
+        lease: RunLease,
         model: _ModelSnapshot,
         question: _QuestionSnapshot,
         generation: dict[str, Any],
         prompt_template: dict[str, Any],
         adapter: Any,
     ) -> None:
+        run_id = lease.run_id
         evaluator = get_evaluator(question.question_type)
         config = dict(generation)
         if model.provider_type == "mock":
@@ -302,12 +427,9 @@ class EvaluationRunner:
                     error_message=parse_error,
                 )
 
-        with self._session_factory() as session, session.begin():
-            session.add(response)
-            run = session.get(EvaluationRun, run_id)
-            if run is None:
-                raise LookupError("run_disappeared")
-            run.completed_questions += 1
+        disposition = self._lease_repository.persist_response(lease, response)
+        if disposition == ResponseDisposition.FENCE_LOST:
+            raise _LeaseUnavailable("response_fence_lost")
 
     @staticmethod
     def _render_messages(
@@ -348,87 +470,26 @@ class EvaluationRunner:
                 )
             )
 
-    def _finish(self, run_id: str, status: RunStatus) -> None:
+    def _finish(self, lease: RunLease, status: RunStatus) -> bool:
         with self._session_factory() as session, session.begin():
-            run = session.get(EvaluationRun, run_id)
+            run = self._lease_repository.lock_owned_run(session, lease, allow_cancel_requested=True)
             if run is None:
-                return
-            aggregate = session.execute(
-                select(
-                    func.count(EvaluationResponse.id),
-                    func.coalesce(func.sum(EvaluationResponse.score), 0.0),
-                    func.count(EvaluationResponse.id).filter(
-                        EvaluationResponse.raw_response.is_not(None),
-                        EvaluationResponse.raw_response != "",
-                    ),
-                    func.count(EvaluationResponse.id).filter(
-                        EvaluationResponse.error_type.is_(None),
-                        EvaluationResponse.raw_response.is_not(None),
-                        EvaluationResponse.raw_response != "",
-                    ),
-                    func.count(EvaluationResponse.id).filter(
-                        EvaluationResponse.error_type.is_not(None)
-                    ),
-                    func.avg(EvaluationResponse.latency_ms),
-                    func.coalesce(func.sum(EvaluationResponse.input_tokens), 0),
-                    func.count(EvaluationResponse.input_tokens),
-                    func.coalesce(func.sum(EvaluationResponse.output_tokens), 0),
-                    func.count(EvaluationResponse.output_tokens),
-                    func.coalesce(func.sum(EvaluationResponse.estimated_cost), 0),
-                    func.count(EvaluationResponse.estimated_cost),
-                ).where(EvaluationResponse.run_id == run_id)
-            ).one()
-            (
-                response_count,
-                score_sum,
-                completed_outputs,
-                evaluable,
-                errors,
-                avg_latency,
-                in_tok,
-                in_reports,
-                out_tok,
-                out_reports,
-                cost,
-                cost_reports,
-            ) = aggregate
+                return False
             planned = run.total_questions
-            correct = round(float(score_sum or 0))
-            run.correct_questions = correct
-            run.error_questions = int(errors or 0)
-            run.score = (float(score_sum or 0) / planned * 100) if planned else 0.0
-            run.completion_rate = (int(completed_outputs or 0) / planned * 100) if planned else 0.0
-            run.answered_accuracy = (
-                (correct / int(evaluable) * 100) if int(evaluable or 0) else None
-            )
-            run.average_latency_ms = float(avg_latency) if avg_latency is not None else None
-            completed_response_count = int(response_count or 0)
-            run.input_tokens = (
-                int(in_tok or 0)
-                if completed_response_count and int(in_reports or 0) == completed_response_count
-                else None
-            )
-            run.output_tokens = (
-                int(out_tok or 0)
-                if completed_response_count and int(out_reports or 0) == completed_response_count
-                else None
-            )
-            run.estimated_cost = (
-                Decimal(cost or 0)
-                if completed_response_count and int(cost_reports or 0) == completed_response_count
-                else None
-            )
-            run.status = status
+            completed_response_count = aggregate_run_evidence(session, run)
+            if (
+                status == RunStatus.COMPLETED
+                and not run.cancellation_requested
+                and completed_response_count != planned
+            ):
+                raise RuntimeError("run_response_set_incomplete")
+            run.status = RunStatus.CANCELLED if run.cancellation_requested else status
             run.finished_at = utc_now()
-
-    def _fail_run(self, run_id: str, message: str) -> None:
-        with self._session_factory() as session, session.begin():
-            run = session.get(EvaluationRun, run_id)
-            if run is None or run.status in {RunStatus.COMPLETED, RunStatus.CANCELLED}:
-                return
-            run.status = RunStatus.FAILED
-            run.error_message = message[:1000]
-            run.finished_at = utc_now()
+            run.next_attempt_at = None
+            run.lease_owner = None
+            run.lease_expires_at = None
+            run.heartbeat_at = None
+            return True
 
 
 class EvaluationTaskManager:
