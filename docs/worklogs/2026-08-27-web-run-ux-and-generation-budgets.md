@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2 — 可靠性与任务执行](../phases/PHASE-2-RELIABILITY.md)、[Phase 3 — 标准 Benchmark](../phases/PHASE-3-BENCHMARKS.md)
 - 关联计划：[Web 评测导航、生成预算与布局修复执行计划](../plans/2026-08-27-web-run-ux-and-generation-budgets.md)
 - 关联 ADR：无；本任务增加显式 Run 配置与 UI 入口，不改变 `llmbenchlab-protocol-v1` 的通用默认值、评分或持久化模型
-- 最终状态：in_progress（实现与本地门禁完成；阶段 commit/push/精确 SHA CI 待执行）
+- 最终状态：in_progress（功能提交已 push；精确 SHA 必需 CI 因分支无 PR而未触发）
 
 ## 初始仓库状态
 
@@ -70,7 +70,7 @@
 2. [completed] 实现后端显式预算/超时边界、截断诊断及测试。
 3. [completed] 实现 Web 预设、评测记录页、证据分页、导航与布局修复及测试。
 4. [completed] 更新 API/协议/架构/安全/测试/用户文档与项目状态文件。
-5. [in_progress] 全量本地门禁与浏览器回归已完成；等待最终 diff/秘密检查、commit/push 与精确 SHA CI 查询。
+5. [completed] 全量本地门禁、浏览器回归、diff/秘密检查、功能 commit/push 与精确 SHA CI/PR 查询均已执行并如实记录。
 
 ## 实际修改
 
@@ -99,6 +99,7 @@
 | 17:22 CST | validation | 浏览器实测 Benchmark 长 pre、Run snapshot、新建表单、模型弹窗和 Runs 列表。 | 390px 根宽均为 390；桌面输入框等高、System Prompt 全宽、列表操作列完整。 |
 | 17:34 CST | review | Pydantic 会把 JSON `true` 宽松转换为 1 token/1 秒；定时轮询可抢占慢分页请求并使 Loading 永不清除；`seed:null` 与费用提示也有语义漂移。 | 严格拒绝 bool/字符串；新增 Run→Runner→Provider timeout/null 链路测试；轮询串行化并修正 null/费用/总数收敛。 |
 | 17:41 CST | validation | 561/681/901px 的宽表滚动内容会传播到根页面；仅验证 390/1280 会漏掉该区间。 | table scroll 增加 paint containment，Runs 卡片断点扩到 1100px；390、561、681、901、1100/1101、1280px 根宽与导航均通过。 |
+| 17:47 CST | delivery | 功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 普通 push 成功；精确 SHA Actions 与分支 PR 查询均为 `[]`。 | workflow 仅监听 PR/main，且未获授权创建 PR；远程状态记为“未触发”，不是“通过”。 |
 
 ## 实际运行命令
 
@@ -133,7 +134,7 @@
 
 ## 未完成项
 
-- 阶段 commit、普通 push 与精确 SHA GitHub Actions 查询。
+- 该精确 SHA 的四个远程必需 job 未运行；要取得远程绿色需要用户授权创建 PR，或由维护者把提交合入 `main` 后触发 workflow。
 
 ## 已知问题与限制
 
@@ -145,16 +146,20 @@
 - 真实 API 调用：否；只读取本地数据库已存在的公开 Run 证据
 - 日志/API 脱敏：既有全量测试继续通过；新增 Adapter 错误消息不包含响应体或 Key
 - 危险 Git 操作（force push/reset 等）：无
-- 阶段 push：待执行
-- 远程 CI：待执行
+- 阶段 push：`467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已正常 push 到 `origin/codex/complete-evaluation-workflow`
+- 远程 CI：精确 SHA Actions 查询 `[]`；分支 PR 查询 `[]`；未触发，不等于通过
 - 遗留安全风险：见 [SECURITY.md](../SECURITY.md) 的费用与 Provider at-least-once 边界
 
 ## 结果与下一步
 
-实现、本地门禁、文档与浏览器回归均已完成；进入阶段 commit/push 与精确 SHA CI 查询。Phase 2 继续保持 `in_progress`，下一工作仍由 [NEXT_TASK.md](../NEXT_TASK.md) 指向 P2-05/P2-06/P2-07。
+实现、本地门禁、文档、浏览器回归与功能提交推送均已完成；精确 SHA 因分支无 PR而没有 workflow run。Phase 2 与本计划继续保持 `in_progress`，下一工作仍由 [NEXT_TASK.md](../NEXT_TASK.md) 指向 P2-05/P2-06/P2-07。
 
 ## 最终 Git 状态
 
 ```text
-待任务结束时补充
+feature commit: 467d0243b4fb081c2d637b20ee0958c3bd6ee6d1
+push: origin/codex/complete-evaluation-workflow succeeded
+exact-SHA Actions runs: []
+branch pull requests: []
+note: this evidence update is committed separately after the feature commit
 ```

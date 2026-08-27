@@ -120,7 +120,7 @@ dead-letter 部分证据回归；完整套件、真实集成和 Compose 最终�
 - PostgreSQL/Redis/API/Worker/frontend/一次性 migrate 的六服务 Compose、真实集成和八场景故障验收。
 - ADR-0005、应用 JSON 日志/correlation、健康/就绪端点、DB gauges，以及更新后的架构/API/测试/部署/安全文档。
 - ADR-0007、Web/API write-only Key、AES-GCM `model_credentials`、API/Worker 共享 keyring 与 legacy environment 兼容；这是一项可信本地安全切片，不是 P2-05/P2-06/P2-07 完成证明。
-- 当前工作树的 Web Run UX 切片：Benchmark 输出/超时建议、全状态评测记录与活动轮询、100 条逐题证据分页，以及移动端导航/详情/表单修复。其完整本地门禁已通过，commit/push 和精确 SHA CI 查询尚待完成；它不作为 P2-05 完成证据。
+- Web Run UX 切片：Benchmark 输出/超时建议、全状态评测记录与活动轮询、100 条逐题证据分页，以及移动端导航/详情/表单修复。功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push、完整本地门禁通过；精确 SHA 无 Actions run（分支无 PR，workflow 仅监听 PR/main），不作为远程绿色或 P2-05 完成证据。
 
 阶段剩余交付物：
 
@@ -145,7 +145,8 @@ P2-05 的全局限流/预算/公平治理证据，也不改变本阶段 `in_prog
 该切片的最终全工作树、双方言/真实导入与 Compose 本地门禁已通过；精确 SHA CI 仍按阶段 push 单独核验。
 无论该远程门禁结果如何，本切片都没有交付 P2-05/P2-06/P2-07 剩余范围，因此不能改变 Phase 2 的 `in_progress` 结论。
 
-同日当前工作树还实现了 Web 长推理配置与 Run 可达性切片：数字 `max_tokens` 上限为 131,072，`null`
+同日功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 还实现了 Web 长推理配置与 Run 可达性切片：数字 `max_tokens` 上限为 131,072，`null`
 省略上游字段但不是无限；Benchmark 建议同步设置 1–1,800 秒读取超时并写入快照，长度截断可诊断为
 `output_truncated`。主导航新增全状态评测记录，详情证据每页 100 条，并修复第五导航与关键内容的移动端
-裁剪/错位。该切片没有调用真实 Provider，完整本地门禁已通过；阶段 commit/push 与精确 SHA CI 查询仍待完成。
+裁剪/错位。该切片没有调用真实 Provider，完整本地门禁已通过且提交已 push，但分支无 PR、精确 SHA
+未触发 workflow，不能宣称远程绿色。

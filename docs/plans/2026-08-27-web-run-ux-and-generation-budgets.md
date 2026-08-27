@@ -1,7 +1,7 @@
 # Web 评测导航、生成预算与布局修复执行计划
 
 - Owner: Codex
-- Status: in_progress (implementation and local gates complete; remote delivery pending)
+- Status: in_progress (feature pushed; required exact-SHA CI did not trigger because the branch has no PR)
 - Created: 2026-08-27
 - Updated: 2026-08-27
 - Related requirements: FR-MOD-11、FR-RUN-02、FR-RUN-10、FR-REP-02、FR-API-05、FR-UI-01、FR-UI-04、FR-UI-05、FR-UI-07、US-04、NFR-REP-02、NFR-UX-01
@@ -68,7 +68,7 @@ Web 的 New Run 表单始终显式发送 256，导致模型默认参数无法生
    - 修改范围：README/API/PROTOCOL/ARCHITECTURE/SECURITY/TESTING/CHANGELOG/PROJECT_STATUS/Phase 2/3/NEXT_TASK/worklog/plan。
    - 操作：记录精确语义、范围、验证证据和剩余 P2-05 风险。
    - 完成判据：实现与用户说明一致，内部链接/数字无漂移。
-5. [in_progress] **完整门禁与交付**
+5. [completed] **完整门禁与交付**
    - 修改范围：全仓库。
    - 操作：目标测试→全量 lint/test/build/smoke/config/lock，浏览器回归，diff/secret scan，commit/push，查询精确 SHA CI。
    - 完成判据：本地门禁全绿；普通 push 成功；精确 SHA CI 状态如实记录。
@@ -88,11 +88,12 @@ Web 的 New Run 表单始终显式发送 256，导致模型默认参数无法生
 | 验收项 | 命令/检查 | 预期结果 | 实际结果与证据 |
 |---|---|---|---|
 | 后端目标行为 | `cd backend && uv run pytest <target tests>` | 新边界、snapshot、adapter 诊断通过 | 通过；显式目标用例 `11 passed`，CLI 新上限回归 `4 passed` |
-| 前端目标行为 | `cd frontend && npm test -- --run <target tests>` | 预设/列表/分页/导航通过 | 通过；新增 New Run、Runs、Run Detail、App 导航共 `11 passed` |
+| 前端目标行为 | `cd frontend && npm test -- --run <target tests>` | 预设/列表/分页/导航通过 | 首轮新增入口用例 `11 passed`；最终竞态/null/收敛复核为 3 files / `14 passed` |
 | 全量质量门禁 | `make lint && make test && make smoke && cd frontend && npm run build` | 全部退出 0；无真实 Provider | 通过；后端 `442 passed, 6 skipped`，前端 9 files / `36 passed`，Smoke `1 passed, 6 deselected`，build 成功；仅既有 Vite chunk warning |
 | 配置与锁 | `uv lock --check`、`docker compose config` | 退出 0 | 通过；二者退出 0 |
 | 视觉回归 | 本地浏览器 390/561/681/901/1100/1101/1280px 检查 | 无已复现裁剪/错位，入口可达 | 通过；五项导航完整，根页面无横向溢出，Runs 中小屏卡片/桌面表格与关键页面对齐 |
-| 秘密与无关改动检查 | `git diff --check`、`git status --short` 及高置信敏感词扫描 | 无格式错误、无 Key、范围正确 | `git diff --check` 通过；最终 secret/status 检查在 commit 前执行 |
+| 秘密与无关改动检查 | `git diff --check`、`git status --short` 及高置信敏感词扫描 | 无格式错误、无 Key、范围正确 | 通过；added tracked lines 与 untracked files 的高置信扫描均无命中 |
+| 远程交付边界 | push、精确 SHA Actions/PR 查询 | 普通 push 成功；远程状态如实记录 | `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；Actions `[]`、PR `[]`，未触发而非通过 |
 
 ## Rollback
 
@@ -101,7 +102,7 @@ Web 的 New Run 表单始终显式发送 256，导致模型默认参数无法生
 ## Documentation updates
 
 - [x] README / API / Architecture / Benchmark Protocol / Security / Testing
-- [ ] ADR 不适用；无数据库迁移
+- [x] ADR 不适用；无数据库迁移
 - [x] `CHANGELOG.md`
 - [x] `docs/PROJECT_STATUS.md` 与 Phase 2/3
 - [x] `docs/NEXT_TASK.md` 与本次工作日志
@@ -112,7 +113,7 @@ Web 的 New Run 表单始终显式发送 256，导致模型默认参数无法生
 - 实际命令：目标 pytest/Vitest、`make test`、`make lint`、`make smoke`、frontend build、lock/Compose/diff 检查及真实浏览器多视口检查。
 - 验收对应：R1–R8 均有实现、自动化或浏览器证据。
 - 未运行：真实付费 Provider、Phase 2 Compose 故障套件与外部基础设施集成；本切片未改变队列/迁移/基础设施。
-- 已知问题：P2-05 全局限流/Token 或金额硬预算仍未完成；远程 commit/push/精确 SHA CI 待最后交付步骤。
+- 已知问题：P2-05 全局限流/Token 或金额硬预算仍未完成；功能提交已 push，但 workflow 仅监听 PR/main 且本分支无 PR，因此精确 SHA 没有必需 job，计划仍保持 `in_progress`。
 
 ## Decision and discovery log
 
@@ -124,3 +125,4 @@ Web 的 New Run 表单始终显式发送 256，导致模型默认参数无法生
 | 2026-08-27 17:20 CST | discovery | Runs 的宽表在 390px 虽可容器滚动，但信息密度和页面滚动边界仍不理想。 | 改为带字段标签的卡片行；最终扩展到 1100px 并覆盖断点邻接宽度。 |
 | 2026-08-27 17:41 CST | review/validation | 严格类型、慢分页轮询竞态和 561–901px 根横向溢出在最终审查中被复现。 | 严格拒绝 bool/字符串、串行 quiet poll、paint containment 与扩展卡片断点；新增后端链路/前端 deferred 回归。 |
 | 2026-08-27 17:43 CST | validation | 后端/前端全量、lint/typecheck/build、Smoke、lock/Compose/diff 与多视口浏览器回归通过。 | 进入文档最终化、commit/push 与精确 SHA CI 查询。 |
+| 2026-08-27 17:47 CST | delivery | 功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已普通 push；`gh run list --commit <sha>` 与分支 PR 查询均返回空数组。 | workflow 仅监听 PR/main 且未获授权创建 PR；记录为“未触发”，不冒充远程通过。 |
