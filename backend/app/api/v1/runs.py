@@ -211,6 +211,19 @@ async def create_run(
     session: SessionDep,
     settings: SettingsDep,
 ) -> EvaluationRun:
+    repository = GovernanceRepository(
+        sessionmaker(
+            bind=session.get_bind(),
+            class_=Session,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+    )
+    # PostgreSQL Provider reservations lock governance scopes before their
+    # ledger insert implicitly key-locks Model. Mirror that order before the
+    # explicit Model lock used by Run admission; SQLite remains serialized by
+    # lock_model_for_update's database-wide BEGIN IMMEDIATE.
+    repository.lock_run_admission_scope(session)
     # Serialize Run creation with endpoint/credential mutation on every
     # supported database so a pending Run cannot race its Provider guard.
     model = lock_model_for_update(session, payload.model_id)
@@ -233,14 +246,6 @@ async def create_run(
         )
 
     run = build_evaluation_run(model, benchmark, payload, settings)
-    repository = GovernanceRepository(
-        sessionmaker(
-            bind=session.get_bind(),
-            class_=Session,
-            autoflush=False,
-            expire_on_commit=False,
-        )
-    )
     try:
         repository.admit_run(
             session,

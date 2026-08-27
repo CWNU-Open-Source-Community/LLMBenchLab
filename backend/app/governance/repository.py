@@ -376,6 +376,28 @@ class GovernanceRepository:
         self._session_factory = session_factory
         self._clock = clock
 
+    def lock_run_admission_scope(self, session: Session) -> None:
+        """Establish PostgreSQL's global-scope-before-Model lock order.
+
+        Run creation also locks the Model row so endpoint or credential changes
+        cannot race admission. Provider reservation takes governance scopes
+        before inserting a ledger row whose Model foreign key needs a key-share
+        lock. Pre-locking the global scope here prevents the inverse
+        Model-to-global order from deadlocking those transactions. SQLite keeps
+        using the Model helper's database-wide ``BEGIN IMMEDIATE`` serialization.
+        ``admit_run`` re-locks and validates this same scope later in the
+        transaction.
+        """
+
+        if session.get_bind().dialect.name != "postgresql":
+            return
+        now = self._clock(session)
+        self._lock_scopes(
+            session,
+            ((GovernanceScopeType.GLOBAL, "global"),),
+            now=now,
+        )
+
     def ensure_default_policy(self, session: Session) -> GovernancePolicy:
         """Return the active policy, bootstrapping a deterministic unlimited v1."""
 

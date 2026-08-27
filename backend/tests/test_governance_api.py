@@ -7,7 +7,9 @@ from threading import Barrier
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.api.v1 import runs as runs_api
 from app.db.session import SessionLocal
+from app.governance.repository import GovernanceRepository
 from app.models import AuditEvent, EvaluationRun, GovernancePolicy, GovernanceScope
 from app.schemas.evaluation_run import EvaluationRunRead
 
@@ -37,6 +39,36 @@ def _full_policy(**overrides: object) -> dict[str, object]:
     }
     values.update(overrides)
     return values
+
+
+def test_run_creation_prelocks_governance_before_model(client, monkeypatch) -> None:
+    model = client.post(
+        "/api/v1/models",
+        json={"name": "Lock Ordered Mock", "provider_type": "mock"},
+    ).json()
+    benchmark = client.post("/api/v1/benchmarks/reload-demo").json()
+    calls: list[str] = []
+    original_scope_lock = GovernanceRepository.lock_run_admission_scope
+    original_model_lock = runs_api.lock_model_for_update
+
+    def tracked_scope_lock(repository: GovernanceRepository, session: Session) -> None:
+        calls.append("governance")
+        original_scope_lock(repository, session)
+
+    def tracked_model_lock(session: Session, model_id: str):
+        calls.append("model")
+        return original_model_lock(session, model_id)
+
+    monkeypatch.setattr(GovernanceRepository, "lock_run_admission_scope", tracked_scope_lock)
+    monkeypatch.setattr(runs_api, "lock_model_for_update", tracked_model_lock)
+
+    response = client.post(
+        "/api/v1/runs",
+        json={"model_id": model["id"], "benchmark_id": benchmark["id"]},
+    )
+
+    assert response.status_code == 202
+    assert calls[:2] == ["governance", "model"]
 
 
 def test_policy_apply_is_idempotent_and_frozen_into_run_admission(client, monkeypatch) -> None:
