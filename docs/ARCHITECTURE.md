@@ -477,7 +477,7 @@ Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `te
 
 ## 部署拓扑与安全边界
 
-本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。`make setup` 通过兼容系统 Python 3.9 的 bootstrap 为 Web credential 生成 Git 忽略、权限为 `0600` 的 `.secrets/credential-keys.json`，API 与 Worker 读取同一文件。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate；同一只读 Compose secret 只挂载到 API/Worker。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
+本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。`make setup` 与其他相关启动入口通过 `uv run --script` 显式选择满足 `>=3.11` 的独立 CPython，再由 bootstrap 为 Web credential 生成 Git 忽略、权限为 `0600` 的 `.secrets/credential-keys.json`，API 与 Worker 读取同一文件；这避免 `PATH` 中其他 Python 实现破坏安全原子安装语义，也不会为 Docker-only 入口同步宿主后端依赖。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate；同一只读 Compose secret 只挂载到 API/Worker。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
 
 当前 Compose 只是本地开发/故障验收拓扑，示例数据库密码不是生产秘密管理。虽然远端 Provider 已强制 HTTPS、明文 HTTP 只允许 loopback，`base_url` 的允许范围仍未达到公网多租户要求；有效的 HTTPS URL 仍可能指向私网/云元数据或发生 DNS rebinding。本版本仅供受信任的本地操作者使用，不应直接暴露公网。后续公开部署必须增加鉴权、TLS、URL allowlist、DNS/IP 重绑定防护、出站网络策略、上传隔离、权限拆分、备份/PITR 和资源配额。当前不声称生产、HA 或灾备 SLA。
 

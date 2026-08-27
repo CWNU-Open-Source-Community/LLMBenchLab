@@ -23,7 +23,7 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 - 应用日志已有请求/Run correlation 和脱敏 JSON，但只覆盖 LLMBenchLab 应用 logger；Worker probe 也只证明依赖能力，不证明主循环 liveness。
 - 可信本地真实评测由 CLI 直接领取指定 Run；操作者必须停止连接同一数据库的常规 API/Worker。模型发现、canary 和正式题目请求都使用内存中的 Key，自动化仅使用 MockTransport/Mock。
 - Web 模型表单对 `api_key` 只写：公开读取的凭据状态字段不含 Key 或加密材料，stored Key 以绑定 Model/origin 的 AES-GCM 密文持久化，API 与 Worker 从数据库之外读取同一 keyring；`api_key_env` 旧配置仍可运行。SQLite→PostgreSQL 导入已扩为包括 `model_credentials` 的六表，keyring 必须独立备份/转移。
-- Web 凭据当前切片的本地完整门禁已通过：后端 421、真实基础设施 6、前端 21、Smoke 与 Compose 8/8 均为零失败；stage commit/push 与精确 SHA CI 结论见对应工作日志。自动化只使用 marker Key、固定测试 keyring、MockTransport/stub fetch 和 Mock Adapter，没有调用真实 Provider。
+- Web 凭据当前切片的本地完整门禁已通过：后端 427（其中 keyring bootstrap 定向 24）、真实基础设施 6、前端 21、Smoke 与 Compose 8/8 均为零失败；stage commit/push 与精确 SHA CI 结论见对应工作日志。自动化只使用 marker Key、固定测试 keyring、MockTransport/stub fetch 和 Mock Adapter，没有调用真实 Provider。
 - 已提交的可靠性基础 commits 为 `2be2392`、`3c975c7`、`2006d3f`、`b3289b1`、`103ab79`；详见当前工作日志与 Project Status。
 
 ## 目标

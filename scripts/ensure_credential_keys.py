@@ -6,11 +6,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import errno
 import json
 import os
 import re
 import secrets
 import stat
+import time
 from pathlib import Path
 from typing import Any, Final
 
@@ -23,6 +25,18 @@ _OPEN_NOFOLLOW: Final = getattr(os, "O_NOFOLLOW", 0)
 _OPEN_CLOEXEC: Final = getattr(os, "O_CLOEXEC", 0)
 _OPEN_DIRECTORY: Final = getattr(os, "O_DIRECTORY", 0)
 _OPEN_NONBLOCK: Final = getattr(os, "O_NONBLOCK", 0)
+_ATOMIC_CREATE_ATTEMPTS: Final = 3
+_ATOMIC_CREATE_RETRY_SECONDS: Final = 0.05
+_RETRYABLE_ATOMIC_ERRNOS: Final = frozenset(
+    code
+    for code in (
+        getattr(errno, "EAGAIN", None),
+        getattr(errno, "EBUSY", None),
+        getattr(errno, "EINTR", None),
+        getattr(errno, "ETXTBSY", None),
+    )
+    if code is not None
+)
 
 
 class KeyringInitializationError(RuntimeError):
@@ -35,6 +49,14 @@ class _DuplicateJSONKey(ValueError):
 
 class _DestinationAppeared(RuntimeError):
     """Private signal for a concurrent initializer winning the install race."""
+
+
+class _RetryableAtomicCreateError(RuntimeError):
+    """Private signal emitted only after failed first-write cleanup is confirmed."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -278,13 +300,32 @@ def _unlink_if_same(
     parent_descriptor: int,
     name: str,
     expected: os.stat_result,
-) -> None:
+) -> str | None:
     try:
         current = _stat_name(parent_descriptor, name)
-        if _same_inode(current, expected):
-            os.unlink(name, dir_fd=parent_descriptor)
-    except OSError:
-        pass
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return _safe_os_error_code(error)
+    if not _same_inode(current, expected):
+        return "PATH_CHANGED"
+    try:
+        os.unlink(name, dir_fd=parent_descriptor)
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        return _safe_os_error_code(error)
+    return None
+
+
+def _close_descriptor(descriptor: int) -> str | None:
+    """Close once and return a safe errno because retrying close can target a reused fd."""
+
+    try:
+        os.close(descriptor)
+    except OSError as error:
+        return _safe_os_error_code(error)
+    return None
 
 
 def _atomic_create(
@@ -295,8 +336,14 @@ def _atomic_create(
     temporary_name = f".credential-keyring-{secrets.token_hex(16)}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _OPEN_CLOEXEC | _OPEN_NOFOLLOW
     temporary_descriptor = -1
+    temporary_created = False
     temporary_snapshot: os.stat_result | None = None
     installed = False
+    installed_snapshot: os.stat_result | None = None
+    primary_error: BaseException | None = None
+    rollback_cleanup_code: str | None = None
+    close_code: str | None = None
+    temporary_cleanup_code: str | None = None
     try:
         temporary_descriptor = os.open(
             temporary_name,
@@ -304,6 +351,7 @@ def _atomic_create(
             0o600,
             dir_fd=parent_descriptor,
         )
+        temporary_created = True
         temporary_snapshot = os.fstat(temporary_descriptor)
         os.fchmod(temporary_descriptor, 0o600)
         _write_all(temporary_descriptor, payload)
@@ -317,8 +365,12 @@ def _atomic_create(
             raise KeyringInitializationError(
                 "Credential keyring temporary file could not be secured."
             )
-        os.close(temporary_descriptor)
+        close_code = _close_descriptor(temporary_descriptor)
         temporary_descriptor = -1
+        if close_code is not None:
+            raise KeyringInitializationError(
+                f"Credential keyring temporary file could not be closed safely ({close_code})."
+            )
 
         try:
             os.link(
@@ -339,16 +391,61 @@ def _atomic_create(
             raise KeyringInitializationError(
                 "Credential keyring changed during atomic installation."
             )
-        return installed_snapshot
-    except BaseException:
+    except BaseException as error:
+        primary_error = error
         if installed and temporary_snapshot is not None:
-            _unlink_if_same(parent_descriptor, name, temporary_snapshot)
-        raise
+            rollback_cleanup_code = _unlink_if_same(
+                parent_descriptor,
+                name,
+                temporary_snapshot,
+            )
     finally:
         if temporary_descriptor >= 0:
-            os.close(temporary_descriptor)
-        if temporary_snapshot is not None:
-            _unlink_if_same(parent_descriptor, temporary_name, temporary_snapshot)
+            if temporary_snapshot is None and temporary_created:
+                try:
+                    temporary_snapshot = os.fstat(temporary_descriptor)
+                except OSError as error:
+                    temporary_cleanup_code = _safe_os_error_code(error)
+            descriptor_close_code = _close_descriptor(temporary_descriptor)
+            temporary_descriptor = -1
+            if close_code is None:
+                close_code = descriptor_close_code
+        if temporary_created and temporary_cleanup_code is None:
+            if temporary_snapshot is None:
+                temporary_cleanup_code = "IDENTITY_UNAVAILABLE"
+            else:
+                temporary_cleanup_code = _unlink_if_same(
+                    parent_descriptor,
+                    temporary_name,
+                    temporary_snapshot,
+                )
+
+    if temporary_cleanup_code is not None:
+        raise KeyringInitializationError(
+            "Credential keyring temporary file could not be removed safely "
+            f"({temporary_cleanup_code})."
+        ) from None
+    if rollback_cleanup_code is not None:
+        raise KeyringInitializationError(
+            "Credential keyring installation could not be rolled back safely "
+            f"({rollback_cleanup_code})."
+        ) from None
+    if close_code is not None:
+        raise KeyringInitializationError(
+            f"Credential keyring temporary file could not be closed safely ({close_code})."
+        ) from None
+    if primary_error is not None:
+        if isinstance(primary_error, OSError):
+            code = _safe_os_error_code(primary_error)
+            if temporary_created and primary_error.errno in _RETRYABLE_ATOMIC_ERRNOS:
+                raise _RetryableAtomicCreateError(code) from None
+            raise KeyringInitializationError(
+                f"Credential keyring could not be installed atomically ({code})."
+            ) from None
+        raise primary_error
+    if installed_snapshot is None:
+        raise AssertionError("atomic credential creation completed without an installed file")
+    return installed_snapshot
 
 
 def _new_payload() -> bytes:
@@ -363,6 +460,33 @@ def _new_payload() -> bytes:
     return payload
 
 
+def _safe_os_error_code(error: OSError) -> str:
+    """Return only a non-sensitive symbolic errno for operator diagnostics."""
+
+    return errno.errorcode.get(error.errno or -1, "OS_ERROR")
+
+
+def _atomic_create_with_retry(
+    parent_descriptor: int,
+    name: str,
+    payload: bytes,
+) -> os.stat_result:
+    """Retry a fully cleaned first-write failure without ever replacing a keyring."""
+
+    for attempt in range(_ATOMIC_CREATE_ATTEMPTS):
+        try:
+            return _atomic_create(parent_descriptor, name, payload)
+        except _DestinationAppeared:
+            raise
+        except _RetryableAtomicCreateError as error:
+            if attempt + 1 == _ATOMIC_CREATE_ATTEMPTS:
+                raise KeyringInitializationError(
+                    f"Credential keyring could not be installed atomically ({error.code})."
+                ) from None
+            time.sleep(_ATOMIC_CREATE_RETRY_SECONDS * (attempt + 1))
+    raise AssertionError("atomic credential creation retry loop did not terminate")
+
+
 def ensure_keyring(path: Path) -> bool:
     """Create a valid keyring or validate and secure an existing regular file."""
 
@@ -375,7 +499,7 @@ def ensure_keyring(path: Path) -> bool:
         except FileNotFoundError:
             payload = _new_payload()
             try:
-                installed_snapshot = _atomic_create(
+                installed_snapshot = _atomic_create_with_retry(
                     parent_descriptor,
                     absolute_path.name,
                     payload,
@@ -387,18 +511,28 @@ def ensure_keyring(path: Path) -> bool:
             try:
                 _assert_parent_unchanged(absolute_path, parent_snapshot)
             except BaseException:
-                _unlink_if_same(
+                cleanup_code = _unlink_if_same(
                     parent_descriptor,
                     absolute_path.name,
                     installed_snapshot,
                 )
+                if cleanup_code is not None:
+                    raise KeyringInitializationError(
+                        "Credential keyring installation could not be rolled back safely "
+                        f"({cleanup_code})."
+                    ) from None
                 raise
             return True
         _assert_parent_unchanged(absolute_path, parent_snapshot)
         return False
     except KeyringInitializationError:
         raise
-    except (OSError, ValueError):
+    except OSError as error:
+        code = _safe_os_error_code(error)
+        raise KeyringInitializationError(
+            f"Credential keyring could not be initialized safely ({code})."
+        ) from None
+    except ValueError:
         raise KeyringInitializationError(
             "Credential keyring could not be initialized safely."
         ) from None

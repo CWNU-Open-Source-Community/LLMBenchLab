@@ -13,7 +13,6 @@ require_command() {
   fi
 }
 
-require_command python3 "Install Python 3.11 or newer."
 require_command uv "Install uv from https://docs.astral.sh/uv/."
 require_command node "Install Node.js 22 or newer."
 require_command npm "Install npm with Node.js."
@@ -30,15 +29,15 @@ else
   echo "Created .env from .env.example. Review it before configuring a real provider."
 fi
 
-python3 scripts/ensure_credential_keys.py
-
 mkdir -p backend/data
 
 echo "Installing locked backend dependencies..."
 (
   cd backend
-  uv sync --frozen --extra dev
+  uv sync --python cpython --frozen --extra dev
 )
+
+./scripts/bootstrap_credential_keyring.sh
 
 echo "Installing frontend dependencies..."
 if [[ -f frontend/package-lock.json ]]; then

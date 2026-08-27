@@ -34,8 +34,7 @@ API 系统端点：
 
 ### 3.1 前置要求与初始化
 
-- Python 3.11 或更新版本。
-- `uv`。
+- `uv`；setup/dev 及 API/Worker 的 keyring bootstrap 会由它选择满足后端约束的 CPython 3.11+，不依赖 `PATH` 中的裸 `python3`。
 - Node.js 22 或兼容版本与 npm。
 - Git；Docker 只在 Compose 和 Phase 2 真实故障验收时需要。
 
@@ -45,7 +44,9 @@ API 系统端点：
 make setup
 ```
 
-脚本只在 `.env` 不存在时复制 `.env.example`，按 lockfile 安装依赖，创建或严格校验 `.secrets/credential-keys.json`，执行安全迁移 preflight，并将本地 SQLite 升级到 Alembic head。已有 `.env` 不会覆盖；即使旧 `.env` 没有新变量，API/Worker 也使用仓库根目录的绝对默认 keyring 路径。`.env`、keyring、数据库、WAL/SHM 与自动收养备份都被 Git 忽略。
+脚本只在 `.env` 不存在时复制 `.env.example`，让 `uv` 显式选择 CPython 并按 lockfile 安装依赖，创建或严格校验 `.secrets/credential-keys.json`，执行安全迁移 preflight，并将本地 SQLite 升级到 Alembic head。已有 `.env` 不会覆盖；即使旧 `.env` 没有新变量，API/Worker 也使用仓库根目录的绝对默认 keyring 路径。`.env`、keyring、数据库、WAL/SHM 与自动收养备份都被 Git 忽略。
+
+若旧版本在首次运行时报 `Credential keyring could not be initialized safely`，常见原因是 macOS 上裸 `python3` 命中了 PyPy，而该实现对安全原子链接参数返回 `EINVAL`。更新代码后直接重跑 `make setup && make dev`；原始 `EINVAL` 路径会正常清理且不生成目标 keyring。新版只有在确认临时文件已清理后才会重试；若操作系统拒绝清理，则立即停止并给出符号 errno。排障时请保留该错误码，但不要发送 `.env`、keyring 或残留临时文件的内容。
 
 ### 3.2 启动 API、Worker 与前端
 
@@ -80,7 +81,7 @@ set -a
 source ./.env
 set +a
 cd backend
-uv sync --frozen --extra dev
+uv sync --python cpython --frozen --extra dev
 uv run python -m app.db.prepare_migrations
 uv run alembic upgrade head
 uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload

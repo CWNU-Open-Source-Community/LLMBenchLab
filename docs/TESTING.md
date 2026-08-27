@@ -40,7 +40,7 @@ set -a
 source ./.env
 set +a
 cd backend
-uv sync --frozen --extra dev
+uv sync --python cpython --frozen --extra dev
 uv run python -m app.db.prepare_migrations
 uv run alembic upgrade head
 
@@ -48,7 +48,7 @@ cd ../frontend
 npm ci
 ```
 
-要求 Python `>=3.11`、`uv`、Node.js/npm。若 lockfile 尚未生成或有意更新依赖，只能在依赖变更任务中使用非 frozen 安装，并把新的 lockfile 与原因一并 Review；日常 CI 不应静默改写 lockfile。
+要求 `uv`、Node.js/npm；本地后端命令由 `uv` 选择 Python `>=3.11` 的 CPython。若 lockfile 尚未生成或有意更新依赖，只能在依赖变更任务中使用非 frozen 安装，并把新的 lockfile 与原因一并 Review；日常 CI 不应静默改写 lockfile。
 
 ## 4. 统一命令
 
@@ -361,14 +361,14 @@ CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/
 
 | 验证 | 当前工作树结果 |
 | --- | --- |
-| 后端全量 | `make test`：`421 passed, 6 skipped`；6 个 skip 为未注入 DSN 的 infrastructure marker |
+| 后端全量 | `make test`：`427 passed, 6 skipped`；6 个 skip 为未注入 DSN 的 infrastructure marker |
 | 真实基础设施 | 临时 PostgreSQL 16/Redis 7：`6 passed, 0 skipped`，精确容器已清理 |
 | 前端 | ESLint/typecheck、5 files / `21 passed`、Vite production build 均通过；保留既有 chunk warning |
 | 离线 Smoke | `1 passed, 5 deselected` |
 | Compose 可靠性 | `8/8 passed`；evidence `llmbenchlab-p2-60f3ccdac113/evidence.json`，清理后项目容器/卷/网络为空；每个 API 请求同时验证 client request-id 不被反射且响应为 UUIDv4 |
 | 其他静态门禁 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、`git diff --check` 与高置信 secret scan 通过 |
 
-部署辅助脚本另以系统 Python 3.9 验证 keyring bootstrap 的创建/既有文件校验路径，确保 postponed annotations 不在 setup 入口提前求值失败；该兼容检查不改变上表测试总数。
+keyring bootstrap 的 `24` 个定向测试覆盖所有相关本地入口强制 CPython，以及原子创建、既有文件校验、权限、symlink/路径置换、清理确认后瞬时重试、open 身份不确定与 unlink/close 清理失败停止、仅符号 errno 的错误输出。部署入口还在 `PATH` 将 macOS PyPy 放在首位时对全新临时路径执行创建/二次校验，确认 `uv` 仍选择 CPython；该手工探针不改变上表测试总数。
 
 ## 11. Mock 手工验收
 

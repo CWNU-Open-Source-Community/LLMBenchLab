@@ -16,7 +16,7 @@ if [[ ! -d backend/.venv || ! -d frontend/node_modules ]]; then
   exit 1
 fi
 
-python3 scripts/ensure_credential_keys.py
+./scripts/bootstrap_credential_keyring.sh
 
 if [[ -f .env ]]; then
   set -a

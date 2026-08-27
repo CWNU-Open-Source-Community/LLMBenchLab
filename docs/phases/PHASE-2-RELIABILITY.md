@@ -70,7 +70,7 @@
 
 | 验证 | 结果 |
 | --- | --- |
-| Web 凭据后端全量 | `make test`：`421 passed, 6 skipped`；skip 仅为未注入 DSN 的 infrastructure marker |
+| Web 凭据后端全量 | `make test`：`427 passed, 6 skipped`；skip 仅为未注入 DSN 的 infrastructure marker；keyring bootstrap 定向 `24 passed` |
 | Web 凭据真实 PostgreSQL/Redis | PostgreSQL 16/Redis 7：`6 passed, 0 skipped`；精确测试容器已清理 |
 | Web 凭据前端、Smoke 与静态门禁 | Vitest `21 passed`；Smoke `1 passed, 5 deselected`；Ruff/format/ESLint/typecheck/Vite build/lock/config 全部通过 |
 | Web 凭据 Compose 与迁移/导入 | 更新后的隔离 Compose `8/8 passed`，project `llmbenchlab-p2-60f3ccdac113` 清理后容器/卷/网络均为空；PostgreSQL Alembic upgrade/check 与六表真实导入通过 |

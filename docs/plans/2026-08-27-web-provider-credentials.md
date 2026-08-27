@@ -80,13 +80,13 @@
 
 | 验收项 | 命令/检查 | 预期结果 | 实际结果与证据 |
 |---|---|---|---|
-| credential/API/Worker | `cd backend && uv run pytest -q tests/test_web_credentials.py` 与完整 `make test` | 全绿、无 secret marker | `54 passed`；全后端 `421 passed, 6 skipped`，skip 仅为未注入 DSN 的 infrastructure |
+| credential/API/Worker | `cd backend && uv run pytest -q tests/test_web_credentials.py` 与完整 `make test` | 全绿、无 secret marker | `54 passed`；全后端 `427 passed, 6 skipped`，skip 仅为未注入 DSN 的 infrastructure |
 | migration/import | 临时 PostgreSQL 16/Redis 7 下 `pytest -m integration` 与 `alembic check` | 六表 binary round-trip、并发与 schema 全绿 | `6 passed, 0 skipped`；Alembic 无新操作，临时容器精确清理 |
 | frontend | `npm test`、`npm run lint`、`npm run typecheck`、`npm run build` | 全绿 | 5 files / `21 passed`；lint/typecheck/build 通过，仅既有 chunk warning |
 | repository gates | `make lint`、`make test`、`make smoke` | 全绿且不联网调用 Provider | 全部通过；Smoke `1 passed, 5 deselected` |
 | deployment | PostgreSQL `alembic upgrade/check`、`docker compose config --quiet`、`make phase2-acceptance` | 无 schema drift，配置和故障验收有效 | `0003` upgrade/check、config 与更新后的 Compose `8/8` 通过；清理无残留 |
 | 秘密与无关改动检查 | `git diff --check`、`git status --short`、高置信模式扫描 | 无格式错误、无真实 Key、范围正确 | diff check 通过；仅测试文件中的明确假 canary 命中，未发现真实 Key |
-| 浏览器/系统 Python | 可信 loopback 浏览器手工检查；系统 Python 3.9 keyring bootstrap | password、无 env 字段、保存不回显/日志无测试 Key；bootstrap 可运行 | 均通过；使用无效测试 Key且未调用 Provider，不改变自动化计数 |
+| 浏览器/keyring bootstrap | 可信 loopback 浏览器手工检查；`24` 个定向测试；PyPy-first `PATH` 下的全新临时 keyring 创建/二次校验 | password、无 env 字段、保存不回显/日志无测试 Key；入口固定 CPython 且不打印 key material | 均通过；临时 keyring 为 `0600`，使用无效测试 Key且未调用 Provider |
 
 ## Rollback
 
@@ -105,7 +105,7 @@
 
 - 修改文件：后端 credential crypto/ORM/API/Adapter/Worker/migration/importer、安全回归；前端 Models 表单与测试；setup/Compose/Nginx；ADR、用户与状态文档。
 - 实际命令：`make lint`、`make test`、`make smoke`、真实 PostgreSQL/Redis `pytest -m integration`、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、`make phase2-acceptance`、diff/secret scan。
-- 验收对应：WEBKEY-01–06 的本地证据全部通过；实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push。该分支没有 PR，workflow 仅监听 PR/main，故该精确 SHA 无远程 run；未获授权创建 PR，远程门禁继续保持未完成。
+- 验收对应：WEBKEY-01–06 的本地证据全部通过；Web 凭据基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push，当前 bootstrap remediation 尚待 commit/push。该分支没有 PR，workflow 仅监听 PR/main，故基础实现 SHA 无远程 run；未获授权创建 PR，远程门禁继续保持未完成。
 - 未运行：真实 Provider 调用（无用户 Key，自动化禁止）。
 - 已知问题：可信本地边界不等于公网秘密托管；外部 KMS 和完整审计后续处理。
 
@@ -119,4 +119,6 @@
 | 2026-08-27 CST | discovery | 客户端 request ID、保留旧 Key 的 PATCH 和数字 usage/status 都可能形成反射路径 | 服务端强制 UUID、PATCH 解密后公开字段检查及标量脱敏均新增回归并通过 |
 | 2026-08-27 CST | decision | SQLite 的“单执行者”说明不足以封闭同进程并发；PostgreSQL 仍需细粒度行锁 | 两种方言共用 Model lock helper：SQLite 先 `BEGIN IMMEDIATE`（竞争可短暂阻塞，仅低并发本地），PostgreSQL `FOR UPDATE`；生产/并发评测推荐后者 |
 | 2026-08-27 CST | decision | 不可读的旧 envelope 不能阻止用户修复或退出 stored 模式 | 显式新 Key 可覆盖、Mock/env 可清理；只有保留 stored 且无新 Key时返回 503 |
-| 2026-08-27 CST | verification | 自动化外还需确认真实浏览器和系统 Python 入口 | 浏览器确认 password/无 env/无回显/日志无测试 Key；Python 3.9 bootstrap 兼容通过 |
+| 2026-08-27 CST | discovery | macOS 上 `PATH` 优先的 PyPy 3.11 对 no-clobber `os.link` 的 `dir_fd`/`follow_symlinks=False` 组合稳定返回 `EINVAL` | 不移除安全参数；setup/dev/Make 的 keyring 入口统一通过 `uv` 选择 CPython 运行 dependency-free script |
+| 2026-08-27 CST | discovery | 瞬时原子安装错误之后若清理也失败，继续重试可能遗留第二份临时 key material；项目感知 wrapper 还会为 Docker-only 路径同步宿主依赖 | 重试前必须确认按 inode 清理成功；清理失败 fail closed；bootstrap 改为不解析后端项目的 `uv run --script` |
+| 2026-08-27 CST | verification | 自动化外确认真实浏览器与 PyPy-first 环境的首次 bootstrap | 浏览器确认 password/无 env/无回显/日志无测试 Key；全新临时路径在入口选择 CPython 后创建与二次校验通过，权限 `0600` |

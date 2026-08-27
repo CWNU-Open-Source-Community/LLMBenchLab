@@ -42,8 +42,8 @@
 - Phase 2 可靠任务执行基础已按 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 交付并经过真实 PostgreSQL/Redis 与进程故障验证；实现、验证和阶段边界记录在 [当前工作日志](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)。
 - Phase 2 总状态仍为 `in_progress`：P2-05 尚未实施；P2-06 和 P2-07 只有部分交付，不能称为完整可观测、生产 HA 或容量已验证。
 - [ADR-0006](decisions/ADR-0006-local-real-provider-evaluation.md) 按用户优先级批准可信本地正式数据/真实 Provider 提前切片；本地代码、固定数据源下载和 Mock-only 回归已通过，真实 Provider 调用留给持有 Key 的用户显式执行。该切片没有补齐 P2-05，也不代表 Phase 3 完成。
-- [ADR-0007](decisions/ADR-0007-web-provider-credentials.md) 已按用户明确要求接受 Web 直接输入 Key：当前工作树包含 write-only API/UI、AES-GCM `model_credentials`、API/Worker 共享 keyring、legacy environment 兼容、origin 变更重输 Key 和 active-Run 变更禁令。该切片仍在执行最终完整门禁，尚未形成新的阶段 commit/push/精确 SHA CI，也没有调用真实 Provider；它不改变 Phase 2 的 `in_progress` 状态。
-- 当前分支 `codex/complete-evaluation-workflow` 的实现、独立终审和完整本地门禁已通过；实现 commit `0e62a371b9dd7bd819359a4a2b16ff8d5faa3a0d` 已推送并与远端一致，但工作流只由 PR 或 `main` push 触发，该 SHA 当前没有 Actions run。创建 PR 需用户明确授权，远程绿色前保持任务 `in_progress`。
+- [ADR-0007](decisions/ADR-0007-web-provider-credentials.md) 已按用户明确要求接受 Web 直接输入 Key：write-only API/UI、AES-GCM `model_credentials`、API/Worker 共享 keyring、legacy environment 兼容、origin 变更重输 Key 和 active-Run 变更禁令均已通过完整本地门禁。用户随后暴露的 PyPy keyring 首次初始化问题也已在当前工作树修复并完成本地回归；该 remediation 的 commit/push 与精确 SHA CI 尚待收尾，且没有调用真实 Provider。它不改变 Phase 2 的 `in_progress` 状态。
+- 当前分支 `codex/complete-evaluation-workflow` 的 Web 凭据基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 与文档证据 commit `d41517a0cc385da6931f83de672f24f841192a31` 已推送；当前 bootstrap remediation 尚未提交。工作流只由 PR 或 `main` push 触发，当前分支没有 PR；创建 PR 需用户明确授权，远程绿色前保持任务 `in_progress`。
 
 ## 尚未完成的功能
 
@@ -76,14 +76,14 @@
 
 | 验证 | 结果 | 证据 |
 | --- | --- | --- |
-| Web 凭据后端全量 | 通过 | `make test`：`421 passed, 6 skipped`；6 个 skip 仅为未注入 DSN 的 PostgreSQL/Redis/importer integration |
+| Web 凭据后端全量 | 通过 | `make test`：`427 passed, 6 skipped`；6 个 skip 仅为未注入 DSN 的 PostgreSQL/Redis/importer integration；keyring bootstrap 定向 `24 passed` |
 | Web 凭据真实基础设施 | 通过 | 临时 PostgreSQL 16/Redis 7：`6 passed, 0 skipped`，含 Model 行锁、Redis 重投递和六表 credential binary 导入；精确容器已清理 |
 | Web 凭据前端 | 通过 | ESLint/typecheck 通过；Vitest 5 files / `21 passed`；Vite production build 成功（保留既有约 649 kB chunk warning） |
 | Web 凭据离线 Smoke | 通过 | `1 passed, 5 deselected`，全程 Mock 与隔离 SQLite |
 | Web 凭据静态/迁移/Compose | 通过 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、更新后的 8/8 故障验收、diff check 与高置信 secret scan 均通过；evidence `llmbenchlab-p2-60f3ccdac113` 已确认无残留容器/卷/网络 |
 | 标准数据真实源验证 | 通过 | 固定源下载并转换完整 MMLU-Pro 两个 profile（各 12,032 题）与 GPQA-Diamond（198 题）；另以 CLI `prepare --limit 2` 验证普通入口和可复现归档 |
 | 真实 Provider | 未运行（有意） | 本任务没有 API Key；自动化只用 Mock/MockTransport，真实调用及费用必须由用户显式确认后发生 |
-| 远程精确 SHA CI | 未触发 | 实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push；该分支没有 PR，workflow 仅监听 PR/main，因此精确 SHA 查询无 run；未获授权创建 PR，本地通过不替代 CI |
+| 远程精确 SHA CI | 未触发 | Web 凭据基础实现 `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push 且无 run；当前 bootstrap remediation 尚待 commit/push。该分支没有 PR，workflow 仅监听 PR/main；未获授权创建 PR，本地通过不替代 CI |
 
 所有模型相关自动化路径均使用 Mock、MockTransport 或 stub fetch；基础设施用例只连接隔离的 PostgreSQL/Redis，没有调用真实 Provider，也不要求 Provider API Key。详细命令和结果见工作日志与 [TESTING.md](TESTING.md)。
 

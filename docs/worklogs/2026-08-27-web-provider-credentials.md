@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2](../phases/PHASE-2-RELIABILITY.md)
 - 关联计划：[Web Provider 凭据输入执行计划](../plans/2026-08-27-web-provider-credentials.md)
 - 关联 ADR：[ADR-0007](../decisions/ADR-0007-web-provider-credentials.md)、[ADR-0004](../decisions/ADR-0004-secret-management.md)、[ADR-0006](../decisions/ADR-0006-local-real-provider-evaluation.md)
-- 最终状态：`in_progress`（功能、全部本地门禁和实现 commit/push 已完成；当前分支无 PR，精确 SHA CI 未触发）
+- 最终状态：`in_progress`（功能与全部本地门禁已完成；Web 凭据基础实现/文档已 push，当前 bootstrap remediation 尚待 commit/push；分支无 PR，精确 SHA CI 未触发）
 
 ## 初始仓库状态
 
@@ -34,7 +34,8 @@
 - [x] Worker direct stored Key 与 legacy environment 两条路径都通过 MockTransport/Mock 回归。
 - [x] origin 重输、active Run 锁、keyring fail-closed、双方言 migration/downgrade 和六表 importer 回归通过。
 - [x] README/API/Architecture/Security/Deployment/Testing/状态/Changelog/Phase/Next Task 已同步。
-- [x] 实现 commit 已正常 push。
+- [x] Web 凭据基础实现 commit 已正常 push。
+- [ ] 当前 keyring bootstrap remediation commit/push 与精确 SHA 查询。
 - [ ] 该精确 SHA 的远程必需 CI 全绿；当前分支无 PR，且 workflow 只监听 PR/main，未获授权创建 PR。
 
 ## 实际实现
@@ -50,7 +51,7 @@
 | Migration/import | 新增 Alembic `20260827_0003`、credential source backfill、非空凭据 downgrade guard；importer 从五表扩为六表 | SQLite→PostgreSQL 原子复制 nonce/ciphertext/key ID，输出不含明文或 envelope bytes；keyring 不随数据库迁移 |
 | Request/log boundary | API 忽略客户端 `X-Request-ID`，每次生成 UUIDv4；CORS 不允许同名请求头；SQLAlchemy 隐藏参数 | 修复把 Key 复制进 request ID 后被响应和日志反射的审计 blocker |
 | Frontend | Models 页使用 `type=password`/`autocomplete=new-password`，create 必填、edit 留空保留，状态只显示“已安全保存” | Web 不展示 `api_key_env` 输入，不写 storage/console；请求开始即清空 DOM/state，close/unmount abort |
-| Deployment | setup/dev/Makefile 生成或校验 `0600` keyring；bootstrap 保持系统 Python 3.9 兼容；Compose 只给 API/Worker 只读挂载；Nginx 保持 loopback/Host/CSP/request-buffer 边界 | Mock/env 可在无 keyring 时运行；stored 模式缺 keyring 稳定 503；数据库与 keyring 独立备份 |
+| Deployment | setup/dev/backend/worker/docker-up 共用 `uv run --python 'cpython>=3.11' --script` bootstrap，独立于后端依赖同步地生成或校验 `0600` keyring；Compose 只给 API/Worker 只读挂载；Nginx 保持 loopback/Host/CSP/request-buffer 边界 | 不受 `PATH` 中 PyPy 影响且不削弱 no-clobber/symlink 防护；stored 模式缺 keyring 稳定 503；数据库与 keyring 独立备份 |
 | 文档 | ADR-0007、README、API、Architecture、Security、Deployment、Testing、Requirements、Charter、Roadmap、状态与下一任务 | Web 主路径统一为直接 Key；ADR-0004/0006 的旧 Web/REST 结论明确被部分取代 |
 
 ## 关键决定、偏差与发现
@@ -65,13 +66,17 @@
 | discovery | 旧计划误写 Model/Run credential ID 列 | ADR、计划与迁移统一为 `model_credentials.model_id` 一模型一行，Run 不加列 |
 | decision | 不可解密的旧 envelope 若阻塞所有 PATCH，会让用户无法自助恢复 | active keyring 下的新 Key 覆盖与 Mock/env 清理绕过旧值解密；只有保存 stored 时 fail closed 503 |
 | decision | SQLite 单 Worker 不等于 API 写事务不会并发 | `BEGIN IMMEDIATE` 与 PostgreSQL `FOR UPDATE` 分别封闭 snapshot/credential 竞态 |
+| discovery | 用户首次执行 `make setup` 时，`PATH` 中的 macOS PyPy 3.11 在安全原子链接调用上稳定返回 `EINVAL`；旧外层错误处理只显示统一消息 | 未读取 keyring/`.env` 内容；失败路径已清理临时文件且未生成目标文件。保留 `dir_fd`/`follow_symlinks=False` 安全边界，改为所有入口显式选择 CPython |
+| decision | 文件系统瞬时失败只有在临时材料已确认清理时才可重试；参数/容量/权限或清理失败不应盲目重试 | 只 allowlist `EAGAIN/EBUSY/EINTR/ETXTBSY`；清理返回 errno/路径变化即停止，`EINVAL` 等立即返回不含路径/OS 原文的符号错误码 |
+| discovery | 终审故障注入证明：若瞬时安装失败后临时文件删除也失败，吞掉清理错误再重试会留下第二份 key material；项目感知的 `uv run` 还会让 `docker-up` 无谓同步宿主后端依赖 | `_unlink_if_same` 改为返回安全清理状态，只有确认清理才重试；wrapper 改用 dependency-free `uv run --script`，相应回归已加入 |
 
 ## 实际运行命令与结果
 
 | 命令/检查 | 退出码 | 实际结果 |
 |---|---:|---|
 | `make lint` | 0 | Ruff、109 个 Python 文件 format check、ESLint、TypeScript 全部通过 |
-| `make test` | 0 | 后端 `421 passed, 6 skipped`；前端 5 files / `21 passed`；6 个 skip 仅为无 DSN 时的 infrastructure 用例 |
+| `make test` | 0 | 后端 `427 passed, 6 skipped`；前端 5 files / `21 passed`；6 个 skip 仅为无 DSN 时的 infrastructure 用例 |
+| `cd backend && uv run pytest -q tests/test_ensure_credential_keys_script.py` | 0 | `24 passed`；覆盖相关入口固定 CPython、原子创建/校验、路径置换、清理确认后瞬时重试、open 身份不确定与 unlink/close 清理失败停止、`EINVAL` fail-fast/安全 errno |
 | `cd backend && uv run pytest -q tests/test_web_credentials.py` | 0 | `54 passed`，覆盖 Web/DB/log/request-id/PATCH/恢复隔离/数字 Key/Worker/report 路径 |
 | 临时 PostgreSQL 16/Redis 7 + `pytest -m integration` | 0 | `6 passed, 0 skipped`；含租约/取消、Model 行锁、Redis PEL/ACK、六表 credential binary importer |
 | PostgreSQL `alembic upgrade head` + `alembic check` | 0 | `0000 -> 0001 -> 0002 -> 0003` 成功；无新 upgrade operation |
@@ -84,14 +89,16 @@
 | `git diff --check` | 0 | 无 whitespace error |
 | 高置信 secret scan | 0 | 仅 3 个测试文件中的明确假 canary 命中；未发现真实 Key/私钥 |
 | 可信 loopback 浏览器手工检查 | — | password input；没有 `api_key_env` 控件；保存后不回显测试 Key；应用日志无该值；未触发 Provider |
-| 系统 Python 3.9 keyring bootstrap | 0 | 创建/校验入口兼容运行，不打印 key material；不改变自动化测试计数 |
-| `git commit` / `git push origin codex/complete-evaluation-workflow` | 0 | 实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常推送 |
+| PyPy-first `PATH` + `bootstrap_credential_keyring.sh --path <临时路径>`（连续两次） | 0 | 入口通过 `uv` 选择 CPython；全新创建与既有文件校验均通过，权限 `0600`、96 bytes，不打印 key material；精确临时文件/目录已删除 |
+| `make setup` | 0 | 保留已有 `.env`/keyring，锁定依赖检查、npm 安装和 SQLite Alembic migration 全部完成 |
+| `make dev` + loopback readiness | — | API、独立 Worker、Vite 启动成功；`/api/v1/live` 与 Web 根页面返回成功，进程继续运行供用户使用 |
+| Web 凭据基础实现 `git commit` / `git push origin codex/complete-evaluation-workflow` | 0 | 基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常推送；当前 bootstrap remediation 尚待提交 |
 | `gh pr list --head ...` / `gh run list --commit ...` | 0 | PR 列表与该 SHA run 列表均为空；workflow 仅监听 PR/main，未自行创建 PR |
 
 ## 测试与安全结论
 
-- 通过：后端 421、真实基础设施 6、前端 21、Smoke 1、Compose 8/8、lint/type/build、Alembic、lock/config/diff。
-- 失败后修复：新增 PostgreSQL 测试最初只有自动格式差异；Ruff format 后通过。安全终审发现 request-id、preserved PATCH 和 numeric evidence 三类泄漏边界，均先补回归再修复并重跑全门禁。
+- 通过：后端 427、keyring bootstrap 定向 24、真实基础设施 6、前端 21、Smoke 1、Compose 8/8、lint/type/build、Alembic、lock/config/diff。
+- 失败后修复：新增 PostgreSQL 测试最初只有自动格式差异；Ruff format 后通过。安全终审发现 request-id、preserved PATCH 和 numeric evidence 三类泄漏边界，均先补回归再修复并重跑全门禁。用户随后暴露的首次 keyring 失败已定位为 macOS PyPy 的 `EINVAL`，入口固定 CPython、补 errno/瞬时重试回归后，PyPy-first 全新路径和完整门禁均通过。
 - 未调用真实 Provider；Authorization 仅在 `httpx.MockTransport` 中断言为假 canary。
 - 真实浏览器补充验收确认 password/无 env 输入/保存不回显/日志无测试 Key；使用无效测试值且没有 Provider 请求。
 - 没有读取、输出或提交 `.secrets` keyring 内容；高置信扫描命中均为测试 marker。
@@ -99,7 +106,7 @@
 
 ## 尚未完成与远程边界
 
-- 实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push；精确 SHA GitHub Actions 查询为空，因为当前分支没有 PR，而 workflow 只监听 PR/main。
+- Web 凭据基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push；当前 bootstrap remediation 尚待 commit/push。该分支没有 PR，workflow 只监听 PR/main，因此基础实现 SHA 的 Actions 查询为空。
 - PR 创建不在既有授权内，因此没有自行创建 PR，也没有把本地门禁冒充 CI；要完成远程门禁需用户明确授权创建 PR。
 - 真实 Provider 评测有意未运行；用户后续只需在可信 loopback Web Models 表单提供 Base URL、远端模型名与 Key，再选择固定/自定义 Benchmark 创建 Run。
 
@@ -112,5 +119,5 @@
 ## 最终 Git 状态
 
 ```text
-in_progress: local gates and implementation push passed; exact-SHA CI not triggered without a PR
+in_progress: local gates passed; bootstrap remediation commit/push pending; exact-SHA CI cannot trigger without a PR
 ```

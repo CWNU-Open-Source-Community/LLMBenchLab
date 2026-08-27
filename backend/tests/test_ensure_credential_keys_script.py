@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import errno
 import importlib.util
 import json
 import os
@@ -15,7 +16,9 @@ import pytest
 
 from app.security import CredentialKeyring
 
-_SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "ensure_credential_keys.py"
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_SCRIPT_PATH = _REPOSITORY_ROOT / "scripts" / "ensure_credential_keys.py"
+_BOOTSTRAP_PATH = _REPOSITORY_ROOT / "scripts" / "bootstrap_credential_keyring.sh"
 
 
 def _load_script() -> ModuleType:
@@ -40,6 +43,25 @@ def _valid_payload(fill: int = 1) -> bytes:
             "keys": {"local-v1": _encoded_key(fill)},
         }
     ).encode()
+
+
+def test_all_local_bootstrap_entrypoints_force_cpython() -> None:
+    wrapper = _BOOTSTRAP_PATH.read_text(encoding="utf-8")
+
+    assert stat.S_IMODE(_BOOTSTRAP_PATH.stat().st_mode) & 0o111
+    assert "--python 'cpython>=3.11'" in wrapper
+    assert '--script "$project_root/scripts/ensure_credential_keys.py"' in wrapper
+    assert "--directory" not in wrapper
+
+    entrypoints = {
+        _REPOSITORY_ROOT / "scripts" / "setup.sh": 1,
+        _REPOSITORY_ROOT / "scripts" / "dev.sh": 1,
+        _REPOSITORY_ROOT / "Makefile": 3,
+    }
+    for path, expected_calls in entrypoints.items():
+        contents = path.read_text(encoding="utf-8")
+        assert contents.count("./scripts/bootstrap_credential_keyring.sh") == expected_calls
+        assert "python3 scripts/ensure_credential_keys.py" not in contents
 
 
 def test_create_is_private_valid_atomic_and_silent(tmp_path: Path, capsys) -> None:
@@ -210,6 +232,170 @@ def test_failed_write_leaves_no_destination_or_temporary_file(
         script.ensure_keyring(path)
 
     assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_create_retries_a_cleaned_os_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "credential-keys.json"
+    original_link = script.os.link
+    attempts = 0
+    delays: list[float] = []
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EBUSY, "sensitive operating-system detail")
+        return original_link(*args, **kwargs)
+
+    monkeypatch.setattr(script.os, "link", fail_once)
+    monkeypatch.setattr(script.time, "sleep", delays.append)
+
+    assert script.ensure_keyring(path) is True
+    assert attempts == 2
+    assert delays == [script._ATOMIC_CREATE_RETRY_SECONDS]
+    assert CredentialKeyring.from_file(path).active_key_id == "local-v1"
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_atomic_create_reports_nonretryable_errno_without_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "credential-keys.json"
+    attempts = 0
+    sensitive_detail = "sensitive path and operating-system detail"
+
+    def always_fail(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError(errno.EINVAL, sensitive_detail)
+
+    monkeypatch.setattr(script, "_atomic_create", always_fail)
+    monkeypatch.setattr(script.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(script.KeyringInitializationError, match="EINVAL") as caught:
+        script.ensure_keyring(path)
+
+    assert attempts == 1
+    assert sensitive_detail not in str(caught.value)
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_create_does_not_retry_when_temporary_cleanup_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "credential-keys.json"
+    sensitive_detail = "sensitive cleanup operating-system detail"
+    link_attempts = 0
+    original_unlink = script.os.unlink
+
+    def transient_link_failure(*_args, **_kwargs):
+        nonlocal link_attempts
+        link_attempts += 1
+        raise OSError(errno.EBUSY, "transient link failure")
+
+    def refuse_temporary_cleanup(name, *args, **kwargs):
+        if str(name).startswith(".credential-keyring-"):
+            raise OSError(errno.EACCES, sensitive_detail)
+        return original_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(script.os, "link", transient_link_failure)
+    monkeypatch.setattr(script.os, "unlink", refuse_temporary_cleanup)
+    monkeypatch.setattr(script.time, "sleep", lambda _delay: pytest.fail("must not retry"))
+
+    with pytest.raises(script.KeyringInitializationError, match="EACCES") as caught:
+        script.ensure_keyring(path)
+
+    assert link_attempts == 1
+    assert sensitive_detail not in str(caught.value)
+    assert not path.exists()
+    temporary_files = list(tmp_path.glob(".credential-keyring-*.tmp"))
+    assert len(temporary_files) == 1
+
+    original_unlink(temporary_files[0])
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_atomic_create_does_not_retry_when_temporary_close_is_interrupted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "credential-keys.json"
+    sensitive_detail = "sensitive close operating-system detail"
+    original_open = script.os.open
+    original_close = script.os.close
+    temporary_descriptor: int | None = None
+    close_interrupted = False
+
+    def track_temporary_descriptor(name, *args, **kwargs):
+        nonlocal temporary_descriptor
+        descriptor = original_open(name, *args, **kwargs)
+        if str(name).startswith(".credential-keyring-"):
+            temporary_descriptor = descriptor
+        return descriptor
+
+    def interrupt_temporary_close(descriptor: int) -> None:
+        nonlocal close_interrupted
+        if descriptor == temporary_descriptor and not close_interrupted:
+            close_interrupted = True
+            raise OSError(errno.EINTR, sensitive_detail)
+        original_close(descriptor)
+
+    monkeypatch.setattr(script.os, "open", track_temporary_descriptor)
+    monkeypatch.setattr(script.os, "close", interrupt_temporary_close)
+    monkeypatch.setattr(script.time, "sleep", lambda _delay: pytest.fail("must not retry"))
+
+    with pytest.raises(script.KeyringInitializationError, match="EINTR") as caught:
+        script.ensure_keyring(path)
+
+    assert close_interrupted is True
+    assert sensitive_detail not in str(caught.value)
+    assert not path.exists()
+    assert list(tmp_path.iterdir()) == []
+    assert temporary_descriptor is not None
+    original_close(temporary_descriptor)
+
+
+def test_atomic_create_does_not_retry_when_open_result_is_uncertain(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "credential-keys.json"
+    sensitive_detail = "sensitive open operating-system detail"
+    original_open = script.os.open
+    original_close = script.os.close
+    temporary_open_attempts = 0
+
+    def create_then_report_failure(name, flags, *args, **kwargs):
+        nonlocal temporary_open_attempts
+        if str(name).startswith(".credential-keyring-"):
+            temporary_open_attempts += 1
+            descriptor = original_open(name, flags, *args, **kwargs)
+            original_close(descriptor)
+            raise OSError(errno.EBUSY, sensitive_detail)
+        return original_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(script.os, "open", create_then_report_failure)
+    monkeypatch.setattr(script.time, "sleep", lambda _delay: pytest.fail("must not retry"))
+
+    with pytest.raises(script.KeyringInitializationError, match="EBUSY") as caught:
+        script.ensure_keyring(path)
+
+    assert temporary_open_attempts == 1
+    assert sensitive_detail not in str(caught.value)
+    assert not path.exists()
+    uncertain_files = list(tmp_path.glob(".credential-keyring-*.tmp"))
+    assert len(uncertain_files) == 1
+    assert uncertain_files[0].stat().st_size == 0
+
+    original_unlink = os.unlink
+    original_unlink(uncertain_files[0])
     assert list(tmp_path.iterdir()) == []
 
 

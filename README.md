@@ -119,7 +119,7 @@ LLMBenchLab/
 
 ## Quickstart
 
-前置要求：Python 3.11 或更新版本、[`uv`](https://docs.astral.sh/uv/)、Node.js 22 或兼容版本，以及 npm。Docker 仅在 Compose 模式需要。
+前置要求：[`uv`](https://docs.astral.sh/uv/)（按后端约束选择 CPython 3.11+）、Node.js 22 或兼容版本，以及 npm。Docker 仅在 Compose 模式需要；setup/dev 及 API/Worker 的 keyring bootstrap 不会使用 `PATH` 中不确定的裸 `python3`。
 
 ```bash
 git clone https://github.com/OWNER/LLMBenchLab.git
@@ -128,7 +128,7 @@ make setup
 make dev
 ```
 
-`make setup` 会按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，`Ctrl-C` 会一起停止。
+`make setup` 会让 `uv` 显式选择 CPython，按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，`Ctrl-C` 会一起停止。
 
 默认地址：
 

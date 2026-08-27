@@ -87,7 +87,7 @@ Web stored 流程如下：
 ### 3.2 Keyring、更新与恢复边界
 
 - `LLMBENCHLAB_CREDENTIAL_KEYS_FILE` 指向部署 keyring；严格格式为 `{"active_key_id": ..., "keys": {"id": "base64url-encoded-32-bytes"}}`。active key 用于新加密，其他已登记 key 只用于解密旧 row，以支持显式轮换。
-- `make setup`/启动辅助脚本只在文件不存在时原子生成 Git 忽略的本地 keyring，不打印 key material；既有普通文件会严格校验并收紧为 `0600`，symlink、目录、超大或非法 JSON 会被拒绝。bootstrap 保持系统 Python 3.9 兼容。Compose 把同一只读 secret 挂载到 API 与 Worker，不挂载给 frontend 或 migrate。
+- `make setup`/启动辅助脚本通过 `uv` 显式选择 CPython，只在文件不存在时原子生成 Git 忽略的本地 keyring，不打印 key material；既有普通文件会严格校验并收紧为 `0600`，symlink、目录、超大或非法 JSON 会被拒绝。原子安装只在确认临时文件清理成功后重试明确的瞬时 errno；清理或安装持续失败都只显示符号错误码，不输出操作系统原文、路径或密钥。Compose 把同一只读 secret 挂载到 API 与 Worker，不挂载给 frontend 或 migrate。
 - keyring 本身不是加密的，也不是 KMS/HSM。它必须与数据库分开备份、限制权限并参与恢复演练；丢失 keyring 后 stored rows 不可恢复，数据库与 keyring 同时泄漏后攻击者可离线解密。
 - API 需要 keyring 是为了接收/加密 Web Key；Worker 需要它是为了解密 stored Run。API 不应读取 legacy Provider 环境变量值，Worker 不应提供读回 stored Key 的端点。
 - PATCH 省略 `api_key` 表示保留现有 row，显式 `api_key:null` 被拒绝；替换时重新加密并使用新 nonce。规范化 Provider origin 改变必须同时重输新 Key，同一 origin 的路径变化可保留现有 row。create/PATCH 会把新 Key 与精确 `ModelRead` 全字段及 Run snapshot 的 `model` 子投影比较；保留 stored 时只为同一比较解密旧值，任何匹配都在持久化前拒绝。
