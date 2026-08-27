@@ -15,8 +15,9 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - Phase 0（治理、需求、架构和协议）已完成。
 - Phase 1 MVP 已具备完整垂直链路：注册模型、载入/导入 Benchmark、创建 Run、逐题持久化、结果聚合和前端展示。
 - Phase 2 可靠执行基础已通过真实 PostgreSQL/Redis 和进程故障验证：API 只持久化并通知，独立 Worker 使用租约、心跳、fencing、幂等 Response、有限重试和数据库恢复完成 Run。
+- 可信本地 CLI 已提供 MMLU-Pro 与 GPQA-Diamond 的固定来源转换、真实 OpenAI-compatible 预检、可恢复执行和完整报告导出；这是 Phase 3 的客观题垂直切片，不代表 Phase 2 或 Phase 3 已完成。
 - 默认验收路径只使用 Mock adapter 和临时 SQLite，不访问真实模型服务，也不产生模型费用。
-- Phase 2 仍为 `in_progress`：Provider 限流、预算、完整背压、公平调度、完整审计、历史 counters/延迟指标和性能基线尚未完成；Phase 3–6 仍为计划能力。
+- Phase 2 仍为 `in_progress`：Provider 限流、预算、完整背压、公平调度、完整审计、历史 counters/延迟指标和性能基线尚未完成；Phase 3 只交付上述客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
 
 最新、可复核的完成状态与测试证据以 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) 和 [`docs/worklogs/`](docs/worklogs/) 为准；Roadmap 中的计划能力不等于已交付能力。
 
@@ -25,13 +26,15 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - **完全离线的 Mock Demo**：15 道原创双语演示题，覆盖 exact match、multiple choice 和 numeric；结果必须明确标记为 Demo，不能当作正式模型能力结论。
 - **模型注册表**：支持 `mock` 与 `openai_compatible`，记录远端模型名、默认生成参数和可选价格信息。
 - **版本化 Benchmark**：严格校验 `manifest.json` 与 `questions.jsonl`，支持受限 ZIP 导入、稳定 SHA-256 和导入冲突检测。
+- **固定标准数据集供应链**：MMLU-Pro test/validation 与 GPQA-Diamond 使用固定 revision、源文件 SHA-256、转换器版本和确定性 profile/选项重排；第三方题目只落在 Git 忽略的本地 `artifacts/`。
+- **真实模型本地入口**：`llmbenchlab-evaluate prepare/run/resume/report` 完成下载、模型发现、付费 canary、显式确认、有界执行、缺失题恢复和全量证据导出；Key 只来自环境变量或隐藏输入，远端 Provider 必须使用 HTTPS，明文 HTTP 仅允许 loopback。
 - **确定性评分**：内置三类 Evaluator；解析失败和单题调用失败严格计 0 分，并保留错误证据。
 - **可解释指标**：严格总分 `score`、完成率 `completion_rate` 和已回答准确率 `answered_accuracy` 分开呈现，避免把缺失回答隐藏在成功样本中。
-- **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复。
+- **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复；大快照加载移出事件循环，已领取 Run 在物化题目时仍可续租。
 - **幂等与恢复**：同一 Run/Question 只有一条计分证据；租约心跳、有限 attempt、退避、取消、过期接管和 dead-letter 都由数据库裁决，Redis 不是状态数据库。
 - **可复现记录**：持久化模型参数、Prompt、Benchmark Hash、协议版本、代码 commit（可用时）、raw response、parsed answer、参考答案快照和逐题评分。
 - **六个前端页面**：Dashboard、Models、Benchmarks、New Run、Run Detail 和 Leaderboard，含加载、空数据、错误状态与响应式布局。
-- **秘密最小化**：数据库和 API 只保存/返回 `api_key_env` 的变量名，绝不接收或持久化对应的 Key 值。
+- **秘密最小化**：数据库和 API 只保存/返回 `api_key_env` 的变量名；成功回答、raw usage、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，会在进入 Runner/持久化前替换为 `[REDACTED]`。
 - **开发交付完整**：Alembic、Ruff、pytest、ESLint、TypeScript、Vitest、Vite production build、GitHub Actions、Makefile，以及 PostgreSQL、Redis、API、Worker、frontend 和一次性 migrate 组成的 Docker Compose。
 
 ## 产品截图
@@ -80,13 +83,17 @@ LLMBenchLab/
 │   ├── app/
 │   │   ├── adapters/        # Mock / OpenAI-compatible
 │   │   ├── api/v1/          # REST 路由
+│   │   ├── cli/             # 可信本地正式评测入口
 │   │   ├── core/            # 配置、日志、常量、时间
 │   │   ├── db/              # Session 与初始化
 │   │   ├── evaluators/      # 三类确定性评分器
 │   │   ├── models/          # SQLAlchemy 实体
+│   │   ├── providers/       # 模型发现与最小 Chat canary
+│   │   ├── reports/         # 完整 Run 报告导出
 │   │   ├── runners/         # 租约仓储与评测 Runner
 │   │   ├── schemas/         # Pydantic API Schema
 │   │   ├── services/        # Dataset 与业务服务
+│   │   ├── standard_datasets/ # 固定 MMLU-Pro / GPQA 转换器
 │   │   ├── task_queue/      # Redis Streams 通知
 │   │   └── workers/         # 独立 Worker 服务
 │   └── tests/               # 单元、集成与 Smoke 测试
@@ -96,6 +103,7 @@ LLMBenchLab/
 │   ├── src/pages/           # 六个产品页面
 │   └── tests/               # Vitest / Testing Library
 ├── benchmarks/demo-general/ # 15 道原创 Demo 题
+├── artifacts/               # 本地数据缓存、转换 ZIP 与报告；Git 忽略
 ├── docs/
 │   ├── decisions/           # ADR
 │   ├── phases/              # Phase 0–6 计划与验收
@@ -183,9 +191,71 @@ make smoke
 
 Smoke 使用临时 SQLite 和 Mock adapter，不接触开发数据库或真实 Provider。
 
+## 正式模型评测：可信本地 CLI
+
+这条路径面向受信任机器上的操作者。它复用同一数据库、Run 快照、Evaluator 和逐题证据，但不要求启动浏览器、API、Redis 或常驻 Worker。运行前先执行 `make setup`，并停止会连接同一数据库的常规 API 与 Worker，让 CLI 独占数据库；代码只能检测已有 `running` Run，无法阻止空闲 Worker 抢走刚创建的 `pending` Run。SQLite 路径尤其不能同时运行第二个执行者。
+
+先用少量题验证数据、模型名、输出格式和费用。`prepare` 只下载、校验和转换数据，不接触 Provider：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate prepare \
+  --dataset mmlu-pro \
+  --profile official_cot \
+  --limit 20
+```
+
+真实运行只需要兼容 API 地址和 Key。Key 可由 secret manager 注入默认变量 `LLMBENCHLAB_REAL_API_KEY`，也可在变量不存在时由 CLI 用隐藏终端提示读取；命令没有也不接受 `--api-key`：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate run \
+  --dataset mmlu-pro \
+  --profile official_cot \
+  --limit 20 \
+  --base-url https://provider.example.invalid/v1 \
+  --model replace-with-provider-model-id \
+  --concurrency 1
+```
+
+`base_url` 可以是兼容根地址（如 `https://host/v1`，实际 POST 到 `/v1/chat/completions`），也可以直接是以 `/chat/completions` 结尾的完整端点。远端主机只接受 HTTPS；`http://localhost`、`http://127.0.0.1` 或 `http://[::1]` 仅用于本机推理服务。CLI 默认先请求同一根路径的 `GET /models`：只发现一个模型时可省略 `--model`；多个模型时必须显式选择。若 Provider 不实现 `/models`，只有已经给出 `--model` 时才会继续；也可显式使用 `--no-model-discovery --model ...`。发现结果中任何模型 ID 若反射当前 Key，预检会直接失败且不会把该值写入诊断信息。
+
+在创建 Run 前，CLI 会打印目标 host、模型、题数、剩余 Run attempts 和 Chat Completion HTTP 尝试次数上界，等待输入 `RUN`，然后发送一个可能计费的最小 canary。canary 必须可解析为预期答案；若成功体明确返回的模型名不同于请求目标，也会失败。当前上界按 `(计分题数 × 剩余 Run attempts + 1 个 canary) × 3 次 HTTP attempts` 保守计算；自动化脚本只有显式传入 `--yes` 才能越过交互确认。这不是 Token 或金额预算上限。建议确认少量题结果后再运行全量：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate run \
+  --dataset gpqa-diamond \
+  --full \
+  --base-url https://provider.example.invalid/v1/chat/completions \
+  --model replace-with-provider-model-id \
+  --api-key-env MY_PROVIDER_API_KEY \
+  --concurrency 1
+```
+
+MMLU-Pro 的 `official_cot` 使用每个 category 的 5-shot validation CoT；`direct` 是低成本短答案 profile，不能与官方 CoT 榜单直接比较。GPQA-Diamond 使用 `zero-shot-cot-answer-line-v1`，要求推理后在末行输出 `Answer: X`，并默认以 seed `42` 逐题确定性重排选项。两个标准 manifest 的 system prompt 都为空，Runner 会直接省略空 system message。`--groups` 可筛 MMLU category 或 GPQA high-level domain，`--limit N` 生成确定性前 N 题子集；只有未筛组且使用 `--full` 的数据才是该转换配置下的完整集。
+
+进程中断后，用输出的 Run ID 继续缺失题；恢复前仍会进行确认和 canary：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate resume <RUN_ID>
+```
+
+终态 Run 可单独导出，且不会调用 Provider：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate report <RUN_ID> \
+  --output-dir ../artifacts/evaluations/<NEW_REPORT_DIRECTORY> \
+  --group-by category
+```
+
+输出目录必须尚不存在。每份报告包含 `summary.json`、`groups.csv` 和覆盖全部已持久化 Response 的 `responses.jsonl`；全局与分组指标统一从计划题和这些 Response 证据派生，`metrics_provenance` 会标出数据库 Run 汇总字段是否发生漂移。默认输出、下载缓存和转换 ZIP 都在 Git 忽略的 `artifacts/`。完整来源、profile、Hash 与比较规则见 [`docs/DATASET_FORMAT.md`](docs/DATASET_FORMAT.md) 和 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)，操作与安全边界见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 和 [`docs/SECURITY.md`](docs/SECURITY.md)。
+
 ## 接入 OpenAI-compatible Provider
 
-LLMBenchLab 使用 Chat Completions 风格接口。若 `base_url` 为 `https://provider.example/v1`，Adapter 会请求 `https://provider.example/v1/chat/completions`；如果填写的 URL 已以 `/chat/completions` 结尾，则不会重复追加。
+本节描述通过 Web/API 加常驻 Worker 的服务路径；一次性正式评测优先使用上一节的可信本地 CLI。LLMBenchLab 使用 Chat Completions 风格接口。若 `base_url` 为 `https://provider.example/v1`，Adapter 会请求 `https://provider.example/v1/chat/completions`；如果填写的 URL 已以 `/chat/completions` 结尾，则不会重复追加。
 
 1. 选择一个 Worker 环境变量名，例如 `LOCAL_COMPAT_API_KEY`，通过操作系统 Keychain、秘密管理器或受控 shell 把真实 Key 注入**执行 `make worker` 或 Worker 容器的进程环境**。
 2. 在 Models 页面或 `POST /api/v1/models` 中把 `api_key_env` 填为字符串 `LOCAL_COMPAT_API_KEY`。这里只填变量名，不能填真实值。
@@ -207,7 +277,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/models \
   }'
 ```
 
-真实 Key 不应进入 API JSON、数据库、Git、Issue、日志、截图或 `VITE_*` 变量。Model Schema 会拒绝 `base_url` query，并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段；浏览器不会直接调用 Provider。当前 MVP 尚无 SSRF allowlist，只可使用已审查的 Provider 地址，并在执行前确认题目外发许可、数据政策和费用。缺少目标环境变量时，相关单题会安全记录为 `missing_api_key`。
+真实 Key 不应进入 API JSON、数据库、Git、Issue、日志、截图或 `VITE_*` 变量。Model Schema 会拒绝 `base_url` query，拒绝远端明文 HTTP（仅 loopback 可用 HTTP），并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段；浏览器不会直接调用 Provider。模型发现与 Chat 都只接受 identity encoding；发现体最多 2 MiB，Chat 成功体最多 4 MiB、错误体最多 64 KiB。当前 MVP 尚无 SSRF allowlist，只可使用已审查的 Provider 地址，并在执行前确认题目外发许可、数据政策和费用。缺少目标环境变量时，相关单题会安全记录为 `missing_api_key`。
 
 ## 测试与质量检查
 
@@ -290,7 +360,7 @@ uv run python -m app.db.import_sqlite \
 | Phase 0 | 项目治理、需求、架构、协议 | 已完成 |
 | Phase 1 | FastAPI + React + SQLite 的 MVP 垂直链路 | 已完成 |
 | Phase 2 | PostgreSQL、Redis、独立 Worker、恢复与可观测性 | `in_progress`：可靠基础已验证，治理/完整观测/性能尚未完成 |
-| Phase 3 | 合规标准 Benchmark 与隔离代码评测 | 计划中 |
+| Phase 3 | 合规标准 Benchmark 与隔离代码评测 | MMLU-Pro/GPQA 客观数据切片已交付；IFEval、沙箱及其余验收未完成 |
 | Phase 4 | LLM Judge、人工校准与 Arena | 计划中 |
 | Phase 5 | Agent、工具调用与 Live Benchmark | 计划中 |
 | Phase 6 | 公共发布、多用户、安全与运营加固 | 计划中 |
@@ -317,10 +387,13 @@ uv run python -m app.db.import_sqlite \
 - at-least-once 恢复不保证 Provider 调用或计费 exactly-once；数据库只保留一份幂等的 Response/费用证据。
 - 没有预算上限、Provider 级速率限制、队列背压或端到端费用保护。
 - OpenAI-compatible 只实现 Chat Completions 共同子集，不保证覆盖各供应商私有参数和响应扩展。
-- 当前只含原创 Demo，不捆绑 MMLU-Pro、GPQA、IFEval 等标准数据集，也不执行任何不可信代码。
+- 当前标准数据垂直切片只含 MMLU-Pro 和 GPQA-Diamond 客观选择题转换器；IFEval 专用规则 Evaluator、代码沙箱和完整标准 Benchmark 插件体系尚未交付，也不执行任何不可信代码。
+- 全量真实评测可能产生大量 Token、时间和费用；当前只有预检、显式确认、限题与 1–4 有界并发，没有 Provider 级 RPM/TPM 或全局费用硬上限。
+- `direct`/`official_cot`、任何 group/limit、GPQA shuffle seed、源 revision、转换器版本或 Dataset Hash 不同的结果都不能直接比较；公共题目污染和供应商同名模型滚动更新仍会限制结论。
 - 评分仅含三个确定性客观 Evaluator；没有 LLM Judge、人工评审、Arena、Agent 或 Live Benchmark。
 - Dataset Hash 用于一致性检查，不是发布者签名，也不能证明数据没有污染。
 - `/tasks/metrics` 只提供当前 DB gauges；历史 counters/延迟、完整审计、监控面板和告警尚未完成。
+- P2-06 的 Provider 审计仍不完整：新 Run 会固化第一次模型发现/canary 证据，但 `resume` 的新 canary 尚未追加为独立审计事件；逐题 transport 的 request ID、返回模型名与 system fingerprint 也尚未写入 EvaluationResponse。
 - 当前没有正式性能基线、灾难恢复 SLA、SBOM 或生产部署支持。
 
 ## 贡献

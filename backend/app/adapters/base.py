@@ -65,3 +65,8 @@ class ModelAdapter(ABC):
         generation_config: GenerationConfig,
     ) -> ModelGenerationResult:
         """Generate one response for an already-rendered message sequence."""
+
+    async def aclose(self) -> None:
+        """Release adapter-owned resources; stateless adapters need no action."""
+
+        return None

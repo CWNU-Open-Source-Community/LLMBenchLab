@@ -1,5 +1,6 @@
 """Validated and secret-safe schemas for registered models."""
 
+import ipaddress
 import re
 from datetime import datetime
 from typing import Any
@@ -12,6 +13,16 @@ from app.schemas.base import APIModel, ORMModel
 
 ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_DEFAULT_PARAMETERS = frozenset({"temperature", "top_p", "max_tokens", "seed"})
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    if normalized == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _normalize_optional_text(value: str | None) -> str | None:
@@ -34,6 +45,8 @@ def _validate_base_url(value: str | None) -> str | None:
         raise ValueError("base_url must not contain a URL fragment")
     if parsed.query:
         raise ValueError("base_url must not contain query parameters")
+    if parsed.scheme == "http" and not _is_loopback_host(parsed.hostname):
+        raise ValueError("plain HTTP base_url is allowed only for loopback hosts")
     return normalized.rstrip("/")
 
 

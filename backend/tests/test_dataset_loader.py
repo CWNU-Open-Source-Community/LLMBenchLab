@@ -386,6 +386,17 @@ def test_line_and_file_resource_limits_are_enforced_before_schema_work() -> None
     assert issue.line == 1
 
 
+def test_default_limits_accept_current_full_mmlu_pro_question_count() -> None:
+    question_count = 12_032
+    manifest = _manifest(question_count=question_count)
+    questions = tuple(_exact(f"mmlu-pro-{index}") for index in range(question_count))
+
+    loaded = load_dataset_bytes(_json_bytes(manifest), _jsonl_bytes(*questions))
+
+    assert loaded.manifest["question_count"] == question_count
+    assert len(loaded.questions) == question_count
+
+
 def test_safe_zip_round_trip_matches_directory_hash() -> None:
     manifest_data = (DEMO_DIRECTORY / "manifest.json").read_bytes()
     questions_data = (DEMO_DIRECTORY / "questions.jsonl").read_bytes()

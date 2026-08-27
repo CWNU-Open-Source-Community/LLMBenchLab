@@ -1,6 +1,6 @@
 # 下一任务：Phase 2 并发治理、审计与性能基线
 
-> 建议开始时间：可靠任务执行基础提交并通过最终门禁后
+> 建议开始时间：正式数据/真实 API 本地评测切片的阶段 commit 与远程门禁通过后
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 前置状态：Phase 0–1 `completed`；Phase 2 `in_progress`
 
@@ -10,6 +10,8 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 
 这还不是完整的 Phase 2。当前缺少 Provider/Model/Run 级并发与速率治理、预算硬边界、完整背压与公平调度；现有 `/tasks/metrics` 只是数据库当前事实 gauges，不是历史 counters、延迟分布或审计事件；也尚无可复核的容量/性能基线。因此 Phase 2 必须继续保持 `in_progress`。
 
+用户在 2026-08-27 要求优先形成可用真实 API URL/Key 运行的完整客观题流程；[ADR-0006](decisions/ADR-0006-local-real-provider-evaluation.md) 已批准可信本地提前切片。仓库现有固定来源 MMLU-Pro/GPQA-Diamond、`prepare/run/resume/report` CLI、Provider 预检、有界 Runner 和完整终态报告，但这条路径只有确认前的 HTTP attempts 上界，没有全局 RPM/TPM 或金额硬预算，也不解决多 Worker 公平治理。因此它强化了继续执行本任务的必要性，而不是 P2-05 已完成的证据。
+
 ## 当前仓库事实
 
 - 可靠性决策由 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 固定；数据库而非 Redis/进程内存裁决 Run、租约、attempt、取消和终态。
@@ -17,6 +19,7 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 - PostgreSQL 支持受限多 Worker；SQLite 只用于本地兼容和单 Worker 开发，不是多 Worker 部署目标。
 - 本地 Response 由 `(run_id, question_id)` 唯一约束和租约 token 保证幂等；Provider 调用或计费不承诺 exactly-once。
 - 应用日志已有请求/Run correlation 和脱敏 JSON，但只覆盖 LLMBenchLab 应用 logger；Worker probe 也只证明依赖能力，不证明主循环 liveness。
+- 可信本地真实评测由 CLI 直接领取指定 Run；操作者必须停止连接同一数据库的常规 API/Worker。模型发现、canary 和正式题目请求都使用内存中的 Key，自动化仅使用 MockTransport/Mock。
 - 已提交的可靠性基础 commits 为 `2be2392`、`3c975c7`、`2006d3f`、`b3289b1`、`103ab79`；详见当前工作日志与 Project Status。
 
 ## 目标
@@ -57,10 +60,10 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 ## 非目标
 
 - 不接入或调用真实 OpenAI-compatible Provider，不要求真实 API Key，不产生付费调用。
-- 不新增大型 Benchmark、代码沙箱、LLM Judge、Arena、Agent、鉴权、多租户、计费系统或公共部署。
+- 不继续扩展标准 Benchmark，不新增 IFEval、代码沙箱、LLM Judge、Arena、Agent、鉴权、多租户、计费系统或公共部署。
 - 不承诺 Kubernetes、多区域容灾、严格全局 exactly-once、无限水平扩展或生产 SLA。
 - 不改变逐题 evaluator、总分分母、完成率、回答准确率、排行榜隔离或历史快照语义；必要的不兼容变化必须另起协议/API 版本。
-- 不把本任务扩张为 Phase 3；Phase 2 未完成前不启动新的 Benchmark 产品范围。
+- 不把本任务扩张为 Phase 3；ADR-0006 已交付的客观题切片保持冻结，Phase 2 未完成前不启动新的 Benchmark 产品范围。
 
 ## 验收标准
 

@@ -1,6 +1,6 @@
 # Phase 3：标准 Benchmark、代码评测与数据集插件
 
-- 状态：`planned`
+- 状态：`in_progress`（仅可信本地客观 Benchmark 提前切片）
 - 前置阶段：[Phase 2 — Reliability](PHASE-2-RELIABILITY.md)（须 `completed`）
 - 后续阶段：[Phase 4 — Judge & Arena](PHASE-4-JUDGE-ARENA.md)
 
@@ -29,6 +29,10 @@
 - 可用的容器/沙箱设施及数据集许可审查流程。
 - 对代码评测协议和 Dataset Plugin 接口的 ADR。
 
+用户在 2026-08-27 明确要求优先获得可真实模型运行的完整客观评测流程；
+[ADR-0006](../decisions/ADR-0006-local-real-provider-evaluation.md) 批准在 Phase 2 尚未完成时提前交付
+MMLU-Pro/GPQA 的可信本地切片。该决定不满足代码沙箱、全局预算或完整 Phase 3 的前置依赖。
+
 ## 任务拆分
 
 | ID | 任务 | 输出 |
@@ -40,6 +44,10 @@
 | P3-05 | 安全沙箱 | 隔离执行、资源限制、默认断网、清理 |
 | P3-06 | 指标与 UI | 分组聚合、子集筛选、可比性提示 |
 | P3-07 | 安全和复现验证 | 沙箱红队、稳定 Hash、端到端复现 |
+
+当前进度：P3-01 为本地转换器/协议边界的部分实现；P3-02 已接 MMLU-Pro 与 GPQA-Diamond、
+尚无 IFEval；P3-03 的固定下载、缓存、源 SHA 与可复现 ZIP 已完成首个切片；P3-06 只有 CLI
+分组报告，尚无 UI；P3-04/P3-05/P3-07 的代码与沙箱范围未开始。
 
 ## 验收标准
 
@@ -71,4 +79,6 @@
 
 ## 状态
 
-`planned`。数据集名称表示计划支持，不表示仓库已获得或可再分发其内容。
+`in_progress`。仓库不再只有计划：MMLU-Pro 与 GPQA-Diamond 的固定来源转换、可信本地运行和
+报告切片已经实现，但不会提交第三方题目。IFEval、通用 Plugin SDK、代码题/沙箱、完整 UI 与
+红队验收仍缺失，故本阶段不得标为 `completed`。

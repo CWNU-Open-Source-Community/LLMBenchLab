@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
-Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-execution foundation was implemented and fault-tested on 2026-08-25, while Phase 2 as a whole remains `in_progress`. This is a development baseline, not a published release or production/HA claim.
+Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-execution foundation and a trusted-local MMLU-Pro/GPQA-Diamond evaluation slice are implemented, while Phase 2 and Phase 3 as a whole remain `in_progress`. This is a development baseline, not a published release or production/HA claim.
 
 ### Added
 
@@ -22,6 +22,9 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - A six-service local Compose topology (`postgres`, `redis`, one-shot `migrate`, `api`, `worker`, and `frontend`) and CI jobs for SQLite, real PostgreSQL/Redis integration, and full-stack fault acceptance.
 - An explicit stopped-SQLite to offline-empty-PostgreSQL importer with read-only source validation, transactional locking/copy, content-free reconciliation digests, and distinct rollback/commit-uncertainty/post-commit-verification outcomes.
 - Public organization repository at `CWNU-Open-Source-Community/LLMBenchLab`, a visible CI badge, and a repository-wide stage gate requiring each commit to be pushed and its exact GitHub Actions SHA to pass all required jobs.
+- Pinned-source MMLU-Pro and GPQA-Diamond converters with source/archive SHA-256 verification, validated caches, deterministic filtering/shuffling, reproducible dataset-v1 ZIPs, and source/license/profile evidence without committing third-party questions.
+- A trusted-local `llmbenchlab-evaluate` CLI with `prepare`, `run`, `resume`, and `report`; OpenAI-compatible model discovery and canary preflight; hidden/environment-only API keys; explicit request-bound confirmation; direct database execution; and missing-question recovery. Remote Provider endpoints require HTTPS, while plain HTTP is accepted only for loopback hosts; discovery rejects a model ID that reflects the current Key, and canary rejects a returned model that differs from the requested target.
+- Atomic, non-overwriting terminal Run reports containing a protocol/source/model/execution summary, optional metadata groups, and every persisted per-question Response in paginated JSONL. Report metrics are derived from planned questions plus persisted Responses, and `metrics_provenance` identifies drift from persisted Run aggregate fields.
 
 ### Changed
 
@@ -33,6 +36,9 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Replaced startup-time failure of all `running` Runs with lease expiry, database reconciliation, fenced recovery, cancellation convergence, and bounded terminal failure semantics.
 - Kept `llmbenchlab-protocol-v1` scoring, completion, accuracy, token, cost, and leaderboard meanings unchanged while adding operational reliability fields to Run snapshots and API responses.
 - Changed Compose from a two-service SQLite demonstration to a PostgreSQL/Redis reliable-development topology. PostgreSQL and Redis remain internal; API and frontend ports bind to loopback by default.
+- Raised the dataset-v1 resource ceiling to 20,000 questions, 128 MiB for `questions.jsonl`, and 130 MiB for ZIP archives so the pinned 12,032-question MMLU-Pro test split can be imported while retaining line, compression-ratio, path, and schema controls.
+- Reworked Runner question scheduling to at most `concurrency` consumer tasks, moved large snapshot loading off the event loop so the claimed lease continues heartbeating, reused and explicitly closed one OpenAI-compatible HTTP client per Run, and omitted blank system messages for provider compatibility.
+- Enriched immutable Run benchmark snapshots with schema version, source, license, dimension, and language while keeping `llmbenchlab-protocol-v1` scoring and API v1 paths unchanged.
 
 ### Fixed
 
@@ -40,6 +46,9 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Prevented duplicate delivery, stale lease owners, cancellation races, and ACK-result uncertainty from duplicating Responses or changing terminal protocol-v1 aggregates.
 - Distinguished SQLite-import failures before commit (exit 2), an unconfirmed PostgreSQL `COMMIT` outcome (exit 4), and failures after a confirmed commit (exit 3), so operators are not told to retry data that may already exist.
 - Made the Phase 2 acceptance harness normalize PostgreSQL fractional seconds with 1–6 digits on Python 3.9; the first failing final run and its successful cleanup remain recorded before the corrected 8/8 rerun.
+- Recomputed persisted Response evidence before both fail-attempt and expired-lease dead-letter transitions, preventing a partially completed Failed Run from retaining stale zero aggregates.
+- Made terminal report summaries, groups, and response evidence use one evidence-derived metric source even when legacy/stale Run aggregate fields differ.
+- Let the trusted-local CLI fenced-reclaim an expired, incomplete `running` lease after reaping terminal evidence, preventing `resume` from waiting forever for the deliberately stopped regular Worker.
 
 ### Security
 
@@ -50,6 +59,9 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Kept credentialed importer DSNs out of argv via `--target-env`, rejected passwords in `--target`, and emitted only row counts and SHA-256 reconciliation digests rather than imported row contents.
 - Limited published Compose ports to loopback and kept PostgreSQL/Redis off the host network by default. This does not add authentication, TLS, tenant isolation, or production hardening.
 - Documented the at-least-once boundary: local database evidence is idempotent, but a Worker crash after a Provider response and before local commit can repeat an upstream call or charge.
+- Kept real API keys out of argv, persistence, API responses, reports, and automated tests. Model discovery is identity-only and capped at 2 MiB; Chat success bodies are capped at 4 MiB and error bodies at 64 KiB. The exact current Key is removed from successful content, raw usage, Provider request IDs, returned model IDs, system fingerprints, and finish reasons before persistence; model discovery/canary errors remain bounded and sanitized.
+- Required a typed confirmation before any canary or formal request, showed a conservative HTTP-attempt upper bound, rejected active Runs/disabled or conflicting Models before paid preflight, and documented that this is not a Token or monetary budget.
+- Documented the trusted-local exclusivity and SSRF/data-egress boundary: regular API/Worker processes must be stopped before direct CLI execution, and arbitrary compatible-provider URLs remain unsuitable for untrusted/public use.
 
 ### Verification
 
@@ -57,3 +69,6 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Passed an isolated default-build Compose acceptance harness in all eight scenarios: topology/readiness, protocol-v1 baseline, API restart during execution, exact lease-owner SIGKILL and natural takeover, Redis stop/start with database reconciliation, pending cancellation, running cancellation plus duplicate delivery, and PostgreSQL `head -> 0001 -> head` protocol round-trip.
 - Verified final Redis consumer-group `pending=0` and `lag=0`, unchanged three-point canonical hashes for one 15-question baseline Run's protocol-v1 core fields and its 15 Responses, and cleanup with no project containers, volumes, or networks left behind. This hash is not a whole-database snapshot.
 - Verified the SQLite importer against PostgreSQL 16 for success, pre-commit rollback, two-source contention, commit acknowledgement loss, post-commit snapshot/output failure, secret-safe CLI behavior, and cleanup of every random target database and temporary container.
+- Passed the final current-worktree local gate: 310 backend tests passed with 5 infrastructure skips when DSNs were absent; all 5 real PostgreSQL/Redis integration tests passed separately; 13 frontend tests, offline Smoke, production build, Alembic/lock/Compose checks, and the isolated 8/8 Compose fault acceptance passed.
+- Downloaded and validated the complete pinned sources locally: both MMLU-Pro profiles produced 12,032 questions and GPQA-Diamond produced 198; small `llmbenchlab-evaluate prepare --limit 2` runs also passed through the public CLI. No real Provider or API key was used.
+- Remote exact-SHA GitHub Actions validation remains pending until the stage commit is pushed and CI is triggered; local success is not being reported as a substitute.

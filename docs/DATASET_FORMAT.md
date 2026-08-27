@@ -1,6 +1,6 @@
 # Benchmark 数据集格式
 
-LLMBenchLab 的 Benchmark 是一个不可变、可版本化的目录。MVP 只读取两个固定文件，不下载 manifest 指向的资源，也不执行其中的代码：
+LLMBenchLab 的 Benchmark 是一个不可变、可版本化的目录。Importer 只读取两个固定文件，不下载 manifest 指向的资源，也不执行其中的代码：
 
 ```text
 my-benchmark/
@@ -15,6 +15,8 @@ my-benchmark/
 ```text
 llmbenchlab-dataset-v1
 ```
+
+可信本地 `llmbenchlab-evaluate prepare/run` 另有 MMLU-Pro 与 GPQA-Diamond 标准数据转换器。转换器只下载代码中固定的 HTTPS/revision 文件，先校验大小和 SHA-256，再生成同样的 dataset-v1 ZIP；这不赋予任意 manifest 远程下载能力。
 
 ## manifest.json 完整 Schema
 
@@ -129,7 +131,7 @@ llmbenchlab-dataset-v1
     "question_count": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 10000
+      "maximum": 20000
     }
   }
 }
@@ -274,6 +276,34 @@ JSON 标准本身不允许 NaN 或 Infinity；Importer 还必须显式禁止宽�
 - `metadata` 用于标签、难度、主题等非执行信息。它不得改变评分；任何影响评分的值必须放在 `evaluator_config`。
 - 问题正文、选项、答案和 metadata 都视为不可信数据，前端必须按文本转义展示。
 
+## 固定标准数据集转换
+
+标准转换器不会把第三方题目提交到仓库。源文件缓存和生成 ZIP 默认位于 Git 忽略的 `artifacts/dataset-cache/` 与 `artifacts/benchmarks/`，每次读取缓存时仍重新校验大小和 SHA-256。生成的 manifest `source`、版本转换指纹与 CLI 摘要会记录 revision、源 Hash、筛选/profile/seed 和转换器版本；最终 ZIP 还必须通过普通 dataset-v1 Loader，并得到内容级 `dataset_hash`。
+
+当前固定源如下：
+
+| 数据集/文件 | 固定 revision | SHA-256 | 已知大小/行数 |
+| --- | --- | --- | --- |
+| MMLU-Pro test Parquet | `b189ec765aa7ed75c8acfea42df31fdae71f97be` | `0e24a191921c2f453518a537a8b2117bd137e7714d4ef1565e9ba06c1ecb9ad8` | 4,144,185 bytes；12,032 题 |
+| MMLU-Pro validation Parquet | 同上 | `139423c23722e480c807ac4a191409a710cfce4eba744c1d641cf88e730e2078` | 42,857 bytes；70 条 |
+| GPQA 官方加密 `dataset.zip` | `56686c06f5e19865c153de0fdb11be3890014df7` | `461ae7329f15a3e35f8184d2dac24b990f34fdf12f366ca4062d8e6638cd08dc` | 2,348,038 bytes |
+| GPQA archive 内 `dataset/gpqa_diamond.csv` | 同上 | `41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305` | 198 题 |
+
+上游说明分别见固定 revision 的 [MMLU-Pro 数据仓库](https://huggingface.co/datasets/TIGER-Lab/MMLU-Pro/tree/b189ec765aa7ed75c8acfea42df31fdae71f97be) 与 [GPQA 仓库](https://github.com/idavidrein/gpqa/tree/56686c06f5e19865c153de0fdb11be3890014df7)。实际下载 URL 由转换器代码固定到表中具体文件，而不是从这些页面动态发现。
+
+MMLU-Pro 有两个互不混排的 Benchmark ID/profile：
+
+- `official_cot`：按 test 题 category 取 validation 中同 category 的前 5 个官方 CoT 示例，把 few-shot 上下文写入每题 `prompt`；metadata 保存 `category`、profile 和原始 `src`。
+- `direct`：要求只输出选项字母，不加入 validation 示例；这是低成本派生协议，不能与 `official_cot` 或官方 CoT 榜单直接比较。
+
+GPQA-Diamond 只读取上述 CSV 所需的题目、正确答案、三个干扰项、Record ID、high-level domain 与 subdomain。转换器不携带原 CSV 中的解释、作者或验证者字段；固定 Prompt profile 为 `zero-shot-cot-answer-line-v1`，要求模型逐步思考并在末行输出 `Answer: X`。默认使用 seed `42`，以 seed、Record ID 和原选项位置的 SHA-256 排序逐题重排四个选项，并把 prompt profile、seed/domain/subdomain 纳入来源/转换证据。改变 profile 或 seed 会改变版本指纹、题目内容或 Dataset Hash。
+
+两个标准转换器都生成空 `prompt_template.system`。Runner 只在 system 字符串非空白时创建 system message，因此标准运行不会发送空 system message；这一渲染规则也属于协议与直接可比性条件。
+
+`--groups` 对 MMLU-Pro 表示 category，对 GPQA-Diamond 表示 high-level domain；匹配不区分大小写，转换后使用源数据的稳定名称。`--limit N` 在源顺序和分组筛选之后取确定性的前 N 题。`run` 要求在 `--limit N` 与 `--full` 中显式二选一；`--full` 表示保留所有已选 group，只有未提供 `--groups` 时才是该数据集/profile 的全量。revision、profile、group、limit、seed 或转换器版本任一不同都会得到不同版本指纹或 Hash。
+
+MMLU-Pro manifest 记录数据许可 `MIT`；GPQA-Diamond 记录 `CC BY 4.0`。操作者仍须阅读固定上游版本中的完整许可与署名要求，并确认向所选第三方 Provider 发送题目符合许可、隐私和组织政策。Hash 是漂移检测，不是上游签名或法律审查。
+
 ## 合法示例
 
 ### manifest.json
@@ -386,7 +416,7 @@ JSON 标准本身不允许 NaN 或 Infinity；Importer 还必须显式禁止宽�
 Importer 必须按下列顺序执行，任何错误都不能产生部分 Benchmark：
 
 1. **边界与路径**：只接受允许导入根目录内的普通文件；解析真实路径后再次检查边界，拒绝路径穿越、符号链接和设备文件。固定读取 `manifest.json` 与 `questions.jsonl`，manifest 无权指定其他路径。
-2. **资源限制**：MVP 默认 manifest 不超过 1 MiB、JSONL 不超过 16 MiB、单行不超过 256 KiB、问题不超过 10,000。配置可收紧，放宽时需评估内存和拒绝服务风险。
+2. **资源限制**：默认 ZIP 不超过 130 MiB、manifest 不超过 1 MiB、JSONL 不超过 128 MiB、单行不超过 256 KiB、问题不超过 20,000，单成员压缩比不超过 100:1。配置可收紧；这些上限为容纳固定的 12,032 题 MMLU-Pro，不代表可安全承受任意并发大文件导入。
 3. **编码与 JSON**：严格 UTF-8；拒绝空行、注释、尾逗号、跨行 JSON、重复对象键、NaN 和 Infinity。JSONL 错误必须带 1-based 行号与列号。
 4. **Schema**：先验证 manifest，再逐行验证 Question union；报告 JSON Pointer 和稳定错误码。
 5. **跨字段**：验证问题 ID 唯一、`question_count` 与有效行数相等、multiple choice 答案存在、数值有限、Prompt 占位符受支持。

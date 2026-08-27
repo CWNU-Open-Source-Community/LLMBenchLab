@@ -106,6 +106,26 @@ def test_multiple_choice_prompt_uses_stable_key_order() -> None:
     assert messages[1]["content"] == "Choose one.\nA. first\nB. second\nC. third"
 
 
+def test_blank_system_prompt_is_omitted_for_provider_compatibility() -> None:
+    question = _QuestionSnapshot(
+        id="question-id",
+        external_id="blank-system",
+        question_type="multiple_choice",
+        prompt="Choose one.",
+        choices={"A": "first", "B": "second"},
+        reference_answer="A",
+        evaluator_config={},
+        metadata={},
+    )
+
+    messages = EvaluationRunner._render_messages(
+        question,
+        {"system": "  ", "user": "{prompt}\n{choices}"},
+    )
+
+    assert messages == [{"role": "user", "content": "Choose one.\nA. first\nB. second"}]
+
+
 def test_validated_model_defaults_apply_when_run_fields_are_omitted(client) -> None:
     defaults = {"temperature": 0.4, "top_p": 0.8, "max_tokens": 32, "seed": 7}
     model = _register_mock(client, "Defaulted Mock", defaults)
@@ -151,6 +171,11 @@ def test_offline_mock_vertical_slice(client, db_session) -> None:
     assert snapshot["benchmark"]["dataset_hash"] == benchmark["dataset_hash"]
     assert snapshot["benchmark"]["question_count"] == 15
     assert snapshot["benchmark"]["is_demo"] is True
+    assert snapshot["benchmark"]["schema_version"] == benchmark["schema_version"]
+    assert snapshot["benchmark"]["source"] == benchmark["source"]
+    assert snapshot["benchmark"]["license"] == benchmark["license"]
+    assert snapshot["benchmark"]["dimension"] == benchmark["dimension"]
+    assert snapshot["benchmark"]["language"] == benchmark["language"]
     assert snapshot["execution"]["concurrency"] == 2
     assert snapshot["execution"]["timeouts_seconds"] == {
         "connect": 5.0,

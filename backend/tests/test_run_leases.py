@@ -308,9 +308,11 @@ def test_retry_backoff_and_dead_letter_are_finite(lease_store) -> None:
         run = session.get(EvaluationRun, "run-1")
         assert run is not None
         run.max_attempts = 2
+        run.total_questions = 2
 
     first = repository.claim("run-1", owner="worker-a")
     assert first is not None
+    assert repository.persist_response(first, _response()) == ResponseDisposition.INSERTED
     assert (
         repository.fail_attempt(first, error_code="database_temporarily_unavailable")
         == AttemptDisposition.RETRY_SCHEDULED
@@ -332,6 +334,10 @@ def test_retry_backoff_and_dead_letter_are_finite(lease_store) -> None:
         assert run.attempt_count == run.max_attempts == 2
         assert run.dead_lettered_at == clock.current
         assert run.last_error == "database_temporarily_unavailable"
+        assert run.completed_questions == run.correct_questions == 1
+        assert run.error_questions == 0
+        assert run.score == run.completion_rate == 50.0
+        assert run.answered_accuracy == 100.0
         assert run.lease_owner is None
         assert run.lease_expires_at is None
         assert run.heartbeat_at is None
@@ -467,9 +473,11 @@ def test_reaper_settles_exhausted_or_cancelled_expired_lease(
         run = session.get(EvaluationRun, "run-1")
         assert run is not None
         run.max_attempts = 1
+        run.total_questions = 2
 
     lease = repository.claim("run-1", owner="worker-a")
     assert lease is not None
+    assert repository.persist_response(lease, _response()) == ResponseDisposition.INSERTED
     if cancel_requested:
         assert repository.request_cancel("run-1") == CancelDisposition.REQUESTED
     clock.advance(seconds=31)
@@ -490,6 +498,10 @@ def test_reaper_settles_exhausted_or_cancelled_expired_lease(
             assert report.completed == 0
             assert run.status == RunStatus.FAILED
             assert run.dead_lettered_at == clock.current
+        assert run.completed_questions == run.correct_questions == 1
+        assert run.error_questions == 0
+        assert run.score == run.completion_rate == 50.0
+        assert run.answered_accuracy == 100.0
         assert run.lease_owner is None
         assert run.lease_expires_at is None
         assert run.heartbeat_at is None

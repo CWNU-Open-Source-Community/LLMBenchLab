@@ -458,7 +458,8 @@ class RunLeaseRepository:
                 self._clear_lease(run)
                 return AttemptDisposition.CANCELLED
             run.last_error = safe_error
-            if self._complete_from_evidence(session, run, now):
+            completed_response_count = aggregate_run_evidence(session, run)
+            if self._complete_from_evidence(run, now, completed_response_count):
                 return AttemptDisposition.RECOVERED_COMPLETED
             if run.attempt_count >= run.max_attempts:
                 run.status = RunStatus.FAILED
@@ -515,17 +516,19 @@ class RunLeaseRepository:
                     run.next_attempt_at = None
                     self._clear_lease(run)
                     cancelled += 1
-                elif self._complete_from_evidence(session, run, now):
-                    completed += 1
-                elif run.attempt_count >= run.max_attempts:
-                    error_code = "worker_lease_expired_retry_exhausted"
-                    run.last_error = error_code
-                    run.status = RunStatus.FAILED
-                    run.error_message = error_code
-                    run.dead_lettered_at = now
-                    run.finished_at = now
-                    self._clear_lease(run)
-                    dead_lettered += 1
+                else:
+                    completed_response_count = aggregate_run_evidence(session, run)
+                    if self._complete_from_evidence(run, now, completed_response_count):
+                        completed += 1
+                    elif run.attempt_count >= run.max_attempts:
+                        error_code = "worker_lease_expired_retry_exhausted"
+                        run.last_error = error_code
+                        run.status = RunStatus.FAILED
+                        run.error_message = error_code
+                        run.dead_lettered_at = now
+                        run.finished_at = now
+                        self._clear_lease(run)
+                        dead_lettered += 1
         return ReapReport(
             cancelled=cancelled,
             dead_lettered=dead_lettered,
@@ -535,13 +538,13 @@ class RunLeaseRepository:
     @classmethod
     def _complete_from_evidence(
         cls,
-        session: Session,
         run: EvaluationRun,
         now: datetime,
+        completed_response_count: int,
     ) -> bool:
         """Finalize a complete response set without another provider attempt."""
 
-        if aggregate_run_evidence(session, run) != run.total_questions:
+        if completed_response_count != run.total_questions:
             return False
         run.status = RunStatus.COMPLETED
         run.finished_at = now

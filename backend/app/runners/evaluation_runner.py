@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -125,9 +126,19 @@ class EvaluationRunner:
         heartbeat_task = asyncio.create_task(
             self._heartbeat(lease, heartbeat_stop, lease_lost), name=f"heartbeat-{run_id}"
         )
+        adapter: Any | None = None
 
         try:
-            model, questions, generation, prompt_template, execution = self._load_snapshots(run_id)
+            # Snapshot materialization can scan thousands of rows.  Keep it off the
+            # event loop so the already-claimed lease can heartbeat while the
+            # database driver and Python object construction are busy.
+            model, questions, generation, prompt_template, execution = await asyncio.to_thread(
+                self._load_snapshots, run_id
+            )
+            if lease_lost.is_set():
+                raise _LeaseUnavailable("heartbeat_fence_lost")
+            if shutdown_requested is not None and shutdown_requested.is_set():
+                raise _ShutdownRequested("process_shutdown_requested")
             timeouts = dict(execution.get("timeouts_seconds", {}))
             retry_policy = dict(execution.get("retry_policy", {}))
             adapter = build_adapter(
@@ -145,31 +156,28 @@ class EvaluationRunner:
             )
             configured_concurrency = execution.get("concurrency", 1)
             concurrency = max(1, min(4, int(configured_concurrency)))
-            semaphore = asyncio.Semaphore(concurrency)
 
-            async def evaluate_bounded(question: _QuestionSnapshot) -> None:
+            async def evaluate_bounded(question: _QuestionSnapshot) -> bool:
                 if lease_lost.is_set():
                     raise _LeaseUnavailable("heartbeat_fence_lost")
                 if shutdown_requested is not None and shutdown_requested.is_set():
-                    return
-                async with semaphore:
-                    if lease_lost.is_set():
-                        raise _LeaseUnavailable("heartbeat_fence_lost")
-                    if shutdown_requested is not None and shutdown_requested.is_set():
-                        return
-                    if self._cancellation_requested(run_id):
-                        return
-                    await self._evaluate_question(
-                        lease,
-                        model,
-                        question,
-                        generation,
-                        prompt_template,
-                        adapter,
-                    )
+                    return False
+                if self._cancellation_requested(run_id):
+                    return False
+                await self._evaluate_question(
+                    lease,
+                    model,
+                    question,
+                    generation,
+                    prompt_template,
+                    adapter,
+                )
+                return True
 
             await self._run_questions(
-                [evaluate_bounded(question) for question in questions],
+                questions,
+                evaluate=evaluate_bounded,
+                concurrency=concurrency,
                 lease_lost=lease_lost,
             )
             if lease_lost.is_set():
@@ -275,7 +283,26 @@ class EvaluationRunner:
             return True
         finally:
             heartbeat_stop.set()
-            await heartbeat_task
+            try:
+                await heartbeat_task
+            finally:
+                close_adapter = getattr(adapter, "aclose", None)
+                if close_adapter is not None:
+                    try:
+                        await close_adapter()
+                    except Exception as exc:
+                        logger.warning(
+                            "Evaluation adapter cleanup failed",
+                            extra={
+                                "event": "run_adapter_cleanup_failed",
+                                "run_id": run_id,
+                                "worker_id": lease.owner,
+                                "attempt": lease.attempt,
+                                "lease_token": lease.token,
+                                "error_code": f"adapter_cleanup_error:{type(exc).__name__}",
+                                "result": "ignored_after_cleanup_attempt",
+                            },
+                        )
 
     def _claim(self, run_id: str) -> RunLease | None:
         return self._lease_repository.claim(run_id, owner=self._worker_id)
@@ -334,19 +361,58 @@ class EvaluationRunner:
 
     @staticmethod
     async def _run_questions(
-        awaitables: list[Any],
+        questions: list[_QuestionSnapshot],
         *,
+        evaluate: Callable[[_QuestionSnapshot], Awaitable[bool]],
+        concurrency: int,
         lease_lost: asyncio.Event,
     ) -> None:
-        """Cancel and await sibling questions on the first error or known lease loss."""
+        """Run a large question set with a fixed number of consumer tasks.
 
-        question_tasks = [asyncio.create_task(awaitable) for awaitable in awaitables]
+        A shared iterator keeps scheduling memory constant instead of creating one
+        coroutine and task per question.  Returning ``False`` from ``evaluate``
+        stops consumers from taking more work after shutdown or cancellation.
+        Lease loss and unexpected errors still cancel every in-flight consumer.
+        """
+
+        if not questions:
+            return
+
+        question_iterator = iter(questions)
+        stop_scheduling = asyncio.Event()
+
+        async def consume_questions() -> None:
+            while not stop_scheduling.is_set():
+                if lease_lost.is_set():
+                    raise _LeaseUnavailable("heartbeat_fence_lost")
+                try:
+                    question = next(question_iterator)
+                except StopIteration:
+                    return
+                if not await evaluate(question):
+                    stop_scheduling.set()
+                    return
+
+        consumer_count = min(max(1, concurrency), len(questions))
+        question_tasks = [
+            asyncio.create_task(
+                consume_questions(),
+                name=f"question-consumer-{index + 1}",
+            )
+            for index in range(consumer_count)
+        ]
 
         async def gather_questions() -> None:
             await asyncio.gather(*question_tasks)
 
-        questions_task = asyncio.create_task(gather_questions())
-        lease_lost_task = asyncio.create_task(lease_lost.wait())
+        questions_task = asyncio.create_task(
+            gather_questions(),
+            name="question-consumers",
+        )
+        lease_lost_task = asyncio.create_task(
+            lease_lost.wait(),
+            name="question-lease-loss-watch",
+        )
         try:
             await asyncio.wait(
                 {questions_task, lease_lost_task},
@@ -610,7 +676,10 @@ class EvaluationRunner:
         system = str(prompt_template.get("system", "You are an objective benchmark participant."))
         user_template = str(prompt_template.get("user", "{prompt}\n{choices}"))
         user = user_template.replace("{prompt}", question.prompt).replace("{choices}", choices)
-        return [{"role": "system", "content": system}, {"role": "user", "content": user.strip()}]
+        messages = [{"role": "user", "content": user.strip()}]
+        if system.strip():
+            messages.insert(0, {"role": "system", "content": system})
+        return messages
 
     @staticmethod
     def _cost(

@@ -2,10 +2,11 @@
 
 ## 1. 当前定位
 
-LLMBenchLab 当前有两条单机运行路径：
+LLMBenchLab 当前有三条本地运行路径：
 
 - 本地开发兼容路径：SQLite、可选 Redis、FastAPI API、独立 Worker 和 Vite。它便于开发与离线 Mock 验收，但 SQLite 只支持单 Worker 低并发，不能替代 PostgreSQL 并发证据。
 - Phase 2 Compose 可靠执行路径：PostgreSQL 是唯一任务事实来源，Redis Streams 是 at-least-once 通知层，API 与 Worker 是独立进程，migrate 是唯一 Alembic upgrade owner，Nginx 提供前端。
+- 可信本地正式评测 CLI：直接连接已迁移数据库，固定下载/转换 MMLU-Pro 或 GPQA-Diamond，在同一进程做 Provider preflight、运行有界 Runner、恢复缺失题并导出全量报告；不要求浏览器、API、Redis 或常驻 Worker。
 
 可靠执行基础已经覆盖租约、心跳、fencing、幂等 Response、取消、有限重试、数据库 reconciliation 和故障恢复；`llmbenchlab-protocol-v1` 评分含义没有改变。Phase 2 总状态仍为 `in_progress`：Provider/Model/Run 级限流、预算、完整背压与公平调度、完整历史可观测性/审计、性能基线和生产高可用尚未完成。
 
@@ -16,6 +17,7 @@ LLMBenchLab 当前有两条单机运行路径：
 | 模式 | Web | API | 数据/队列 | 说明 |
 | --- | --- | --- | --- | --- |
 | 本地 Make | `http://127.0.0.1:5173` | `http://127.0.0.1:8000` | `backend/data/llmbenchlab.db`；Redis 可选 | `make dev` 启动 API、独立 Worker、frontend；默认 loopback |
+| 可信本地 CLI | 不需要 | 不需要 | 当前 `DATABASE_URL`；`artifacts/` 中缓存、Benchmark ZIP 与报告 | `llmbenchlab-evaluate` 自己运行 Runner；同一数据库不得有竞争 Worker |
 | Docker Compose | `http://127.0.0.1:8080` | `http://127.0.0.1:8000` | `postgres-data`、`redis-data` named volumes | API/frontend 仅 loopback；PostgreSQL/Redis 无 host port |
 
 API 系统端点：
@@ -104,6 +106,98 @@ VITE_API_BASE_URL=http://127.0.0.1:8000/api/v1 npm run dev -- --host 127.0.0.1
 
 相对 SQLite URL 根据当前工作目录解析；仓库脚本先进入 `backend/`，所以 `sqlite:///./data/llmbenchlab.db` 指向 `backend/data/llmbenchlab.db`。
 
+### 3.4 可信本地正式评测 runbook
+
+这条流程会向第三方发送题目并可能产生费用，只能由受信任操作者主动执行。先从仓库根目录完成依赖与 migration：
+
+```bash
+make setup
+```
+
+停止连接同一数据库的常规 API 和常驻 Worker（使用 `make dev` 时结束整个开发进程组），让 CLI 独占数据库。CLI 会拒绝在已有 `running` Run 时创建新 Run，但不能把这个检查当作多执行者锁；它无法发现仍空闲的 Worker，后者可能抢走刚创建的 `pending` Run，使 Key 继承和费用边界变得不可预测。SQLite 始终只允许一个执行者。
+
+先准备少量正式题。该命令会联网下载固定数据源、校验预期大小/SHA、写入缓存并生成 dataset-v1 ZIP，但不会初始化 Provider 或读取 Key：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate prepare \
+  --dataset mmlu-pro \
+  --profile official_cot \
+  --limit 20
+```
+
+`--dataset` 可选 `mmlu-pro` 或 `gpqa-diamond`。`--groups` 是逗号分隔的 MMLU category 或 GPQA high-level domain；MMLU `--profile` 可选 `official_cot`/`direct`；GPQA 可用 `--shuffle-seed`，默认 `42`。缓存和 ZIP 默认写到仓库根目录的 `artifacts/dataset-cache/`、`artifacts/benchmarks/`，两者均被 Git 忽略。
+
+真实运行的 Key 有两种安全输入方式：
+
+1. 由操作系统 Keychain、secret manager 或受控父进程设置 `LLMBENCHLAB_REAL_API_KEY`；或用 `--api-key-env NAME` 选择另一个已设置变量。
+2. 不设置该变量，在交互终端等待隐藏输入。
+
+不要在 shell 命令中拼接真实值。CLI 没有 `--api-key` 参数，非交互且变量为空时会停止。
+
+使用兼容根地址的限题评测：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate run \
+  --dataset mmlu-pro \
+  --profile official_cot \
+  --limit 20 \
+  --base-url https://provider.example.invalid/v1 \
+  --model replace-with-provider-model-id \
+  --concurrency 1
+```
+
+Base URL 支持以下两种形式：
+
+- 兼容根地址 `https://host/v1`：发现请求为 `GET https://host/v1/models`，生成请求为 `POST https://host/v1/chat/completions`；
+- 完整 Chat 端点 `https://host/v1/chat/completions`：生成请求使用原地址，发现请求仍为同级 `https://host/v1/models`。
+
+远端 Provider 必须使用 HTTPS；明文 HTTP 仅允许 `localhost` 或字面量 loopback IP，用于操作者控制的本地推理服务。默认模型发现只在返回唯一模型时自动选择；返回多个模型必须提供 `--model`。任何模型 ID 若包含当前 Key，预检立即失败且错误不会回显该值。如果 `/models` 返回 404/405，只有显式提供模型名才继续。已知 Provider 不实现发现时可用 `--no-model-discovery --model ...`，但付费 canary 仍会执行。
+
+CLI 在发出 canary 前显示 Provider host、模型、计分题数、剩余 Run attempts 和最多 Chat Completion HTTP 尝试数，交互要求精确输入 `RUN`。canary 必须可解析为预期答案；若成功体明确返回不同于目标的模型名也会失败。上界包含每个逻辑调用最多 3 次 HTTP attempts，以及新 Run 的全部或恢复 Run 的剩余 execution attempts：`(缺失计分题数 × 剩余 Run attempts + 1 个 canary) × 3`。`--yes` 仅用于操作者明确批准的非交互环境。MMLU `official_cot` 默认 `temperature=0/max_tokens=4000`；其他配置默认 `temperature=0/max_tokens=1024`，共同默认 `top_p=1/seed=42/concurrency=1`，都可由命令参数覆盖并冻结到 Run。
+
+模型发现与 Chat 请求固定声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体最多读取 2 MiB，Chat 成功体最多读取 4 MiB、错误体最多读取 64 KiB。成功内容、raw usage 的对象键/字符串值、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，会在进入 Runner/快照/Response 边界前替换为 `[REDACTED]`。这些控制不替代 Provider 账单检查、内容访问控制或通用 DLP。
+
+API URL 与 Key 已足以在 `/models` 只返回一个可用 ID 时选择模型；若返回多个模型，仍需提供 `--model`，避免猜测付费目标。`--input-price-per-million`/`--output-price-per-million` 是可选成本估算输入；不提供价格或 Provider usage 时报告成本为 unknown，而不是虚假 `0`。
+
+GPQA-Diamond 固定 Prompt profile `zero-shot-cot-answer-line-v1`，要求逐步思考并在末行写 `Answer: X`。MMLU/GPQA 标准 manifest 的 system 都为空，Runner 会省略空 system message，而不是向 Provider 发送空内容 system role。
+
+限题成功并核对 Provider 账单后，才考虑全量。以下示例会评测 GPQA-Diamond 全部 198 题：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate run \
+  --dataset gpqa-diamond \
+  --full \
+  --base-url https://provider.example.invalid/v1/chat/completions \
+  --model replace-with-provider-model-id \
+  --api-key-env MY_PROVIDER_API_KEY \
+  --concurrency 1
+```
+
+`run` 强制在 `--limit` 和 `--full` 中二选一，防止无意启动全量；如果同时给 `--groups`，`--full` 仅表示选定 groups 内的全量。MMLU-Pro 全量为 12,032 题，尤其是 `official_cot` 会产生显著 Token、时间和费用。当前没有全局 RPM/TPM、金额预算硬上限或 Provider exactly-once。
+
+`run`/`resume` 到达任何终态后，默认把报告写入 `artifacts/evaluations/<RUN_ID>/`；`completed` 可用于正式比较，`failed/cancelled` 报告只用于诊断部分证据。也可用 `--report-dir` 指定一个尚不存在的目录。收到信号、进程崩溃或 Run 留在非终态后，使用同一数据库恢复缺失 Response：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate resume <RUN_ID>
+```
+
+恢复会读取 Run 中冻结的 Base URL、模型和生成配置，再次做模型发现/确认/canary。若原 Run 记录的变量名与当前 secret manager 不同，可用 `--api-key-env SOURCE_ENV` 临时把来源值映射到冻结变量名。未过期的旧租约必须先自然到期；CLI 会等待数据库裁决，不会覆盖有效 owner。已经过期且证据不全的旧租约会由本地 Runner fenced reclaim，不再等待已停止的外部 Worker。新 Run 的初次 canary 证据会进入快照，但 resume canary 当前不会追加为独立审计事件；逐题 request ID、返回模型名和 system fingerprint 也尚未持久化，发布结果时必须披露这一 P2-06 缺口。
+
+任何终态 Run 都可离线导出，不读取 Key 或调用 Provider：
+
+```bash
+cd backend
+uv run llmbenchlab-evaluate report <RUN_ID> \
+  --output-dir ../artifacts/evaluations/<NEW_REPORT_DIRECTORY> \
+  --group-by domain
+```
+
+报告目录不得已存在，防止静默覆盖证据。`summary.json` 保存协议/数据/模型/生成/执行/preflight 快照，并从计划题与实际 Responses 派生唯一主指标；`metrics_provenance` 标出持久化 Run 字段是否一致及漂移字段。`groups.csv` 使用同一证据口径按一个白名单 metadata 字段形成完整分区，`responses.jsonl` 分页导出所有已持久化逐题证据。文件不含 Key，但含题目、参考答案、raw response 和错误，必须按数据库敏感级别保护。
+
 ## 4. 环境变量
 
 Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CORS 和日志保留短别名。根脚本会载入未提交的 `.env`。
@@ -180,6 +274,8 @@ services:
 
 不要提交 override，不要把展开后的 `docker compose config` 发到公共日志，也不要把 Key 写入 `VITE_*`、Model API JSON、数据库或命令行。自动化、CI、Smoke 与 Phase 2 验收禁止调用真实 Provider。
 
+可信本地 CLI 默认读取 `LLMBENCHLAB_REAL_API_KEY`，或读取 `--api-key-env` 指定的变量/隐藏输入；值只在该 CLI/Runner 进程中暂存，数据库仍只保存变量名。环境变量和进程内存可被同权限进程读取，因此这不是 OS 级 secret isolation。`prepare` 与 `report` 不需要 Key，CI 也不得给它们注入真实凭据。
+
 ## 5. 数据库、队列与 Alembic
 
 ### 5.1 事实来源与恢复边界
@@ -188,6 +284,7 @@ services:
 - Redis Stream 消息只包含版本、`run_id` 和 correlation ID。通知丢失、重复或 ACK 不确定不能删除或改变数据库事实。
 - API 先提交数据库，再 best-effort XADD。Redis 失败时仍返回已持久化 Run；Worker 定期扫描数据库并恢复。
 - 每个执行写入校验 owner 与单调 `lease_token`；终态清除 owner/expiry/heartbeat，旧 token 永久失效。
+- Worker 取得租约并启动心跳后，用工作线程读取和物化 Run/Question 快照，避免大题集同步数据库工作阻塞事件循环；completed/cancelled 以及 attempt 耗尽 dead-letter 前都从 Responses 聚合 Run 指标。
 
 Redis 开启 AOF (`appendfsync everysec`) 只改善通知持久性，不是备份，也不能取代 PostgreSQL。
 
@@ -411,7 +508,7 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 
 `/api/v1/tasks/metrics` 从 PostgreSQL 当前行派生：pending、due pending、running、expired running、active cancellation、retry scheduled、dead-lettered、queue notification error 和 total attempts。它是只读 gauges，不参与调度、不覆盖数据库状态。
 
-当前没有 Prometheus exporter、持久历史 counter、claim conflict/heartbeat/queue error 时序、恢复延迟 histogram、trace、告警或完整审计流。生产监控和 Phase 2 P2-06 仍需补齐。
+当前没有 Prometheus exporter、持久历史 counter、claim conflict/heartbeat/queue error 时序、恢复延迟 histogram、trace、告警或完整审计流。P2-06 的具体 Provider 缺口是 resume canary 没有独立追加事件，以及逐题 transport request ID、返回模型名和 system fingerprint 没有持久化。生产监控和审计仍需补齐。
 
 ## 9. 升级、重启与回滚
 
@@ -431,6 +528,7 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 - Worker 优雅停止先使用 grace；异常退出则等待 lease 自然过期。新 Worker 以递增 token 恢复缺失 Response，旧 token 写入被拒绝。
 - Redis 重启、清空或 ACK 丢失可能造成延迟/重复通知，但 DB reconciliation 和幂等唯一约束维持正确性。
 - 最后一题已提交但 finalize 前崩溃时，reconciliation 从完整 Response 重新聚合，不再次调用 Provider。
+- attempt 耗尽或过期租约进入 failed/dead-letter 时也先聚合已有 Responses，使 API 的诊断性部分指标与证据一致；报告仍会防御性重算并用 `metrics_provenance` 标记旧字段漂移。
 
 这些语义已在隔离双 Worker Compose 验收中覆盖，但不构成多主机 HA、容量或恢复时间 SLA。
 
@@ -450,8 +548,8 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 | Redis | 单实例 AOF、非权威通知层 | 认证/TLS、HA/容量/保留策略、监控；继续保持 DB 事实来源 |
 | Worker | 租约/心跳/fencing/重试/取消，默认单 Worker | 全局/Provider 限流、预算、完整背压、公平调度、滚动排空与容量规划 |
 | Secrets | 环境变量名入库，值只在 Worker 运行时读取 | Secret manager、短期凭据、轮换、每进程最小注入 |
-| SSRF/数据外发 | `base_url` 基本校验 | allowlist、DNS/IP/redirect 验证、出站代理、元数据阻断、外发审批 |
-| 可观测性 | 应用 JSON 日志、组件健康、DB gauges | 统一运行时日志、历史 metrics/traces、告警、完整审计、SLO |
+| SSRF/数据外发 | 远端 HTTPS、HTTP 仅 loopback、禁重定向与有界正文 | allowlist、DNS/IP 验证、出站代理、元数据阻断、外发审批 |
+| 可观测性 | 应用 JSON 日志、组件健康、DB gauges、初次 canary 快照 | 统一运行时日志、历史 metrics/traces、告警、resume/逐题 Provider 审计、SLO |
 | 数据保护 | 显式单向 importer 与 hash 对账 | 保留/删除策略、静态加密、备份/PITR、灾备演练、受控导出 |
 | 供应链 | lockfile、基础 CI、版本标签镜像 | Action SHA/镜像 digest、漏洞门禁、SBOM、签名与 provenance |
 | 性能/HA | 真实故障正确性验收 | 压测、容量/成本基线、多主机故障、滚动升级和恢复时间验证 |

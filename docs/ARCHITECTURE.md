@@ -1,13 +1,14 @@
 # LLMBenchLab 架构
 
-本文描述 LLMBenchLab 当前 Phase 1 产品边界和 Phase 2 可靠执行基础。前端仍通过 REST API 操作同一组领域对象，但 API 不再执行评测：PostgreSQL/数据库是任务与评分证据的唯一事实来源，Redis Streams 是非权威的 at-least-once 通知层，独立 Worker 用数据库租约、心跳与 fencing 执行现有 Runner。SQLite 保留为单 Worker 本地兼容路径。Phase 2 总状态仍为 `in_progress`，这不是公网、HA 或生产架构声明。
+本文描述 LLMBenchLab 当前 Phase 1 产品边界、Phase 2 可靠执行基础，以及可信本地 MMLU-Pro/GPQA-Diamond 真实评测垂直切片。前端仍通过 REST API 操作同一组领域对象，但 API 不执行评测：PostgreSQL/数据库是任务与评分证据的唯一事实来源，Redis Streams 是非权威的 at-least-once 通知层，独立 Worker 或受信本地 CLI 用数据库租约、心跳与 fencing 执行同一 Runner。SQLite 保留为单 Worker 本地兼容路径。Phase 2/3 总状态没有因此完成，这不是公网、HA 或生产架构声明。
 
 ## 架构目标与原则
 
 - **离线可验证**：Mock adapter、Demo Benchmark、测试和 CI 均不得访问真实模型 API。
+- **真实调用显式 opt-in**：只有受信本地操作者运行正式 CLI 时才下载固定公共数据、读取 Key、确认费用并执行 canary/真实请求。
 - **可复现**：Run 保存模型、数据集、Evaluator、Prompt、生成参数、并发和重试策略的快照。
 - **失败隔离**：单题失败被持久化并计 0 分，不中断其余题目。
-- **秘密最小化**：数据库只保存环境变量名，不保存或返回密钥值。
+- **秘密最小化**：数据库只保存环境变量名，不保存或返回密钥值；上游成功内容和相关标识在进入持久化边界前也检查当前 Key 的精确反射。
 - **事实单一**：Run 状态、取消意图、attempt、租约、Response、聚合、错误和 dead-letter 只由数据库裁决；Redis、日志、指标和内存不是事实来源。
 - **at-least-once 与幂等**：通知可重复，逐题写入以 `(run_id, question_id)` 唯一并由当前 lease token fencing；不声称 Provider 调用或计费 exactly-once。
 - **边界稳定**：Adapter、Evaluator、Dataset Loader 和 Runner 通过明确接口解耦，便于后续替换实现。
@@ -23,6 +24,9 @@ flowchart LR
     DB[(PostgreSQL / SQLite)]
     Queue[(Redis Streams)]
     Dataset[本地 Benchmark 目录]
+    Pinned[固定 HTTPS MMLU-Pro / GPQA 源]
+    CLI[可信本地评测 CLI]
+    Reports[本地完整报告]
     Env[进程环境变量]
     Upstream[OpenAI-compatible API]
     Git[本地 Git 元数据]
@@ -30,17 +34,22 @@ flowchart LR
     User --> Browser
     Browser -->|HTTP /api/v1| API
     Dataset -->|manifest.json 与 questions.jsonl| API
+    Pinned -->|固定 revision + 大小/SHA 校验| CLI
+    CLI -->|转换、创建/恢复 Run、fenced 写入| DB
+    CLI -->|summary / groups / responses| Reports
     Git -->|创建 Run 时读取 commit SHA| API
     API -->|事务写入| DB
     API -.->|commit 后 best-effort XADD| Queue
     Queue -.->|at-least-once 通知| Worker
     Worker -->|对账、租约、fenced 写入| DB
     Env -->|仅 Worker 运行时读取密钥| Worker
-    Worker -->|仅 openai_compatible adapter 发起 HTTPS| Upstream
+    Env -->|仅显式本地运行时读取密钥| CLI
+    Worker -->|远端 HTTPS；HTTP 仅 loopback| Upstream
+    CLI -->|发现 + canary + 题目；同一传输限制| Upstream
     API -->|状态、结果与排行榜| Browser
 ```
 
-信任边界如下：Benchmark 文件和用户提供的 `base_url` 均视为不可信输入；上游响应也不能直接作为日志或 HTML。Mock adapter 位于 Worker 内部，必须完全离线。API 只保存 Provider 密钥环境变量名，真实值只注入执行 Adapter 的 Worker。前端只处理后端返回的数据，不接触模型密钥。
+信任边界如下：Benchmark 文件、固定上游下载的内容和用户提供的 `base_url` 均视为不可信输入；上游响应也不能直接作为日志或 HTML。固定数据转换器以 revision、大小和 SHA-256 限定供应链，但 Hash 不是签名。Mock adapter 必须完全离线。API/数据库只保存 Provider 密钥环境变量名，真实值只注入执行 Adapter 的 Worker，或由受信本地 CLI 从环境/隐藏输入临时提供。远端 Provider 只允许 HTTPS，明文 HTTP 仅允许字面 loopback/localhost；这仍不阻止 HTTPS 私网、云元数据或 DNS rebinding。前端只处理后端返回的数据，不接触模型密钥。导出的报告虽经秘密脱敏，仍含题目和原始回答，属于敏感本地 artifact。
 
 ## 容器与模块
 
@@ -83,6 +92,9 @@ flowchart TB
     Redis[(Redis Streams)]
     Files[(Benchmark files)]
     Provider[External provider]
+    PinnedSources[固定公共数据源]
+    LocalCLI[Trusted-local CLI]
+    ReportFiles[summary / groups / responses]
 
     Client -->|REST JSON| Routes
     Poller -->|GET Run 与 Responses| Routes
@@ -94,7 +106,11 @@ flowchart TB
     LeaseRepo --> DB
     Runner --> DB
     Adapters -->|Mock: 无网络| Runner
-    Adapters -->|OpenAI-compatible: HTTP| Provider
+    Adapters -->|OpenAI-compatible: HTTPS remote / HTTP loopback| Provider
+    PinnedSources -->|固定 revision / SHA| LocalCLI
+    LocalCLI -->|复用 Dataset、Run、Lease、Runner| DB
+    LocalCLI -->|发现 / canary / generate| Provider
+    LocalCLI --> ReportFiles
 ```
 
 | 模块 | 单一职责 | 不承担的职责 |
@@ -102,6 +118,10 @@ flowchart TB
 | API Routes / Schemas | HTTP 校验、分页、状态码和输出脱敏 | 评分和供应商协议细节 |
 | Application Services | 编排 CRUD、导入、创建/取消 Run；commit 后 best-effort 通知 | 执行 Adapter 或长时间阻塞请求 |
 | Dataset Loader | 限制文件、解析、逐字段校验、稳定 Hash | 下载远程数据或执行数据集代码 |
+| Standard Dataset Converters | 固定下载/缓存 MMLU-Pro、GPQA，校验源 Hash 并生成 dataset-v1 ZIP | 接受任意 URL、解释许可或执行题目代码 |
+| Trusted-local CLI | prepare、Provider preflight/确认、创建/恢复 Run、驱动 Runner、导出报告 | 提供公网 API、保存明文 Key、全局预算或多租户调度 |
+| Provider Preflight | 推导 `/models`、拒绝 Key 反射、确定模型、执行最小可解析且返回模型一致的 Chat canary | 猜测多个付费目标或证明供应商完全兼容 |
+| Report Exporter | 分页读取终态证据，从计划题与 Responses 派生唯一指标集并原子写出三文件 | 覆盖已有报告、充当访问控制或修改 Run |
 | Redis queue | 提供低延迟、at-least-once 通知和 ACK/PEL | 保存权威状态、租约、取消或结果 |
 | WorkerService | 数据库对账、消费/确认通知、优雅停机 | 改变评分协议或用 Redis 裁决状态 |
 | RunLeaseRepository | 条件领取、心跳、fencing、幂等 Response、retry/cancel/dead-letter | Provider 网络请求 |
@@ -121,6 +141,8 @@ flowchart TB
 4. Loader 对规范化 manifest 和按原顺序排列的规范化题目计算 SHA-256。
 5. Benchmark 与 Questions 在一个数据库事务中写入；任一题失败则整体回滚。
 6. 相同 `id + version + hash` 可按幂等导入处理；相同 `id + version` 但 Hash 不同必须报冲突，不能静默覆盖。
+
+标准数据转换是上述导入之前的受限供应链步骤：代码中固定 MMLU-Pro test/validation 或 GPQA archive 的 HTTPS URL、revision、大小和 SHA-256；缓存命中也重新校验。转换 profile、group/limit、GPQA seed 与转换器版本形成稳定版本指纹，生成的 ZIP 再完整经过普通 Loader。manifest 的 `source` 只是已验证事实说明，普通 Importer 仍不会跟随它联网。
 
 ### 创建并执行 Run
 
@@ -176,6 +198,20 @@ sequenceDiagram
 
 Redis 通知和 ACK 都可重复，所以系统是 at-least-once；数据库中每题只保留一条 Response，并从 Response 事实重算进度和聚合。但若 Worker 在 Provider 已返回、Response 事务提交前崩溃，接管 Worker 可能再次调用 Provider；本架构不保证远程调用或计费 exactly-once。
 
+### 可信本地正式评测
+
+正式 CLI 绕过浏览器/API/Redis 控制面，但不绕过数据、协议或持久化边界：
+
+1. `prepare` 下载固定源、校验并转换；不读取 Key 或连接 Provider。
+2. `run` 强制选择 `--limit` 或 `--full`，从环境变量/隐藏输入取得 Key，使用兼容根路径调用 `GET /models`；远端只允许 HTTPS，HTTP 仅允许 loopback，发现请求只接受 identity 编码且正文上限 2 MiB，多模型时不猜测目标，任何模型 ID 反射当前 Key 都使预检失败。
+3. CLI 输出 host、模型、题数、剩余 Run attempts 和最大 Chat HTTP 尝试数并要求确认；上界按 `(缺失题数 × 剩余 Run attempts + 1 个 canary) × 3` 包含 HTTP retries，再执行一个最小可解析、可能计费的 canary。若成功体明确返回其他模型名，canary 失败。
+4. 通过 preflight 后才持久化 Benchmark、Model 和带脱敏 preflight/完整配置快照的 pending Run，并在同一进程用独立 lease owner 驱动现有 Runner。
+5. Runner 先启动租约心跳，再通过工作线程加载和物化数据库快照，避免大题集同步加载阻塞事件循环；随后以固定 `min(concurrency, question_count)` 个消费者协程从迭代器取题，不为 12,032 题一次性创建 task。Response 仍逐题短事务、fencing 与幂等。
+6. `resume` 重新确认/canary；若旧的未完成租约已经过期，本地 Runner 会执行 fenced reclaim，而不是等待已经停止的外部 Worker。恢复时跳过已有 Response，只执行缺失题。`report` 仅读取终态数据库事实，不接触 Provider。
+7. Exporter 分页读取全部证据，以不可变计划题数和 Responses 重新派生 summary/groups 的同一指标集；`metrics_provenance` 标出数据库 Run 汇总字段漂移。三文件先写入权限收紧的临时目录并同步，再原子发布到一个不存在的目标目录；失败不留下伪装完成的报告。
+
+这条路径要求先停止常规 API/Worker 并由 CLI 独占同一数据库，尤其 SQLite 只能有一个执行者。代码只能拒绝已有 `running` Run，不能探测空闲 Worker 并阻止它抢 `pending`。preflight、确认和限题降低误配置成本，但不等于 Provider RPM/TPM、金额预算硬边界或远端 exactly-once。
+
 ## Run 生命周期与并发控制
 
 ```mermaid
@@ -197,9 +233,9 @@ stateDiagram-v2
 - 状态只允许沿上图迁移；终态不可重新领取且不保留 owner/expiry/heartbeat。
 - 数据库当前时间是租约裁决标准。领取在同一条件更新/事务内令 `attempt_count` 和单调 `lease_token` 加 1，写入 owner/heartbeat/expiry；影响 0 行的 Worker 不得执行。
 - 心跳只能续期尚未过期且 owner/token 匹配的租约。Response、进度、retry、取消、完成和失败写入都必须在事务内再次校验；旧 token 永久失效。
-- 每个 Worker 同时执行一个 Run；每个 Runner 用 semaphore 将 Run 内题目并发限制为 1–4，默认为 1。Provider 限流、全局预算、完整背压与公平调度尚未实现。
+- 每个 Worker/本地 CLI 同时执行一个 Run；每个 Runner 用固定数量消费者将 Run 内题目并发限制为 1–4，默认为 1。Provider 限流、全局预算、完整背压与公平调度尚未实现。
 - 取消是协作式：pending 直接收敛；running 先持久化意图，有效 owner 在题目/心跳边界处理；Worker 已死则由过期对账收敛。已发出且无法撤销的上游请求可能继续至返回或超时。
-- Run 级可重试失败以有限指数退避回到 pending；attempt 耗尽时进入 `failed`，`dead_lettered_at` 是权威 dead-letter 证据。Redis dead-letter 通知即使存在也只能是派生信号。
+- Run 级可重试失败以有限指数退避回到 pending；attempt 耗尽时先从持久化 Responses 聚合部分证据，再进入 `failed`，`dead_lettered_at` 是权威 dead-letter 证据。Redis dead-letter 通知即使存在也只能是派生信号。
 - 如已持久 Response 数等于计划题数，Worker/对账直接从事实聚合 `completed`，不为补终态而多耗 attempt 或再调 Provider。
 - 单题异常生成带 `error_type`/`error_message` 的 EvaluationResponse 并计 0 分，不改变 `llmbenchlab-protocol-v1` 的分母、完成率或已回答准确率含义。
 
@@ -210,6 +246,7 @@ classDiagram
     class ModelAdapter {
         <<interface>>
         +generate(messages, generation_config) ModelGenerationResult
+        +aclose()
     }
     class MockModelAdapter {
         +generate(messages, generation_config) ModelGenerationResult
@@ -238,12 +275,14 @@ classDiagram
 generate(messages, generation_config) -> ModelGenerationResult
 ```
 
-`messages` 是已经应用 Run 快照 Prompt 的消息数组；`generation_config` 至少承载 `temperature`、`top_p`、`max_tokens` 和 `seed`。Adapter Registry 根据 `provider_type` 选择实现：
+`messages` 是已经应用 Run 快照 Prompt 的消息数组；`generation_config` 至少承载 `temperature`、`top_p`、`max_tokens` 和 `seed`。Prompt 渲染只在 manifest `system` 含非空白内容时插入 system message；空 system 被省略。当前 GPQA-Diamond 固定 `zero-shot-cot-answer-line-v1`，要求模型推理后在末行输出 `Answer: X`；MMLU-Pro 与 GPQA 的标准 system 都为空。上述 profile/省略规则属于模型输入身份，必须随模板与 Dataset Hash 一起比较。
+
+Adapter Registry 根据 `provider_type` 选择实现：
 
 - `mock`：使用输入中稳定标识或 Demo 题目映射产生可预测回答，不读取密钥且不得发起网络请求。
-- `openai_compatible`：校验 `base_url` 和 `remote_model_name`，在调用前根据 `api_key_env` 读取环境变量，使用 Chat Completions 风格接口。对 429、部分 5xx 和暂时性网络错误执行有上限的指数退避；明显的 4xx 配置错误不重试。
+- `openai_compatible`：校验 `base_url` 和 `remote_model_name`，在调用前根据 `api_key_env` 读取环境变量，使用 Chat Completions 风格接口。远端 URL 必须为 HTTPS，HTTP 仅允许 loopback；请求声明 `Accept-Encoding: identity` 并拒绝压缩响应。成功体最多 4 MiB、错误体最多 64 KiB，均以流式有界读取提前终止超限内容。对 429、部分 5xx 和暂时性网络错误执行有上限的指数退避；明显的 4xx 配置错误不重试。
 
-Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error` 和 `empty_response`。日志和持久化错误不得包含 Authorization、密钥值或完整敏感响应头。
+Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error` 和 `empty_response`。日志和持久化错误不得包含 Authorization、密钥值或完整敏感响应头。成功内容、raw usage 的对象键/字符串值，以及 provider request ID、返回模型名、system fingerprint 和 finish reason 中出现的当前 Key，会先做精确替换；这不是对任意敏感内容的通用 DLP。
 
 ## Evaluator 架构
 
@@ -352,6 +391,7 @@ PostgreSQL 是共享部署目标，并提供真实多 Worker 条件领取、行�
 - Git commit SHA（无法读取时为 `null`）；
 - 并发度、超时和重试策略；
 - `protocol_version`、创建时间、开始时间和结束时间。
+- 可信本地正式 Run 的初次模型发现/canary 脱敏结果：是否发现、候选数/request ID，以及返回模型、system fingerprint、finish reason、usage、延迟和尝试次数；不含 Key/header。`resume` 的新 canary 当前不会追加为独立审计事件。
 
 Runner 从 Run 快照读取模型连接配置、价格、生成参数、Prompt、并发、超时和重试策略，不回读可编辑 Model 的这些值。题目内容与逐题 Evaluator 配置通过不可变 Benchmark 记录和 `benchmark_hash_snapshot` 绑定；Phase 1 不提供 Benchmark/Question 更新或删除 API。
 
@@ -364,7 +404,7 @@ Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `te
 - `(benchmark_id, external_id)` 唯一；一个 Run 对同一 Question 最多一条 EvaluationResponse。
 - 导入 Benchmark 使用整体事务；逐题结果和进度使用短事务，避免把网络请求包在数据库事务中。
 - 只有 owner/token 匹配、租约未过期的 Worker 能写 Response、进度、费用、retry 或终态；唯一约束是最后的竞态防线，不替代 fencing。
-- 聚合从已持久化的 Responses 计算，并在 Run 终态更新中一次写入，防止界面看到互相矛盾的终态指标。
+- 聚合从已持久化的 Responses 计算，并在 completed、cancelled 或 dead-letter 终态更新前写回 Run。报告仍防御性地从计划题与 Responses 重算唯一主指标，并只用 `metrics_provenance` 标注 Run 字段漂移，保证 summary/groups/responses 不互相矛盾。
 
 ### SQLite 到 PostgreSQL 的显式导入
 
@@ -397,30 +437,32 @@ Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `te
 - `/live` 是纯进程存活检查，不访问 DB/Redis/Provider；`/health` 保持 DB-only 兼容语义；`/ready` 并行检查 DB 连接/Alembic head 与 Redis，不探测 Provider。Redis 失败时返回 `503/degraded`，但 DB/head 可用时 `accepting_runs=true` 且对账可用；DB/head 失败时 `not_ready` 且不接收任务。
 - `/ready` 将同步 DB 探测放入 `asyncio.to_thread` 并限制 HTTP 等待时间。async timeout 不会取消已进入线程的驱动调用；后台资源的真正上界仍依赖数据库 driver/connect/pool timeout。
 - `/tasks/metrics` 在一次 DB 查询中派生 pending/due/running/expired/cancellation/retry/dead-letter/queue-notification-error 数和当前 Run 的 attempt 总和。它们是当前 gauges，不是按事件持久的 counters、完整历史、处理延迟分布或审计记录。
+- P2-06 的 Provider 审计仍有两个具体缺口：初次 canary 会随可信本地 Run 快照固化，但 `resume` 的 canary 不会形成独立追加事件；每题 transport 的 request ID、返回模型名和 system fingerprint 只存在于调用期结果，尚未写入 EvaluationResponse。
 - Worker 容器探针检查 DB/head 和 Redis 能力。DB/head 失败退出 1；Redis 失败输出 degraded 但退出 0，因为 DB reconciliation 仍可用。它是 dependency/capability readiness，不是 Worker 主循环或 event-loop liveness。
 
 ## 部署拓扑与安全边界
 
-本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
+本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
 
-当前 Compose 只是本地开发/故障验收拓扑，示例数据库密码不是生产秘密管理。`base_url` 的允许范围也尚未达到公网多租户要求；即使 URL 格式有效，仍可能产生 SSRF。本版本仅供受信任的本地操作者使用，不应直接暴露公网。后续公开部署必须增加鉴权、TLS、URL allowlist、DNS/IP 重绑定防护、出站网络策略、上传隔离、权限拆分、备份/PITR 和资源配额。当前不声称生产、HA 或灾备 SLA。
+当前 Compose 只是本地开发/故障验收拓扑，示例数据库密码不是生产秘密管理。虽然远端 Provider 已强制 HTTPS、明文 HTTP 只允许 loopback，`base_url` 的允许范围仍未达到公网多租户要求；有效的 HTTPS URL 仍可能指向私网/云元数据或发生 DNS rebinding。本版本仅供受信任的本地操作者使用，不应直接暴露公网。后续公开部署必须增加鉴权、TLS、URL allowlist、DNS/IP 重绑定防护、出站网络策略、上传隔离、权限拆分、备份/PITR 和资源配额。当前不声称生产、HA 或灾备 SLA。
 
 ## 当前限制
 
 - PostgreSQL 租约已支持受限多 Worker 协调；SQLite 仍只适合单 Worker、单机低并发。这不是无限水平扩展或 HA 保证。
 - Provider 级限流、全局预算、完整队列背压、公平调度和性能/容量基线尚未完成。
-- 当前 DB metrics 只是 gauges，不包含完整事件 counters、延迟分布、不可篡改审计、tracing、监控面板或告警。
+- 当前 DB metrics 只是 gauges，不包含完整事件 counters、延迟分布、不可篡改审计、tracing、监控面板或告警；尤其缺少 resume canary 独立事件和逐题 Provider transport 标识持久化。
 - at-least-once 不能防止 Provider 响应到本地 COMMIT 之间崩溃导致的重复远程调用/费用，只保证本地证据幂等。
 - 上游是否真正遵守 `seed`、temperature 等参数由供应商决定；同配置不保证逐 token 完全确定。
 - 仅支持客观的 exact match、multiple choice、numeric；不执行代码，不提供 LLM Judge、Arena、Agent 或长上下文专用协议。
-- Benchmark 来自本地受信任操作者；尚无远程注册表、签名校验、隔离解压或恶意内容扫描。
+- Benchmark 可来自本地受信任操作者，或两个固定公共数据转换器；尚无通用远程注册表、发布者签名、隔离解压或恶意内容扫描。
+- MMLU-Pro `direct`/`official_cot`、group/limit、GPQA shuffle seed 或 Dataset Hash 不同的结果不可直接比较；公共题污染与 Provider 同名模型滚动更新仍无法由平台消除。
 - 单用户、无鉴权、无配额；只能在可信本地环境或受保护网络使用。
 - 成本为基于配置单价和供应商 usage 的估算；usage 缺失时不能视为真实的 0 成本。
 
 ## 后续扩展方式
 
 1. **可靠性治理收口**：在已有 PostgreSQL/Redis/Worker/租约基础上增加 Provider 限流、预算、完整背压与公平调度，并补齐历史 counters/延迟、审计和性能基线。
-2. **数据集插件**：保持规范化 Question 边界，新增下载器、缓存、签名、分片和 dataset plugin；原始来源版本与转换器版本纳入 Hash 元数据。
+2. **数据集插件**：在已有固定 MMLU-Pro/GPQA 转换器上增加通用注册、签名、分片和更多 dataset plugin；继续把原始来源版本与转换器版本纳入 Hash 元数据。
 3. **Evaluator 插件**：以版本化 Registry 增加 IFEval、代码沙箱、LLM Judge 和 Pairwise Judge；任何评分语义变化必须升级 protocol version。
 4. **Adapter 扩展**：实现新的供应商 Adapter，而不是在 Runner 中添加条件分支；能力声明用于标识 seed、usage、工具调用和上下文窗口支持。
 5. **Arena 与 Agent**：新增独立的 Match、Vote、Trajectory、ToolCall 等领域实体，不把交互式评测硬塞进单轮 EvaluationResponse。

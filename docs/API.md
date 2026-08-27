@@ -300,7 +300,7 @@ curl -sS http://127.0.0.1:8000/api/v1/info
 | --- | --- | --- |
 | `name` | string，必填 | 去首尾空白后 `1..160`，全库唯一 |
 | `provider_type` | `mock` 或 `openai_compatible`，必填 | 首期封闭集合 |
-| `base_url` | string/null | 绝对 HTTP(S) URL；禁止 URL 内嵌账号密码、query 与 fragment |
+| `base_url` | string/null | 绝对 URL；远端只允许 HTTPS，明文 HTTP 仅允许 loopback；禁止 URL 内嵌账号密码、query 与 fragment |
 | `remote_model_name` | string/null | 最长 256 |
 | `api_key_env` | string/null | 环境变量名格式，不是密钥值 |
 | `enabled` | boolean，默认 `true` | 禁用模型不能创建 Run |
@@ -308,7 +308,9 @@ curl -sS http://127.0.0.1:8000/api/v1/info
 | `output_price_per_million` | number/null，默认 `null` | 有限非负数；Mock 未填时规范化为明确的 `0` |
 | `default_parameters` | object，默认 `{}` | 只允许 `temperature`、`top_p`、`max_tokens`、`seed`，并使用与 Run 相同的类型/范围约束 |
 
-`openai_compatible` 必须同时提供 `base_url`、`remote_model_name` 和 `api_key_env`；`mock` 的这三个远端连接字段必须为空。API 只验证 URL 语法，**不会阻止内网或云元数据地址**，详见 [SECURITY.md](SECURITY.md)。
+`openai_compatible` 必须同时提供 `base_url`、`remote_model_name` 和 `api_key_env`；`mock` 的这三个远端连接字段必须为空。Model Schema、Provider preflight 和 Adapter 都拒绝远端明文 HTTP，只有 `localhost` 或字面量 loopback IP 可使用 HTTP；HTTPS 私网、云元数据、DNS rebinding 和其他出站目标仍没有 allowlist，详见 [SECURITY.md](SECURITY.md)。
+
+本 API 的 `GET /models` 是 LLMBenchLab 本地模型注册表，不会代替操作者访问 Provider。可信本地 `llmbenchlab-evaluate` 才会调用上游 `/models` 与付费 canary：发现到的任一模型 ID 若包含当前 Key，预检立即失败；canary 成功体若明确返回不同于请求目标的模型名，也会失败。模型发现与正式 Chat 请求声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体上限为 2 MiB，Chat 成功体上限为 4 MiB、错误体上限为 64 KiB。成功内容、raw usage、request ID、返回模型名、system fingerprint 与 finish reason 中出现的当前 Key 会在进入持久化边界前按精确值替换为 `[REDACTED]`。
 
 Phase 1 的 Model 默认参数只覆盖上述四个实际由 Adapter 转发的生成字段。创建 Run 时，显式请求值优先；某字段未出现在请求 JSON 中时才使用 Model 默认值，否则使用协议默认值。Run 的 `generation` 快照保存最终有效值。
 
@@ -398,7 +400,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/models \
 `201 Created` 返回 `ModelRead`。错误：
 
 - `409 model_name_conflict`：名称已存在。
-- `422`：字段缺失、额外字段、非法 URL/环境变量名，或 Provider 必需字段不完整。
+- `422`：字段缺失、额外字段、非法 URL/环境变量名、远端明文 HTTP，或 Provider 必需字段不完整。
 
 ```json
 {
@@ -609,7 +611,8 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/benchmarks/import \
 
 其他错误：
 
-- `413 archive_too_large`：上传体超过 18 MiB。
+- `413 archive_too_large`：上传体超过 130 MiB。解压后的 `questions.jsonl` 上限为
+  128 MiB，题数上限为 20,000；逐行和压缩比限制仍会独立校验。
 - `415 zip_required`：Content-Type 不是受支持的 ZIP 类型。
 - `422 dataset_validation_error`：ZIP 路径/压缩比、文件大小、JSON、Schema 或跨字段校验失败。
 - `422`：缺少 `archive` 表单字段。
@@ -653,7 +656,7 @@ Run 响应示例（后续接口引用为 `RunRead`）：
   "model_parameters_snapshot": {
     "generation": {"temperature": 0.0, "top_p": 1.0, "max_tokens": 256, "seed": 42},
     "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
-    "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true},
+    "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true, "schema_version": "llmbenchlab-dataset-v1", "source": "Original bilingual demo authored for LLMBenchLab", "license": "MIT", "dimension": "general", "language": "zh-en"},
     "evaluator": {"name": "builtin-objective", "version": "1.0", "mapping": {"exact_match": "exact_match_v1", "multiple_choice": "multiple_choice_v1", "numeric": "numeric_v1"}},
     "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "task_delivery": "at_least_once", "task_max_attempts": 3, "restart_recovery": "database_lease_resume_missing_responses"}
   },
@@ -705,7 +708,7 @@ Run 响应示例（后续接口引用为 `RunRead`）：
 | `last_error` | 最近一次执行/通知层的稳定脱敏错误码；与终态展示的 `error_message` 不同 |
 | `dead_lettered_at` | attempt 耗尽且 Response 集不完整时的权威 dead-letter 时间；只用于 failed |
 
-`model_parameters_snapshot.execution.retry_policy` 是每题 Adapter 的有限重试；`task_delivery`、`task_max_attempts` 和 `restart_recovery` 是 Run/Worker 恢复语义。新 Run 固定为 `at_least_once` 和 `database_lease_resume_missing_responses`，恢复时跳过已有 Response。这不保证 Provider 调用或计费 exactly-once；若进程在 Provider 响应后、本地提交前崩溃，可能再次调用 Provider，但数据库仍只保留一条计分/费用 Response 证据。
+`model_parameters_snapshot.execution.retry_policy` 是每题 Adapter 的有限重试；`task_delivery`、`task_max_attempts` 和 `restart_recovery` 是 Run/Worker 恢复语义。新 Run 固定为 `at_least_once` 和 `database_lease_resume_missing_responses`，恢复时跳过已有 Response。Runner 在取得租约并启动心跳后，通过工作线程加载/物化数据库快照，避免大型 Benchmark 的同步加载阻塞事件循环而饿死心跳。完成、取消以及 attempt 耗尽进入 dead-letter 前都会从已持久化 Response 聚合 Run 字段。这不保证 Provider 调用或计费 exactly-once；若进程在 Provider 响应后、本地提交前崩溃，可能再次调用 Provider，但数据库仍只保留一条计分/费用 Response 证据。
 
 ### 6.2 `GET /runs`
 
@@ -730,7 +733,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs?run_status=completed&protocol_versio
       "model_parameters_snapshot": {
         "generation": {"temperature": 0.0, "top_p": 1.0, "max_tokens": 256, "seed": 42},
         "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
-        "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true},
+        "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true, "schema_version": "llmbenchlab-dataset-v1", "source": "Original bilingual demo authored for LLMBenchLab", "license": "MIT", "dimension": "general", "language": "zh-en"},
         "evaluator": {"name": "builtin-objective", "version": "1.0", "mapping": {"exact_match": "exact_match_v1", "multiple_choice": "multiple_choice_v1", "numeric": "numeric_v1"}},
         "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "task_delivery": "at_least_once", "task_max_attempts": 3, "restart_recovery": "database_lease_resume_missing_responses"}
       },
@@ -879,8 +882,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444
 ```
 
 请求失败、空回答或解析失败的记录仍会出现，`score=0`，并填写 `error_type` 与
-`error_message`；上游 usage 缺失时 Token 和费用为 `null`。Run 不存在返回
-`404 run_not_found`；分页非法返回 `422`。
+`error_message`；上游 usage 缺失时 Token 和费用为 `null`。成功内容若精确反射当前 Key，会在写入 `raw_response` 前替换为 `[REDACTED]`。当前 EvaluationResponse/API Schema 不保存或返回逐题 Provider request ID、返回模型名、system fingerprint 或 raw usage；这些 transport 证据仍是 P2-06 审计缺口。Run 不存在返回 `404 run_not_found`；分页非法返回 `422`。
 
 ## 7. Leaderboard 与 Metrics
 
@@ -982,6 +984,8 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/summary
 ```
 
 没有当前协议的已完成 Run 时，平均分和平均延迟为 `null`，Token/费用总计为 `0`，`recent_runs=[]`。`run_count` 统计全部 Run；成功/失败计数、平均值、Token、费用和最近记录只聚合当前 `llmbenchlab-protocol-v1`，避免跨协议混合。若任一已完成 Run 的某类 Token 或成本为未知，对应总计返回 `null`，不得把部分和伪装为完整总量。跨 Benchmark 的 Dashboard 平均只用于概览，不能作为直接可比结论。
+
+可信本地 CLI 的报告导出不是 REST 端点。报告中的唯一主指标从不可变计划题数和实际导出的 Responses 重新派生，保证 `summary.json`、`groups.csv` 与 `responses.jsonl` 同口径；`summary.metrics_provenance` 标明数据库 Run 汇总字段是否一致并列出漂移字段名。新 Run 会在快照中固化初次模型发现/canary 的脱敏证据，但 `resume` 期间重新执行的 canary 当前不会追加为独立审计事件。
 
 ## 8. CORS 与客户端轮询
 

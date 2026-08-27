@@ -31,8 +31,9 @@
 - PostgreSQL 是多 Worker 验证过的部署目标和任务事实来源；SQLite 只支持个人本地单 Worker，不宣称多进程写协调。
 - API 先提交 `pending` Run，再 best-effort `XADD`，自身不加载 Adapter 或执行题目；Redis 故障不能撤销数据库提交。
 - Worker 通过数据库扫描覆盖 commit/XADD 裂缝、消息丢失和 Redis 暂停；重复/延迟通知只能触发数据库条件检查。
-- 同一 Run 同时最多一个有效 owner/token。Response、进度、重试、取消和终态写入都必须验证未过期 lease 和 fencing token。
-- `(run_id, question_id)` 最多一条 Response，`completed_questions` 来自持久化 Response 数，终态聚合从 Response 事实重算。
+- 同一 Run 同时最多一个有效 owner/token。Response、进度、重试、取消和终态写入都必须验证未过期 lease 和 fencing token；大 Run 的同步快照加载移出事件循环，加载期间已领取租约仍持续心跳。
+- `(run_id, question_id)` 最多一条 Response，`completed_questions` 来自持久化 Response 数，完成、取消、fail-attempt dead-letter 和 expired-lease dead-letter 都在进入终态前从 Response 事实重算。
+- 终态报告不信任可能陈旧的 Run 聚合列：`metrics` 从计划题目和持久化 Responses 派生，`groups.csv` 与 `responses.jsonl` 使用同一证据口径，`metrics_provenance` 记录与 Run 字段的漂移。
 - Provider 调用不是 exactly-once：若 Worker 在上游响应后、本地提交前崩溃，接管者可能重复外部调用或计费。
 - 六服务 Compose 是本地可靠性/故障验收拓扑：`postgres`、`redis`、一次性 `migrate`、`api`、`worker`、`frontend`。它不是生产编排或 HA 证明。
 
@@ -43,9 +44,9 @@
 | P2-01 一致性与容量设计 | `partial` | ADR-0005 已固定事实来源、交付、租约、恢复与回滚语义及默认容量边界；正式 SLO、容量模型/基线未完成 |
 | P2-02 PostgreSQL 迁移 | `foundation_delivered` | `0002` migration、双方言往返、真实 PG check、SQLite 单向导入及对账/回滚/并发证据已交付；无自动反向回迁 |
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、独立 Worker、数据库扫描、租约/心跳/fencing、幂等键与 ACK/no-op 语义已交付 |
-| P2-04 生命周期可靠性 | `foundation_delivered` | 恢复、取消、有限重试/退避、租约超时、dead-letter 和终态聚合已交付；Provider 外部副作用仍为 at-least-once 边界 |
+| P2-04 生命周期可靠性 | `foundation_delivered` | 恢复、取消、有限重试/退避、租约超时、dead-letter 和终态聚合已交付；两条 dead-letter 路径都会先聚合 Response 证据，Provider 外部副作用仍为 at-least-once 边界 |
 | P2-05 并发治理 | `pending` | Provider 限流、预算、完整背压、公平调度和全局并发治理未完成 |
-| P2-06 可观测性 | `partial` | 应用 JSON 日志/correlation、健康/就绪和 DB gauges 已交付；历史 counters、延迟、完整审计、全 Uvicorn/第三方日志覆盖与 Worker 主循环 liveness 未完成 |
+| P2-06 可观测性 | `partial` | 应用 JSON 日志/correlation、健康/就绪、DB gauges 和首次 canary Run 快照已交付；resume canary 未独立追加审计事件，每题 transport request ID/返回 model/system fingerprint 未持久化，历史 counters、延迟、完整审计、全 Uvicorn/第三方日志覆盖与 Worker 主循环 liveness 未完成 |
 | P2-07 验证与运维 | `partial` | 真实故障、竞争、迁移/导入和 Compose 8/8 已交付；性能/容量基线、告警与完整 Runbook 未完成 |
 
 表中的 `foundation_delivered` 只表示本轮最小可靠垂直切片已交付，不是 Roadmap 阶段状态；Phase 2 仍为 `in_progress`。
@@ -58,7 +59,7 @@
 - [ ] **部分通过**：pending/running 取消已做真实 Compose 端到端验证；有限重试、超时、dead-letter 和取消/完成竞态有自动化仓储/Runner 测试，但尚未把每一种失败组合都纳入完整生产式故障演练。
 - [x] SQLite 数据可校验迁移到 PostgreSQL，migration 与回滚有演练证据。真实 PostgreSQL 16 验证五表导入、提交前整体回滚、双源竞争、提交确认丢失和提交后验证失败；Compose 的 `head -> 0001 -> head` 对同一个 15 题 baseline Run 的协议 v1 核心字段及其 15 条 Response 做三时点 canonical hash。该 hash 不是全库快照；不提供 PG→SQLite 自动回迁。
 - [ ] **未通过（P2-05）**：Provider 速率、预算、完整背压、公平调度和全局并发治理尚不可配置，不得扩展为成本可控或过载安全声明。
-- [ ] **部分通过（P2-06）**：应用日志可关联请求、Run、Question、Worker、attempt/token；`/tasks/metrics` 提供数据库当前 gauges。仍无历史 counters、延迟、完整任务审计和全日志源覆盖，不能从聚合 gauge 追踪完整单题生命周期。
+- [ ] **部分通过（P2-06）**：应用日志可关联请求、Run、Question、Worker、attempt/token；`/tasks/metrics` 提供数据库当前 gauges，首次 run canary 的 discovery/request/model/fingerprint/usage/latency 证据会固化进 Run 快照。`resume` 的 canary 不会独立追加事件，每题 transport request ID、Provider 返回 model 与 system fingerprint 也未持久化；仍无历史 counters、延迟、完整任务审计和全日志源覆盖，不能追踪完整单题生命周期。
 - [x] Phase 1 API/协议兼容测试与离线 Smoke 继续通过；故障 Run 保持 `llmbenchlab-protocol-v1`、15 个唯一 Response、严格总分/完成率/已回答准确率语义，所有自动化模型调用均为 Mock。
 - [ ] **部分通过（P2-07）**：真实并发、API/Worker restart、Redis stop/start、两类取消、重复消息、租约过期和迁移/导入演练有可复核证据；性能/容量基线、完整告警与操作 Runbook 尚未完成。
 
@@ -66,20 +67,23 @@
 
 | 验证 | 结果 |
 | --- | --- |
-| 后端非集成 | `205 passed, 5 deselected` |
-| 真实 PostgreSQL/Redis 集成 | `5 passed, 205 deselected` |
-| 前端 | `4 files, 13 passed`；lint/typecheck/build 通过 |
-| 离线垂直 Smoke | `1 passed`；API 提交后由独立 WorkerService 使用 Mock 完成 |
-| Compose 故障验收 | 默认 build、隔离项目，`8/8 passed`；最终 Redis consumer group `pending=0, lag=0`，清理后无项目容器/卷/网络残留 |
-| 迁移/导入 | SQLite/真实 PG upgrade/check/往返；PG16 导入成功、pre-commit rollback、并发互斥、commit unknown、committed verification failure 均通过 |
+| 当前工作树后端普通套件 | `make test`：`310 passed, 5 skipped`；5 个 skip 为未注入 DSN 的 infrastructure marker |
+| 当前工作树真实 PostgreSQL/Redis 集成 | PostgreSQL 16/Redis 7：`5 passed, 0 skipped`；精确测试容器已清理 |
+| 当前工作树前端、Smoke 与静态门禁 | Vitest `13 passed`；Smoke `1 passed, 5 deselected`；lint/typecheck/Vite build 全部通过 |
+| 当前工作树 Compose 与迁移/导入 | 隔离 Compose `8/8 passed`，project `llmbenchlab-p2-7cf8ce9e4428` 清理后容器/卷/网络均为空；Alembic/lock/config 通过 |
 
 Compose 八场景覆盖拓扑/健康、protocol-v1 基线、执行中 API restart、实际租约 owner `SIGKILL` 后自然接管、Redis stop/start 与数据库对账、pending cancel、running cancel 加重复投递，以及 PostgreSQL `head -> 0001 -> head` 往返。详细命令、Run ID、哈希与清理记录见 [Phase 2 工作日志](../worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)。没有调用真实 Provider。
+
+2026-08-27 当前工作树已加入大数据有界消费者、快照加载期间心跳、Provider 安全边界、报告漂移和
+dead-letter 部分证据回归；完整套件、真实集成和 Compose 最终门禁均已通过。
+详细证据记录于 [正式评测工作日志](../worklogs/2026-08-27-complete-evaluation-workflow.md)。
 
 ## 可观测性边界
 
 - `/live` 不访问外部依赖；`/health` 只检查数据库；`/ready` 检查数据库、Alembic head 和 Redis。Redis 不可用时返回 `503/degraded`，但数据库可用时仍接受 Run，Worker 可继续数据库对账。
 - `/tasks/metrics` 只从数据库事实计算 pending/due/running/expired/cancel/retry/dead-letter/queue-error/attempt gauges。它不是 Prometheus 历史 counter、延迟分布、审计事件或容量报告。
 - JSON/allowlist/correlation 只覆盖 LLMBenchLab 应用 logger，不覆盖全部 Uvicorn access、SQLAlchemy、Redis client 或其他第三方日志；秘密仍不得进入 URL。
+- 首次正式 Run 的 model discovery 与 canary 证据会固化进 Run 快照；resume canary 目前只作为恢复前门禁，不追加独立审计事件。逐题 Response 也未保存 transport request ID、Provider 返回 model 或 system fingerprint，不能完成 Provider 侧逐请求追溯。
 - Worker probe 只证明数据库/head/Redis 依赖能力。Redis 故障时它以 degraded 成功退出以保留 DB reconciliation；它不证明 Worker 主循环仍在领取、心跳或推进任务。
 - readiness 的同步数据库检查通过 `asyncio.to_thread` 执行；HTTP 等待超时不会取消已进入线程的驱动调用，实际资源上界仍由驱动、连接和池 timeout 决定。
 
@@ -117,3 +121,10 @@ Compose 八场景覆盖拓扑/健康、protocol-v1 基线、执行中 API restar
 ## 状态
 
 `in_progress`。可靠任务执行基础和指定真实故障证据已经交付，但 P2-05 未完成，P2-06/P2-07 仅部分完成；未满足的复选项禁止把 Phase 2 标记为 `completed`，也禁止宣称生产 HA、无限横向扩展、完整可观测性或 Provider exactly-once。
+
+2026-08-27 的 [ADR-0006](../decisions/ADR-0006-local-real-provider-evaluation.md) 按用户优先级提前交付
+可信本地正式数据/真实 Provider 垂直切片：远程 Provider 强制 HTTPS、HTTP 仅 loopback，模型发现只接受
+identity 且限制为 2 MiB，Chat 成功体/错误体分别限制为 4 MiB/64 KiB；发现阶段拒绝反射当前 Key 的模型 ID，
+canary 拒绝返回不同模型，成功 content/raw usage/request ID/model/fingerprint/finish reason 在持久化前精确移除当前 Key。
+该切片并增加有界题目消费者、快照加载期间心跳与连接池回收回归；它不属于
+P2-05 的全局限流/预算/公平治理证据，也不改变本阶段 `in_progress` 结论。

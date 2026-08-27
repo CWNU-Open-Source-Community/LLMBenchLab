@@ -10,7 +10,8 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 
 | 层级 | 目的 | 当前入口/文件 | 外部网络 |
 | --- | --- | --- | --- |
-| 后端单元测试 | Evaluator、Adapter、Loader/Hash 的边界语义 | `backend/tests/test_evaluators.py`、`test_adapters.py`、`test_dataset_loader.py` | 禁止；Provider 用 MockTransport |
+| 后端单元测试 | Evaluator、Adapter、Loader/Hash、固定标准数据转换的边界语义 | `backend/tests/test_evaluators.py`、`test_adapters.py`、`test_dataset_loader.py`、`test_standard_datasets.py` | 禁止；Provider 用 MockTransport，下载用注入 fixture fetcher |
+| 正式流程组件测试 | CLI 秘密/确认/编排、模型发现/canary、完整报告和大题集有界 task | `test_evaluation_cli.py`、`test_provider_preflight.py`、`test_run_report.py`、`test_evaluation_runner_reliability.py` | 禁止；只用 fixture、MockTransport、Mock Adapter、临时数据库 |
 | API 与进程边界测试 | FastAPI Schema、状态码、秘密安全、Run 提交与 API/Worker 分离 | `backend/tests/test_api.py`、`test_run_dispatch.py`、`test_process_boundaries.py` | 禁止 |
 | 租约与 Worker 测试 | 条件领取、fencing、心跳、取消、幂等 Response、重试/恢复、队列 ACK | `test_run_leases.py`、`test_evaluation_runner_reliability.py`、`test_worker.py`、`test_task_queue.py` | 禁止；SQLite/假队列 |
 | 迁移与导入回归 | SQLite/真实 PostgreSQL migration 往返，以及 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
@@ -94,6 +95,12 @@ uv run pytest -m integration tests -ra
 cd backend
 uv run pytest tests/test_evaluators.py
 uv run pytest tests/test_dataset_loader.py
+uv run pytest \
+  tests/test_evaluation_cli.py \
+  tests/test_standard_datasets.py \
+  tests/test_provider_preflight.py \
+  tests/test_run_report.py \
+  tests/test_evaluation_runner_reliability.py
 uv run pytest tests/test_api.py tests/test_smoke.py
 uv run pytest -k 'multiple_choice or numeric'
 ```
@@ -149,7 +156,9 @@ docker compose config --quiet
 - OpenAI-compatible 的 Chat Completions URL、messages 与 `temperature/top_p/max_tokens/seed`。
 - usage 缺失时 Token 字段为 `null`。
 - 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试。
-- Key 环境变量缺失、空 Provider 回答、非法配置与错误脱敏。
+- 远端 HTTPS 强制、loopback HTTP 例外，以及在发送 Key 前拒绝远端明文 HTTP。
+- 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat 成功 4 MiB/错误 64 KiB 的流式上限。
+- Key 环境变量缺失、空 Provider 回答、非法配置与错误脱敏；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换。
 
 OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
 
@@ -164,15 +173,31 @@ OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把
 
 新增数据格式字段、Hash 规则或限制时，必须先更新协议/Schema 文档，再增加兼容与拒绝测试；不能无版本变化地改变既有 Hash。
 
-### 5.4 可靠执行单元与仓储测试
+### 5.4 标准数据、Provider preflight 与报告测试
+
+`test_standard_datasets.py` 不访问 Hugging Face 或 GitHub。测试在内存构造小型 Parquet/CSV/ZIP，用注入 fetcher 替代下载，并覆盖：
+
+- 固定源 SHA 不匹配拒绝、已验证缓存复用、确定性 ZIP 与 Dataset Hash；
+- MMLU-Pro `direct` 与 `official_cot`、同 category 5-shot、group/limit 和不同转换配置身份；
+- GPQA-Diamond 内层 CSV Hash、198 行约束、逐 Record ID 确定性选项重排、seed/domain 筛选，以及不携带作者/解释字段；
+- 输出 ZIP 再由普通 dataset-v1 Loader round-trip 校验。
+
+`test_provider_preflight.py` 只使用 `httpx.MockTransport`，覆盖 `/v1` 与完整 `/chat/completions` 的 `/models` 推导、远端 HTTP 拒绝、identity-only/2 MiB 发现响应、压缩体读取前拒绝、认证错误脱敏、发现模型 ID 反射当前 Key 时失败、唯一/多模型选择、可解析的最小 Chat canary、finish reason 脱敏，以及 canary 明确返回不同模型时失败。它不能证明任何真实 Provider 兼容，也不应改为读取开发者环境 Key。
+
+`test_evaluation_cli.py` 只做离线编排，覆盖无 `--api-key`、环境/隐藏输入生命周期、确认口令、含 HTTP retries 与剩余 Run attempts 的请求上界、profile 默认值、active Run 早拒绝、Run 创建/恢复/报告顺序、过期 incomplete lease 的 fenced reclaim 和 Key 值不持久化。它验证的是本地控制流，不证明真实 Provider 或操作系统级独占；人工 runbook 仍必须先停常规 API/Worker。
+
+`test_run_report.py` 使用临时数据库覆盖分页导出全部 Response、非重叠分组、三文件内容、目标拒绝覆盖、文件权限与秘密脱敏。回归还构造 failed Run 的陈旧汇总字段，验证 `summary.metrics` 从计划题与 Responses 派生、`metrics_provenance` 标出漂移，并与 groups/responses 保持同一口径。报告含题目和 raw response，因此测试 fixture 必须完全虚构。
+
+### 5.5 可靠执行单元与仓储测试
 
 可靠执行测试必须把 PostgreSQL 中的 Run/Response 当作唯一事实，Redis 消息、日志和内存状态都不能覆盖它。当前离线测试覆盖：
 
 - 两个领取者竞争同一 Run 时只有一个有效 owner/token；旧 token 的 heartbeat、逐题写入和 finalize 都被 fencing 拒绝。
 - 每题 `(run_id, question_id)` 唯一；重复投递、ACK 结果未知、Worker 接管和重跑不会双写 Response 或重复增加进度。
-- pending/running 取消、自然租约过期、完整证据直接聚合、有限退避与 attempt 耗尽 dead-letter。
+- pending/running 取消、自然租约过期、完整证据直接聚合、有限退避，以及 attempt 耗尽 dead-letter 前聚合已有部分 Responses。
 - API 只在数据库 commit 后 best-effort 发布通知；commit 失败不 publish，Redis 发布失败仍保留可由数据库 reconciliation 找回的 pending Run。
 - Worker 每次只执行一个 Run，按配置心跳；优雅停止在 grace 内等待，超时后由租约过期恢复，而不是伪造成功 ACK。
+- Runner 对大题集只创建至多 `concurrency` 个消费者 task；当前可靠性用例以 2,000 题验证并发 4 的固定 task 集，并验证取消/失租停止后续取题和 Adapter 只关闭一次。另有阻塞快照物化用例验证同步加载被移出事件循环，租约心跳可在加载期间继续运行。
 - API 进程不持有 Runner/task manager；只启动 API 时 Run 保持 `pending`，启动独立 Worker 后才执行。
 
 SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证、锁和数据库时钟必须由真实 PostgreSQL 用例补充，不能用 SQLite 通过代替。
@@ -189,7 +214,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - Redis 不可用时 `/ready` 返回脱敏的 `503 degraded`，但数据库正常时 `accepting_runs=true`、database reconciliation 可用；数据库或 schema 不可用时返回 `not_ready` 并停止接受新 Run。
 - `X-Request-ID` 校验、回传与错误关联；未知路径只记录 `<unmatched>`，不把用户路径或请求正文写入应用日志。
 - `/tasks/metrics` 只从数据库派生 pending/due/running/expired/cancel/retry/dead-letter/queue-notification-error/attempt gauges。
-- Model CRUD、分页、Provider 必需字段和名称冲突。
+- Model CRUD、分页、Provider 必需字段、远端 HTTP 拒绝/loopback 例外和名称冲突。
 - API 只返回 `api_key_env` 名称，不返回环境变量值。
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
 - Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。
@@ -276,10 +301,16 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 3. 测试数据库和日志级别在应用导入前通过 fixture 环境变量设置，不读取开发 `.env`。
 4. CI 不配置任何 Provider Key；即使误走 OpenAI-compatible 路径，缺少 `api_key_env` 对应值也会在 HTTP 请求前失败。
 5. 测试数据中的 Key 与域名必须是明显无效占位符，不从开发者环境复制。
+6. 标准数据测试必须注入内存 fetcher；CI 不运行在线 `llmbenchlab-evaluate prepare`，也不依赖本机已有 `artifacts/` 缓存。
+7. 报告和正式流程组件测试必须使用临时目录/临时数据库，不能读取或覆盖操作者已有正式 Run。
 
 当前测试套件没有操作系统级的“禁止所有出站网络”沙箱，因此最后一层仍是代码 Review：任何新增测试若构造真实 `httpx` client、读取开发 Key 或依赖在线服务，都必须被拒绝。公开 CI 加固可在后续增加 egress-disabled runner 或网络拦截 fixture；不能因为 CI runner 通常没有 Key 就认定任意网络访问安全。
 
 真实 OpenAI-compatible Provider 只允许作为用户主动执行、明确知晓费用和数据政策的可选手工验证；它不是 PR、CI、Smoke 或 Phase 2 可靠执行基础的完成条件。
+
+真实模型验收应在隔离的本地数据库上先运行 `--limit`，人工核对模型发现、付费 canary、请求上界、逐题错误、Provider 账单和报告三文件，再决定是否 `--full`。这项手工操作不得写入自动化测试结果或 CI 通过数；如果本次没有真实 API URL/Key，就应明确记录“未运行”，不能用 MockTransport 结果替代“真实 Provider 已验证”。
+
+当前自动化会验证初次 canary 快照和上述安全拒绝路径，但不能把 P2-06 写成完整：`resume` 的 canary 尚未追加为独立审计事件，逐题 Provider request ID、返回模型名和 system fingerprint 也未持久化。未来补齐时必须增加跨 resume/逐题的持久化与报告回归，而不是只断言 Adapter 调用期对象。
 
 ## 9. 前端测试要求
 
@@ -305,11 +336,11 @@ GitHub Actions 对 `main` push 和 Pull Request 触发四类 job：
 | `full-stack-reliability` | `python3 scripts/phase2_acceptance.py` 的隔离 Compose 八场景 | 唯一项目/卷、随机 loopback 端口、Mock-only；总是上传已脱敏 evidence，脚本总是精确清理 |
 | `frontend` | ESLint、13 个 Vitest、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
 
-CI 不配置 Provider Key、不调用真实模型。PostgreSQL/Redis 是测试依赖，不是 Provider 网络。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
+CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
 
-本次 Phase 2 工作日志的阶段性证据与最终门禁预期如下；在最终提交前必须再次执行并核对，若数字或结果变化，应更新本表而不是沿用旧记录：
+下表是 2026-08-25 Phase 2 可靠性切片的历史基线，不是本次标准数据/真实评测 CLI 提交的通过声明。本次实际数量必须在当前工作日志和精确 commit 的 CI 中重新记录，不能沿用这些数字：
 
-| 验证 | 当前记录/最终预期 |
+| 验证 | 2026-08-25 历史基线 |
 | --- | --- |
 | 后端本地非基础设施 | `205 passed`，命令 `uv run pytest -m "not integration"` |
 | 真实 PostgreSQL/Redis infrastructure | `5 passed, 0 skipped` |
@@ -318,6 +349,17 @@ CI 不配置 Provider Key、不调用真实模型。PostgreSQL/Redis 是测试�
 | Compose 可靠性 | `8/8 passed`，最终 Redis consumer group `pending=0`、`lag=0`，清理后无项目容器/卷/网络 |
 
 这些数字证明“可靠任务执行基础”垂直切片，不代表 Phase 2 全部完成；限流、预算、完整背压、公平调度、完整历史可观测性/审计和性能基线仍未验收。
+
+2026-08-27 正式评测切片的当前工作树本地证据如下；精确 SHA 的远程 CI 仍须在 commit/push 后独立验证：
+
+| 验证 | 当前工作树结果 |
+| --- | --- |
+| 后端全量 | `make test`：`310 passed, 5 skipped`；5 个 skip 为未注入 DSN 的 infrastructure marker |
+| 真实基础设施 | 临时 PostgreSQL 16/Redis 7：`5 passed, 0 skipped`，精确容器已清理 |
+| 前端 | ESLint/typecheck、4 files / `13 passed`、Vite production build 均通过；保留既有 chunk warning |
+| 离线 Smoke | `1 passed, 5 deselected` |
+| Compose 可靠性 | `8/8 passed`；evidence `llmbenchlab-p2-7cf8ce9e4428/evidence.json`，清理后项目容器/卷/网络为空 |
+| 其他静态门禁 | Ruff/format、Alembic check、`uv lock --check`、Compose config、`git diff --check` 与候选文件 secret scan 通过 |
 
 ## 11. Mock 手工验收
 
