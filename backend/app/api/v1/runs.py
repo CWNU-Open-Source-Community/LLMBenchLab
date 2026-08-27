@@ -215,15 +215,18 @@ async def create_run(
     # supported database so a pending Run cannot race its Provider guard.
     model = lock_model_for_update(session, payload.model_id)
     if model is None:
+        session.rollback()
         raise HTTPException(
             status_code=404, detail={"code": "model_not_found", "message": "Model was not found"}
         )
     if not model.enabled:
+        session.rollback()
         raise HTTPException(
             status_code=409, detail={"code": "model_disabled", "message": "Model is disabled"}
         )
     benchmark = session.get(Benchmark, payload.benchmark_id)
     if benchmark is None:
+        session.rollback()
         raise HTTPException(
             status_code=404,
             detail={"code": "benchmark_not_found", "message": "Benchmark was not found"},
@@ -246,6 +249,11 @@ async def create_run(
             base_url=model.base_url,
         )
     except GovernanceBacklogFull as exc:
+        # This async endpoint uses a synchronous SQLAlchemy session. Release
+        # the Model/global-scope row locks before handing control back to the
+        # event loop, otherwise a concurrent rejected request can block the
+        # loop while FastAPI is still finalizing this request dependency.
+        session.rollback()
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={

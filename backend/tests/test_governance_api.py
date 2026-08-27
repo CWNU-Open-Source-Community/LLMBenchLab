@@ -39,7 +39,7 @@ def _full_policy(**overrides: object) -> dict[str, object]:
     return values
 
 
-def test_policy_apply_is_idempotent_and_frozen_into_run_admission(client) -> None:
+def test_policy_apply_is_idempotent_and_frozen_into_run_admission(client, monkeypatch) -> None:
     missing = client.get("/api/v1/governance/policy")
     assert missing.status_code == 404
     assert missing.headers["cache-control"] == "no-store"
@@ -76,11 +76,22 @@ def test_policy_apply_is_idempotent_and_frozen_into_run_admission(client) -> Non
         json={"model_id": model["id"], "benchmark_id": benchmark["id"]},
     )
     assert first.status_code == 202
+
+    rollback_calls = 0
+    original_rollback = Session.rollback
+
+    def tracked_rollback(session: Session) -> None:
+        nonlocal rollback_calls
+        rollback_calls += 1
+        original_rollback(session)
+
+    monkeypatch.setattr(Session, "rollback", tracked_rollback)
     blocked = client.post(
         "/api/v1/runs",
         json={"model_id": model["id"], "benchmark_id": benchmark["id"]},
     )
     assert blocked.status_code == 429
+    assert rollback_calls >= 1
     assert blocked.json()["detail"] == {
         "code": "run_backlog_full",
         "message": "The managed Run backlog is at its configured limit.",
