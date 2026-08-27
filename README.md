@@ -6,7 +6,7 @@ GitHub：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open
 
 LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测工作台。它把模型注册、版本化 Benchmark、后台评测、逐题证据、汇总指标和排行榜放进一条可审计的本地流程，并以“默认离线、严格评分、结果可复现”为首要约束。
 
-当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理工作树：PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger 与 typed audit 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。
+当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理候选：PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger 与 typed audit 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。
 
 ## 当前状态
 
@@ -14,10 +14,10 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - 评测协议：`llmbenchlab-protocol-v1`
 - Phase 0（治理、需求、架构和协议）已完成。
 - Phase 1 MVP 已具备完整垂直链路：注册模型、载入/导入 Benchmark、创建 Run、逐题持久化、结果聚合和前端展示。
-- Phase 2 工作树已通过真实 PostgreSQL/Redis 和进程故障验证：除租约、心跳、fencing、幂等 Response 与数据库恢复外，Web/API managed Run 还具有 global/provider/model/run 四层数据库 admission、fixed-minute RPM/TPM、lifetime request/Token/cost budget、有限 backlog、公平 slice、逐 attempt reservation/settlement、typed audit 和历史延迟。
+- Phase 2 候选已通过真实 PostgreSQL/Redis 和进程故障验证：除租约、心跳、fencing、幂等 Response 与数据库恢复外，Web/API managed Run 还具有 global/provider/model/run 四层数据库 admission、fixed-minute RPM/TPM、lifetime request/Token/cost budget、有限 backlog、公平 slice、逐 attempt reservation/settlement、typed audit 和历史延迟。
 - 可信本地 CLI 已提供 MMLU-Pro 与 GPQA-Diamond 的固定来源转换、真实 OpenAI-compatible 预检、可恢复执行和完整报告导出；这是 Phase 3 的客观题垂直切片，不代表 Phase 2 或 Phase 3 已完成。
 - 自动化、CI、Compose 故障验收和容量演练的模型执行都只使用 Mock；根据层级使用临时 SQLite 或隔离 PostgreSQL 16/Redis 7，不访问真实模型服务，也不产生模型费用。
-- Phase 2 仍为 `in_progress`：数据库治理、审计/history 与 PostgreSQL 竞争回归已写入工作树，增强容量 harness 也已改为有限 policy、精确 backlog `202/429`、小于 15 题的 question quantum 和高/低流量 Mock Model 公平顺序；但这些增强场景尚未对当前候选完整重跑真实 Compose evidence。正式 SLO、Worker 主循环 progress/liveness、exporter/告警和恢复演练也仍需收尾；本轮阶段 commit 必须在精确 SHA 上通过远程必需检查。Phase 3 只交付上述客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
+- Phase 2 仍为 `in_progress`：治理候选 `665244e095905083b606b8e98e946ed1a02dc0fc` 已在 clean worktree 完成增强 capacity、9/9 Compose acceptance（含三条确定性数据库 crash seam）并通过 [GitHub Actions run 33099260233](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 的 4/4 必需 job。正式 SLO、Worker 主循环 progress/liveness、exporter/告警、保留期归档、backup/restore 和剩余恢复矩阵仍需收尾。Phase 3 只交付上述客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
 
 最新、可复核的完成状态与测试证据以 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) 和 [`docs/worklogs/`](docs/worklogs/) 为准；Roadmap 中的计划能力不等于已交付能力。
 
@@ -315,7 +315,7 @@ cd frontend
 npm run build
 ```
 
-测试策略的关键约束：自动化和 CI 不配置 Provider Key，不调用真实或付费 API；OpenAI-compatible 协议测试使用进程内 `httpx.MockTransport`；Smoke 在隔离 SQLite 中证明 API 不执行任务、再由独立 WorkerService 完成 Mock Run；真实 PostgreSQL/Redis Compose 验收覆盖并发领取、治理/ledger 对账、API/Worker/Redis 故障、取消、租约过期与 0004 安全回滚。当前容量脚本另比较 1/2 Worker，并要求有限 policy 读回、精确 backlog `202/429`、cooperative yield 与高/低流量 Mock Model 公平顺序；这些增强场景的完整真实 evidence 尚待当前候选重跑。前端 API 使用 stub/mock。完整测试矩阵与实际 evidence 见 [`docs/TESTING.md`](docs/TESTING.md)。
+测试策略的关键约束：自动化和 CI 不配置 Provider Key，不调用真实或付费 API；OpenAI-compatible 协议测试使用进程内 `httpx.MockTransport`；Smoke 在隔离 SQLite 中证明 API 不执行任务、再由独立 WorkerService 完成 Mock Run；真实 PostgreSQL/Redis Compose 验收覆盖并发领取、治理/ledger 对账、API/Worker/Redis 故障、取消、租约过期、三条确定性数据库 crash seam 与 0004 安全回滚。候选 `665244e…` 的增强容量证据已验证有限 policy 读回、精确 4×`202`+2×`429`、cooperative yield 与高/低流量 Mock Model 公平顺序；1/2 Worker 与 burst 吞吐分别为 7.306981/13.396740/8.585309 题/秒。前端 API 使用 stub/mock。完整测试矩阵与 evidence hash 见 [`docs/TESTING.md`](docs/TESTING.md) 和 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
 
 ## Docker Compose
 
@@ -377,7 +377,7 @@ uv run python -m app.db.import_sqlite \
 | --- | --- | --- |
 | Phase 0 | 项目治理、需求、架构、协议 | 已完成 |
 | Phase 1 | FastAPI + React + SQLite 的 MVP 垂直链路 | 已完成 |
-| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：治理/审计/Mock 容量切片已实现；真实临界竞争、正式 SLO、Worker progress/liveness、告警/归档/恢复与精确 SHA 门禁仍待收尾 |
+| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：治理/审计/Mock 容量、9/9 Compose acceptance 与精确 SHA CI 已通过；正式 SLO、Worker progress/liveness、告警/归档、backup/restore 和剩余恢复矩阵仍待收尾 |
 | Phase 3 | 合规标准 Benchmark 与隔离代码评测 | MMLU-Pro/GPQA 客观数据切片已交付；IFEval、沙箱及其余验收未完成 |
 | Phase 4 | LLM Judge、人工校准与 Arena | 计划中 |
 | Phase 5 | Agent、工具调用与 Live Benchmark | 计划中 |
@@ -414,7 +414,7 @@ uv run python -m app.db.import_sqlite \
 - Dataset Hash 用于一致性检查，不是发布者签名，也不能证明数据没有污染。
 - `/tasks/metrics`、retained `/tasks/history` 与单 Run typed audit 已实现，但没有 Prometheus exporter、告警发送器、trace、WORM/数据库管理员防篡改或自动保留期清理；`resume` 的新 canary 仍不会追加独立事件。
 - 逐题 Provider request ID、returned model、system fingerprint、finish reason 和 HTTP attempt count 已按字符/长度/秘密规则 fail closed 持久化并可导出；它们是关联证据，不是供应商真实性或账单证明。
-- 已保留指定硬件、dirty worktree 的 PostgreSQL 16/Redis 7/双 Worker 历史 Mock 基线，但它早于当前有限 policy/精确 `202/429`/quantum/公平场景强化，不是当前候选或精确发布 SHA 的证据，也不是真实 Provider、生产 SLO/SLA 或灾难恢复证明；仍无 SBOM 和生产部署支持。
+- 已保留指定硬件、dirty worktree 的增强前历史 Mock 基线，且另有 clean 候选 `665244e…` 的增强 PostgreSQL 16/Redis 7/双 Worker evidence；前者不代表当前候选，后者也只证明该硬件与 Mock 配置下的本地 admission、调度和恢复，不是真实 Provider、生产 SLO/SLA 或灾难恢复证明。仍无 SBOM 和生产部署支持。
 
 ## 贡献
 

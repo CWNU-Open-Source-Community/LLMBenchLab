@@ -2,7 +2,7 @@
 
 ## 1. 结论与边界
 
-Phase 2 保留了一条可重复、机器可读、完全 Mock-only 的真实基础设施历史容量基线。它使用隔离的 PostgreSQL 16、Redis 7 和两个独立 Worker，测量 Worker 扩缩、受控积压、租约过期恢复、Redis stop/start、重复通知及治理 ledger/audit 对账。此后 capacity harness 已增强为显式有限 policy、精确 `202/429` 背压、cooperative quantum 和跨 Model 公平性场景；增强代码已有离线契约测试，但当前候选工作树尚未产生一轮新的完整真实 Compose evidence。
+Phase 2 现有一条绑定 clean commit `665244e095905083b606b8e98e946ed1a02dc0fc`、机器可读且完全 Mock-only 的增强真实基础设施容量基线。它使用隔离的 PostgreSQL 16、Redis 7 和两个独立 Worker，验证显式有限 policy、Worker 扩缩、精确 `202/429` 背压、cooperative quantum、跨 Model 公平性、租约过期恢复、Redis stop/start、重复通知及治理 ledger/audit 对账。增强前的 dirty-worktree 基线仍在第 3 节作为历史记录保留，不能与当前候选证据混用。
 
 这不是生产 SLO/SLA，也不是以下能力的证明：
 
@@ -68,7 +68,7 @@ worker_poll_seconds=0.15
 | acceptance script SHA-256 | `0d201b58e88200e23a8965fc471c31e36c7489560e719cd037fd064549521b11` |
 | Compose SHA-256 | `53d77e21720eecdcb255399def4b38840a0615a302cb501c70c09d6692c80b6d` |
 
-因为该次运行明确记录了 `dirty=true`，它只是当时工作树的历史基线，不是 HEAD commit 单独可复现的精确 SHA 绿色证明，也不是当前候选工作树或增强 capacity harness 的通过证据。表中的 script SHA 对应增强前脚本；阶段提交后仍必须对精确 commit 重跑远程门禁。新的容量运行应新增一行证据，而不是覆盖这里的事实。
+因为该次运行明确记录了 `dirty=true`，它只是当时工作树的历史基线，不是 HEAD commit 单独可复现的精确 SHA 绿色证明，也不是当前候选或增强 capacity harness 的通过证据。表中的 script SHA 对应增强前脚本；当前 clean 候选的独立证据见第 4 节。新的容量运行仍应新增记录，而不是覆盖这里的事实。
 
 ### 3.2 环境与数据
 
@@ -116,11 +116,41 @@ Mock Response 的 `latency_ms=1` 是确定性测试证据，不等于 80 ms 人�
 - 最终 active Run/reservation、scope/minute reserved 数、overdrawn scope、重复 operation key、重复 audit event key、题错误、Redis PEL/lag 全为 0。
 - 隔离 Compose cleanup 的容器、volume、network 均为 0；evidence 对示例数据库密码、Authorization/Bearer 和 Key marker 的扫描无命中。
 
-## 4. 当前增强 harness 的证据状态
+## 4. `665244e` 增强候选基线
 
-当前代码已把容量场景收紧为可失败的验收合同：先通过 policy API apply/read-back 全部 20 个非 `null` 的有限字段；每次 Run 显式冻结 input Token reservation 与 lifetime request/Token/USD budgets；默认 backlog burst 必须精确返回 4 个 `202` 与 2 个 `429`；测量 Run 必须在 `question_quantum=5` 下产生多次 dispatch 和 cooperative yield；跨 Model 场景必须以 typed audit 顺序证明低流量 Run 没有等到高流量 backlog 全部排空后才获服务。既有 lease、Redis、duplicate delivery、ledger/audit reconciliation 和 cleanup 检查继续保留。
+### 4.1 可追溯性与门禁
 
-这些增强行为的脚本和离线契约测试已经写入当前工作树，但尚未运行并保存新的完整真实 PostgreSQL/Redis/双 Worker Compose evidence。因此本页不填写新的候选 SHA、artifact hash、吞吐、延迟或验收结果，也不把第 3 节的旧 dirty evidence 当作当前结果。只有 `make phase2-capacity` 在目标候选上完整成功、evidence 通过秘密扫描且资源清理完成后，才可追加新的可追溯记录。
+| 项目 | 记录值 |
+| --- | --- |
+| Git commit / 工作树 | `665244e095905083b606b8e98e946ed1a02dc0fc`；`dirty=false` |
+| capacity 时间 | 2026-08-27 17:36:38–17:38:16 UTC（Asia/Shanghai 2026-08-28 01:36:38–01:38:16） |
+| capacity evidence | `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-51cfadee04f5/evidence.json` |
+| capacity evidence SHA-256 | `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588` |
+| acceptance 时间 | 2026-08-27 17:38:39–17:40:51 UTC（Asia/Shanghai 2026-08-28 01:38:39–01:40:51） |
+| acceptance evidence | `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-afe52c2d54cb/evidence.json` |
+| acceptance evidence SHA-256 | `ab311665ff0cb834efdd648cd634f943a4cbc5b8b00728ac8597a288a877ddec` |
+| 精确 SHA CI | [GitHub Actions run 33099260233](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233)：4/4 必需 job 成功 |
+
+两份 evidence 都记录 `offline_only=true`、Mock-only、clean commit，秘密自检与 cleanup 为 `passed`；最终项目容器、volume、network 均为空。CI 的 backend、backend-integration、full-stack reliability 和 frontend 四个 job 均成功。artifact 位于 Git 忽略目录，路径用于本机复核，SHA-256 用于确认内容身份。
+
+### 4.2 容量、背压与公平性
+
+| 场景 | Worker | Run / 题 | 墙钟秒 | Run/s | 题/s | admission |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 单 Worker 参考 | 1 | 4 / 60 | 8.211325 | 0.487132 | 7.306981 | 4×`202` |
+| 双 Worker 基线 | 2 | 4 / 60 | 4.478702 | 0.893116 | 13.396740 | 4×`202` |
+| 停 Worker 后 bounded burst 并排空 | 2 | 4 / 60 | 6.988683 | 0.572354 | 8.585309 | 4×`202` + 2×`429` |
+
+policy API apply/read-back 的 20 个字段全部有限；默认 `backlog_limit=4`、`question_quantum=5`。三个测量场景的每个 Run 都有 3 次 dispatch 和 2 次 cooperative yield。burst 的两个拒绝均为稳定 `run_backlog_full` 且报告 `limit=4`，四个已接纳 Run 随后全部排空。
+
+跨 Model 场景以一个 Worker、三个高流量 Run 和最后一个低流量 Run 填满 4 个 backlog slot。typed audit 顺序记录低流量 Run 的 claim 和 slice；该时点三个高流量 Run 都尚未终态，因此 `low_claim_before_high_backlog_drained=true`。这只证明本地数据库调度在该 Mock 场景中的顺序，不是 Provider 侧公平性或容量承诺。
+
+### 4.3 故障、对账与 acceptance
+
+- capacity 的 lease-owner `SIGKILL`/自然过期接管、Redis stop/start 加数据库 reconciliation、终态重复投递 no-op 均通过。
+- 最终对账为 18 个 completed Run、270 条唯一 Response、271 条 ledger（270 `settled_actual`、1 `settled_conservative`）和 1,229 条 typed audit event；active Run/reservation、scope/minute reserved、overdrawn、重复 operation/audit key、题错误、Redis PEL/lag 均为 0。
+- acceptance 的 9/9 场景全部通过，其中确定性数据库 seam 覆盖 reservation→send-start、send-started→settlement、Provider response→本地 Response commit；另覆盖拓扑/健康、protocol-v1、API restart、实际 lease owner `SIGKILL`、Redis stop/start、pending/running cancel、duplicate delivery 和 populated 0004 downgrade refusal/空库往返。
+- 两个 harness 的 cleanup 均确认容器、volume 和 network 零残留；这些结果仍不证明 Provider exactly-once、生产 HA、恢复时间目标或真实费用准确性。
 
 ## 5. 如何使用基线做容量决策
 

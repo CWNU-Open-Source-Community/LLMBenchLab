@@ -1,6 +1,6 @@
 # 2026-08-27 — Phase 2 并发治理、审计与性能基线工作日志
 
-> 本日志在 2026-08-28 继续更新。只记录实际发生的事实；最终候选尚未运行的验证不得写成通过。
+> 本日志在 2026-08-28 收尾。只记录实际发生的事实；历史失败、中间证据与最终精确候选结果分别标识。
 
 ## 元信息
 
@@ -10,13 +10,13 @@
 - 关联阶段：[Phase 2 — 可靠性与任务执行](../phases/PHASE-2-RELIABILITY.md)
 - 关联计划：[Phase 2 并发治理、审计与性能基线执行计划](../plans/2026-08-27-phase-2-governance-audit-performance.md)
 - 关联决定：[ADR-0009](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](../decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](../decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)
-- 当前状态：`in_progress`
+- 当前状态：`completed`（本治理/审计候选切片；Phase 2 整体仍为 `in_progress`）
 
 ## 目标与背景
 
 Phase 2 已有 PostgreSQL/Redis、独立 Worker、租约/fencing、幂等 Response、重试/取消/dead-letter 和真实故障基础。本任务收敛 P2-05/P2-06/P2-07 的治理、审计与容量切片：数据库权威的四层额度、逐 Provider attempt ledger、确定背压、有限公平、typed history/audit、非秘密 Provider/credential evidence，以及真实 PostgreSQL/Redis 的可复现容量与故障工具。它不扩展 Benchmark、Judge、Arena、Agent 或公共部署，也不承诺 Provider exactly-once、生产 HA 或 SLA。
 
-用户先要求提交已有功能 PR。PR [#1](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/1) 的前置精确 SHA `ab15862eab4870dda01fb079b44b509a7d737627` 对应 run `33078921254`，四个必需 job 全部成功。随后 ADR 设计提交 `8df122b` 的 CI 因 Runs-page timer 竞态 3/4；修复 SHA `1cd19c51ed309316047a18ed3b2a308647af495d` 对应 run `33081854406` 为 4/4。上述远程绿色只覆盖各自 SHA，不覆盖当前未提交治理实现。
+用户先要求提交已有功能 PR。PR [#1](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/1) 的前置精确 SHA `ab15862eab4870dda01fb079b44b509a7d737627` 对应 run `33078921254`，四个必需 job 全部成功。随后 ADR 设计提交 `8df122b` 的 CI 因 Runs-page timer 竞态 3/4；修复 SHA `1cd19c51ed309316047a18ed3b2a308647af495d` 对应 run `33081854406` 为 4/4。治理实现及两次 admission 锁修复最终收敛到 SHA `665244e095905083b606b8e98e946ed1a02dc0fc`；该 SHA 的 run `33099260233` 四个必需 job 全部成功。
 
 ## 初始仓库状态与保护边界
 
@@ -35,7 +35,7 @@ Phase 2 已有 PostgreSQL/Redis、独立 Worker、租约/fencing、幂等 Respon
 - append-only 应用 audit、Run audit、task history/latency、Provider request/model/fingerprint/finish metadata、credential 固定非秘密事件和 UI 治理状态。
 - 增强 capacity/acceptance 与真实 PostgreSQL 竞争测试；最终证据必须来自冻结候选 SHA。
 
-Phase 2 仍不满足的正式 closure 包括：SLO/容量模型、Exporter/告警、审计 retention archive、备份恢复认证、Worker progress/liveness，以及三条 Provider/本地 commit 确定性 seam 的完整 Compose acceptance。即使当前治理切片最终门禁为绿色，Phase 2 也保持 `in_progress`。
+Phase 2 仍不满足的正式 closure 包括：SLO/容量模型、Exporter/告警、审计 retention archive、备份恢复认证、Worker progress/liveness 与剩余生产式故障矩阵。三条 Provider/本地 commit 确定性 seam 已通过完整 Compose acceptance；它们仍不是 Provider exactly-once 或亚毫秒 `SIGKILL` 证明。治理切片门禁绿色后，Phase 2 继续保持 `in_progress`。
 
 ## 实际修改
 
@@ -67,9 +67,9 @@ Phase 2 仍不满足的正式 closure 包括：SLO/容量模型、Exporter/告�
 ### 容量、真实 PostgreSQL 测试与文档
 
 - `phase2_capacity.py` 已增强为显式有限 policy，输入/output/Token/cost reservation 有界，question quantum 小于 15 题 Demo Run；加入并发 backlog 精确 `202/429`、跨高/低流量 Model 公平、双 Worker、Worker/Redis 故障及 ledger/audit 对账证据。
-- 真实 PostgreSQL integration 测试已增加四层 concurrency、RPM/TPM、global/run lifetime budget、并发 backlog、settlement/reconcile race 和 audit replay；最新本地真实 PostgreSQL/Redis 运行已 `29/29 passed`，但尚未绑定冻结候选 SHA。
+- 真实 PostgreSQL integration 测试已增加四层 concurrency、RPM/TPM、global/run lifetime budget、并发 backlog、settlement/reconcile race 和 audit replay；本地真实 PostgreSQL/Redis 运行 `29/29 passed`，同一实现 SHA 的远程 integration job 亦成功。
 - acceptance harness 已加入 `reserved`、`send_started`、`response_committed` 三条 deterministic database seam injection，分别断言 pre-send release/ordinal、conservative settlement 和本地 Response/ledger/audit exactly-once。场景明确不声称 `SIGKILL` 精确命中亚毫秒缝隙。
-- README、API、Architecture、Security、Testing、Deployment、Operations、Performance、Roadmap/Phase/Status/NEXT_TASK/Changelog/计划已按实现边界同步；最终 SHA、evidence hash 和 CI 仍待主线补充。
+- README、API、Architecture、Security、Testing、Deployment、Operations、Performance、Roadmap/Phase/Status/NEXT_TASK/Changelog/计划已按实现边界、精确 SHA、evidence hash 与 CI 结果同步。
 
 ## 决定、偏差与发现
 
@@ -82,7 +82,9 @@ Phase 2 仍不满足的正式 closure 包括：SLO/容量模型、Exporter/告�
 | 2026-08-28 | ADR-0010 | CLI 不伪造 synthetic ledger；metadata unsafe→`null`；Run latency 来自 DB Run timestamps；credential audit 不保存 origin。 |
 | 2026-08-28 | ADR-0011 | confirmed pre-send release 不消耗 Provider retry；用新 ledger generation 保留当前未发送 ordinal。 |
 | 2026-08-28 | review fix | materialized counter 低报可绕过限额；关键路径和 importer 改为 ledger 重算 fail closed。 |
-| 2026-08-28 | scope boundary | 三条 crash seam、正式 SLO/Exporter/告警/retention archive/backup restore/Worker progress 留在 Phase 2 closure，不能据当前切片宣称 Phase 2 完成。 |
+| 2026-08-28 | capacity failure | 首轮精确 SHA capacity 在并发拒绝路径超时，定位为 HTTPException 前事务未 rollback、admission 锁占用到 session 结束；SHA `ecf93f7…` 显式 rollback 后修复。 |
+| 2026-08-28 | capacity failure | 第二轮在 PostgreSQL 出现 Run 创建 `Model→global` 与 attempt `global→…→Model` 反序死锁；SHA `665244e…` 先锁 global governance scope，再锁 Model，恢复 canonical 顺序。 |
+| 2026-08-28 | scope boundary | 三条 crash seam 已通过完整 acceptance；正式 SLO/Exporter/告警/retention archive/backup restore/Worker progress 留在 Phase 2 closure，不能据当前切片宣称 Phase 2 完成。 |
 
 ## 实际命令与结果
 
@@ -98,7 +100,7 @@ Phase 2 仍不满足的正式 closure 包括：SLO/容量模型、Exporter/告�
 | `npm test`、`npm run lint`、`npm run typecheck`、`npm run build`（timer 修复后） | 9 files / 36 tests 与静态/build 通过；仅既有大 chunk warning |
 | 修复 SHA `1cd19c51ed309316047a18ed3b2a308647af495d`，run `33081854406` | 4/4 必需 job 通过；`8df122b` 的失败记录保留 |
 | `make lint`（最新候选树） | Ruff/format、ESLint、TypeScript 通过 |
-| `make test`（最新本地共享树） | 后端 `603 passed, 29 skipped`；前端 `38 passed` |
+| `make test`（文档收尾前重跑） | 后端 `604 passed, 29 skipped`；前端 `38 passed` |
 | 真实 PostgreSQL/Redis integration（最新本地共享树） | `29/29 passed` |
 | `backend/tests/test_phase2_acceptance_script.py` 等 seam 定向门禁 | `19 passed`；Ruff、格式检查、`py_compile`、acceptance self-check 通过 |
 | `make smoke`（最新候选树） | `1 passed, 7 deselected`，仅 Mock；第一次因 sandbox uv cache 权限失败，获授权后重跑通过 |
@@ -108,20 +110,21 @@ Phase 2 仍不满足的正式 closure 包括：SLO/容量模型、Exporter/告�
 | `docker compose config --quiet`（最新候选树） | exit 0 |
 | `python3 scripts/phase2_capacity.py --self-check-only`（最新候选树） | self-check 通过 |
 | `npm run build`（最新候选树） | production build 通过；仅既有大 chunk warning |
-| 旧 capacity artifact | 曾完成 1/2 Worker、故障与清理；脚本后来增强，旧 evidence 不作为候选证明 |
-| 旧 acceptance artifact | 曾为 8/8 且清理完成；脚本/实现后来变化，旧 evidence 不作为候选证明 |
+| `make phase2-capacity`（精确 `665244e…`） | passed；1W `7.306981`、2W `13.396740`、burst `8.585309` q/s；4×202+2×429、yield/fairness/fault/reconciliation 通过；evidence SHA-256 `40deadeb…0588`；cleanup 为空 |
+| `make phase2-acceptance`（精确 `665244e…`） | 9/9 passed；含三条 deterministic DB seam、SIGKILL/Redis/cancel/migration；evidence SHA-256 `ab311665…ddec`；cleanup 为空 |
+| 精确 SHA `665244e…` Actions run `33099260233` | Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build、Real Compose acceptance 4/4 成功 |
+| staged diff / secret review | 两路独立审查 Blocker 0 / High 0；命中均为测试 canary；无 `.env`、Key、私钥、数据库、日志、artifact 或构建产物进入提交 |
 
-## 尚未运行 / 不得预写为成功
+## 精确候选证据
 
-- 增强 `make phase2-capacity` 的真实双 Worker finite-policy/backlog/fairness/fault evidence。
-- 最终 `make phase2-acceptance`；三条 deterministic DB seam 的代码/单测已完成，但完整 Compose 场景尚未运行。
-- 最终 diff/高置信 secret scan、staged diff、独立 implementation commit、push。
-- 实现候选精确 SHA 的 GitHub Actions 4/4；当前没有可记录的实现 SHA、run URL 或结论。
+- 实现提交：`f5876919936c246029f1cc669831fddeabca6a81`；rejected admission rollback 修复：`ecf93f73eb6bc31ae41339ac42f92b6075e34443`；canonical lock-order 修复：`665244e095905083b606b8e98e946ed1a02dc0fc`。均普通 push 到 `origin/codex/complete-evaluation-workflow`，未 force push，PR #1 保持 open。
+- Capacity：`.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-51cfadee04f5/evidence.json`，SHA-256 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`；记录 `dirty=false`、18 Runs/270 Responses/271 reservations/1229 audit，active/reserved/overdrawn 与 queue PEL/lag 均归零。
+- Acceptance：`.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-afe52c2d54cb/evidence.json`，SHA-256 `ab311665ff0cb834efdd648cd634f943a4cbc5b8b00728ac8597a288a877ddec`；9/9 passed，三条 deterministic DB seam、真实 lease-owner SIGKILL、Redis stop/start、取消/重复投递与 populated downgrade refusal/空库往返均通过。
+- 两份 evidence 均为 Mock-only/offline、`dirty=false`，秘密扫描无命中，Compose cleanup 的 remaining containers/volumes/networks 均为空。它们不是 Provider 性能、费用、生产 SLO/SLA 或 exactly-once 证明。
 
 ## 已知问题与下一步
 
-1. 冻结共享树后先执行新增/定向测试，再跑全量 lint/test/smoke、SQLite/PostgreSQL migration、真实 PG integration、增强 capacity 和 acceptance。
-2. 检查 acceptance 是否实际覆盖三条崩溃缝隙：reservation 后/send-start 前；send-started 后/settlement 前；Provider response 后/Response 与 settlement 本地 commit 前。缺一则补场景，不能以一般 Worker `SIGKILL` 替代。
-3. 复核 diff、secret、12 表 importer、文档链接与陈旧状态，形成独立 commit 并 push PR 分支。
-4. 等待该精确 SHA 四个必需 CI job；失败则读取日志、修复、新 commit/push 并重新等待。
-5. 只在取得实际 evidence 后补候选 SHA、artifact hash、命令计数、CI 链接。Phase 2 继续 `in_progress`，下一 closure 承接正式 SLO/容量模型、Exporter/告警、retention archive、备份恢复和 Worker progress/liveness。
+1. 按 [NEXT_TASK.md](../NEXT_TASK.md) 新建独立工作日志与计划，定义受支持拓扑的正式 SLO/容量模型和多轮统计方法。
+2. 交付受控 Exporter/告警、Worker DB-time progress/liveness 与 audit retention archive/restore，保持低基数和固定非秘密 schema。
+3. 演练 PostgreSQL 与数据库外 keyring 配对 backup/restore、Redis 重建和剩余失败矩阵；每个独立切片继续 commit/push 并等待精确 SHA CI。
+4. Phase 2 在上述正式 closure 未完成前继续 `in_progress`；不得把本次 Mock 候选证据外推为生产 HA/SLA 或 Provider exactly-once。

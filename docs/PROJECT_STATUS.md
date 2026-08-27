@@ -6,7 +6,7 @@
 
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
-- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础已交付；治理/审计切片待候选门禁，正式闭环仍有缺口）
+- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础与治理/审计候选门禁已交付；正式 SLO/运维闭环仍有缺口）
 - Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（仅可信本地 MMLU-Pro/GPQA-Diamond 客观题提前切片）
 - Phase 4–6：`planned`
 
@@ -14,7 +14,7 @@
 
 `0.1.0` development baseline，REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`；尚未发布正式 Release。
 
-公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`，PR [#1](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/1)。前置 SHA `ab15862eab4870dda01fb079b44b509a7d737627` 的 run `33078921254` 与 ADR/timer 修复 SHA `1cd19c51ed309316047a18ed3b2a308647af495d` 的 run `33081854406` 均为 4/4；这些结论不覆盖当前未提交的治理实现。每个新阶段 commit 仍必须 push 并等待该精确 SHA 的四个必需 job 全绿。
+公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`，PR [#1](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/1)。治理实现候选 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 已普通 push；GitHub Actions [run `33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 的 Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build 与 Real Compose acceptance 四个必需 job 均成功。后续文档收尾提交仍必须等待其自身精确 SHA 全绿。
 
 ## 已交付基线
 
@@ -25,7 +25,7 @@
 - MMLU-Pro test 与 GPQA-Diamond 固定 revision/SHA 转换、可信本地 `llmbenchlab-evaluate prepare/run/resume/report`、请求上界确认和原子终态报告。该 CLI 仍要求独占数据库，未受 Phase 2 managed budget 保护。
 - React 中文界面覆盖 Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail、Leaderboard；Run 列表全状态筛选/分页/活动轮询，详情逐题分页，关键桌面/平板/移动布局已修复。
 
-## 当前工作树已实现的 Phase 2 切片
+## 已通过候选门禁的 Phase 2 切片
 
 - Alembic 链已扩展到 `20260827_0004`。新增六类治理/审计表：`governance_policies`、`governance_scopes`、`governance_minute_buckets`、`question_executions`、`provider_call_reservations`、`audit_events`；加上既有业务/凭据表，SQLite→PostgreSQL importer 现按依赖顺序复制和对账全部 12 表。
 - active policy 在 SQLite/PostgreSQL 都由 partial unique index 保证唯一；policy 有 canonical hash。managed API Run 创建时冻结 policy ID/hash 与 input reservation、lifetime request/Token/USD overrides，旧 Run 和可信本地 CLI 保持 `legacy_unmanaged`。
@@ -37,15 +37,11 @@
 - typed append-only 应用 audit、分页 Run audit、task history counters、数据库 Run 时间戳 queue/execution/end-to-end latency、严格规范化 Provider request/model/fingerprint/finish metadata 和固定非秘密 credential audit 已实现。
 - 前端 Run Detail 已显示 managed/delayed/exhausted、治理原因和明确 UTC not-before；它不把治理延迟冒充 Worker 正在执行。
 - enhanced capacity 脚本已加入有限 policy、显式 Token/费用边界、sub-15 question quantum、并发 backlog `202/429`、跨 Model 公平、双 Worker、Worker/Redis fault 与 ledger/audit 对账；真实 PostgreSQL 测试代码已加入四层 RPM/TPM/lifetime budget、backlog、settlement/reconcile race 和 audit replay。
-- acceptance harness 已加入三条确定性数据库 seam injection：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复。它们明确不是“精确时刻 SIGKILL”声明；脚本单测 `19 passed`，完整 Compose acceptance 尚未运行。
-
-上述项目是当前共享工作树的实现事实，不是已取得最终候选 SHA 门禁的声明。
+- acceptance harness 已加入三条确定性数据库 seam injection：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复。它们明确不是“精确时刻 SIGKILL”声明；精确候选 SHA 的完整 Compose acceptance 已 9/9 通过。
+- 精确 SHA `665244e…` 的增强 capacity 使用有限 policy、PostgreSQL 16、Redis 7 与两个 Worker 完成：并发 backlog 精确为 4 个 `202` + 2 个 typed `429`，cooperative yield 与跨 Model 公平顺序均有 durable audit 证据，最终 18 Runs/270 Responses/271 ledger/1229 audit 对账且无 active/reserved/overdrawn 漂移。
 
 ## 仍未完成
 
-- 当前治理/审计候选已完成最终修复后的全量 lint/test/smoke、前端 production build、真实 PostgreSQL/Redis integration、双方言 migration/check、Compose config 和脚本定向门禁；enhanced capacity、完整 acceptance、最终 staged diff/secret scan 与精确 SHA 远程门禁仍待完成。
-- 当前实现尚未形成独立 commit/SHA，尚未 push，也没有该精确 SHA 的 GitHub Actions 4/4 结论。
-- 三条 crash seam 的确定性数据库注入和断言已实现，但尚未在冻结候选上运行完整 Compose acceptance；脚本单测不能替代真实服务恢复证据。
 - P2-01：正式 SLO、容量模型、多轮统计、置信/变异和 lease/heartbeat/scan/backlog 参数校准。
 - P2-06：受控 metrics exporter、告警规则/响应、audit retention archive/restore、Worker DB-time progress/liveness、全日志源治理；现有 dependency probe 不能证明主循环正在推进。
 - P2-07：PostgreSQL backup/restore、数据库与 keyring 配对恢复、audit archive/Redis 重建、剩余故障矩阵和完整运维演练。
@@ -68,16 +64,15 @@
 
 | 验证 | 实际结果 | 当前结论 |
 | --- | --- | --- |
-| 前置远程 CI | `ab15862…` run `33078921254` 与 `1cd19c5…` run `33081854406` 均 4/4 | 只覆盖各自历史 SHA，不覆盖治理实现 |
-| 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过；精确 SHA CI 仍待完成 |
-| 最新本地 `make test` | 后端 `603 passed, 29 skipped`；前端 `38 passed` | 本地通过；精确候选 SHA 门禁仍待完成 |
-| 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 真实基础设施本地通过；仍非远程 CI 或候选 capacity/acceptance |
+| 治理候选远程 CI | `665244e…` run `33099260233` 4/4 | 精确实现 SHA 全绿；PR #1 仍 open，未合并 |
+| 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
+| 最新本地 `make test` | 后端 `604 passed, 29 skipped`；前端 `38 passed` | 文档收尾前重跑通过 |
+| 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 本地通过；同一实现 SHA 的远程 integration 亦成功 |
 | 最新本地 `make smoke` | `1 passed, 7 deselected`，仅 Mock | 本地冻结树通过；没有调用真实 Provider |
-| 定向治理/API/Worker | 目标套件零失败；早期独立审计 `218 passed`；完整性边界集合 `18 passed` | 已被最新全量/真实 integration 补充；候选记录仍待冻结 |
-| SQLite migration | 隔离临时库 `upgrade head -> downgrade 0001 -> upgrade head -> check` 通过 | 真实 PG 候选往返仍待运行 |
-| Compose config / capacity self-check | config exit 0；中间脚本 self-check 通过 | 不等于 enhanced real capacity/acceptance |
-| 旧 capacity/acceptance artifacts | 历史脚本曾完成并清理 | 代码/脚本已变化，不作为精确候选证据 |
-| 最终治理候选 SHA/CI | 未运行 | 尚无 commit、push、Actions URL 或 4/4 结论 |
+| 定向治理/API/Worker | 目标套件零失败；早期独立审计 `218 passed`；完整性边界集合 `18 passed` | 已被最终全量、真实 integration 与精确候选 evidence 补充 |
+| SQLite/PostgreSQL migration | 隔离 SQLite 与真实 PostgreSQL prepare/upgrade/downgrade guard/upgrade/check 通过 | 候选与远程 integration 覆盖 |
+| 增强 capacity | 精确 `665244e…`，evidence SHA-256 `40deadeb…0588` | passed；Mock-only，cleanup 容器/卷/网络为空，不是生产 SLA |
+| 完整 acceptance | 精确 `665244e…`，9/9，evidence SHA-256 `ab311665…ddec` | passed；含三条 deterministic DB seam，cleanup 为空 |
 | 真实 Provider | 未运行（有意） | 所有自动化只使用 Mock/Stub/MockTransport |
 
 详细命令与限制见 [当前工作日志](worklogs/2026-08-27-phase-2-governance-audit-performance.md) 和 [TESTING.md](TESTING.md)。
@@ -93,4 +88,4 @@
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 是当前合同：先冻结现有 `0004` 治理/审计候选，完成真实 PostgreSQL integration、enhanced capacity/acceptance、三条 crash seam、全量门禁、独立 commit/push 和精确 SHA CI；再继续正式 SLO、Exporter/告警、retention archive、backup/restore 与 Worker progress/liveness。Phase 2 在全部关键验收完成前保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 是当前合同：治理/审计候选的真实 PostgreSQL integration、enhanced capacity/acceptance、三条 crash seam、实现 commit/push 与精确 SHA CI 已完成；下一步继续正式 SLO/容量模型、Exporter/告警、retention archive、backup/restore 与 Worker progress/liveness。Phase 2 在这些阶段级验收完成前保持 `in_progress`。

@@ -1,16 +1,18 @@
-# 下一任务：Phase 2 候选门禁与正式闭环
+# 下一任务：Phase 2 正式 SLO、可观测性与恢复闭环
 
-> 状态：`ready`；当前治理/审计实现仍在未提交共享工作树，Phase 2 保持 `in_progress`
+> 状态：`ready`；治理/审计候选门禁已通过，Phase 2 仍保持 `in_progress`
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)
 
 ## 现在从哪里继续
 
-当前共享树已经实现 Phase 2 治理/审计垂直切片：Alembic `20260827_0004`、六类治理/审计表与 12 表 importer、global/provider/model/run 四层 per-attempt 治理、固定窗口 RPM/TPM 和 lifetime request/Token/USD budget、policy/hash 与 Run override 冻结、materialized counter/ledger 漂移 fail-closed、confirmed pre-send retry generation、有限 question quantum/backlog、公平排序、typed audit/history、Provider metadata、credential audit 和前端治理状态。增强 capacity 脚本与真实 PostgreSQL 竞争测试也已写入工作树。
+Phase 2 治理/审计垂直切片已经作为实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 提交并 push：Alembic `20260827_0004`、六类治理/审计表与 12 表 importer、global/provider/model/run 四层 per-attempt 治理、固定窗口 RPM/TPM 和 lifetime request/Token/USD budget、policy/hash 与 Run override 冻结、materialized counter/ledger 漂移 fail-closed、confirmed pre-send retry generation、有限 question quantum/backlog、公平排序、typed audit/history、Provider metadata、credential audit、前端治理状态与真实 PostgreSQL 竞争测试。
 
-最新本地共享树的 `make test` 已通过（后端 `603 passed, 29 skipped`；前端 `38 passed`），真实 PostgreSQL/Redis integration 也已 `29/29 passed`。但这些实现尚没有独立候选 commit，也没有该精确 SHA 的 enhanced capacity/acceptance evidence 或 GitHub Actions 结论。此前 `1cd19c51ed309316047a18ed3b2a308647af495d` 的 4/4 CI 只覆盖设计与前端 timer 修复，不覆盖本实现。下一任务先冻结并交付候选，再继续 Phase 2 正式闭环；不得跳到 Phase 3。
+该 SHA 的本地门禁为后端 `604 passed, 29 skipped`、前端 `38 passed`、真实 PostgreSQL/Redis integration `29/29 passed`，lint、Mock smoke、前端 build 与 Compose config 均通过。增强 capacity evidence SHA-256 为 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`；完整 acceptance 9/9，evidence SHA-256 为 `ab311665ff0cb834efdd648cd634f943a4cbc5b8b00728ac8597a288a877ddec`。GitHub Actions [run `33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 4/4 成功。下一任务直接继续正式闭环，不重复候选工作，也不得跳到 Phase 3。
 
-## 第一部分：冻结并验证当前候选
+## 已完成的候选门禁合同
+
+以下合同已在 `665244e…` 上满足，保留作为后续修改必须重跑的回归基线。
 
 ### 1. 保护工作树并做定向回归
 
@@ -46,7 +48,7 @@
 - 比较一/二 Worker 的吞吐与 p50/p95/p99，并验证 Worker loss、Redis interruption、ledger/audit/counter 对账和完整清理；
 - evidence 必须记录候选 commit SHA、脚本 SHA-256、环境、配置、原始脱敏计数和限制说明，不得冒充生产 SLA。
 
-当前 `phase2_acceptance.py` 已实现以下三条确定性数据库 seam injection，且脚本单测已 `19 passed`。运行完整 `make phase2-acceptance`，在冻结候选上验证真实 Worker/Redis 恢复和最终证据：
+`phase2_acceptance.py` 的脚本单测为 `19 passed`，完整 `make phase2-acceptance` 已在冻结候选上验证以下三条确定性数据库 seam injection 与真实 Worker/Redis 恢复：
 
 1. reservation 已提交、`send_started` 尚未提交：接管只能 `released_pre_send`，不得消耗未发送 retry；
 2. `send_started` 已提交、settlement 尚未提交：接管必须 conservative settlement，释放并发但不按零退回预算；
@@ -54,7 +56,7 @@
 
 这些场景明确是 deterministic database seam injection，不宣称 `SIGKILL` 精确命中亚毫秒边界；一般的“Worker 在若干 Response 后 SIGKILL”也不能替代它们。任一完整 Compose 场景失败或未运行都必须保留为未通过/遗留，Phase 2 继续 `in_progress`。
 
-### 4. 全量门禁、commit、push 与精确 SHA CI
+### 4. 全量门禁、commit、push 与精确 SHA CI（已完成）
 
 至少运行并记录：
 
@@ -73,11 +75,11 @@ git diff --check
 - 检查 staged diff、调试残留、生成物、真实密钥/Authorization/Cookie、审计 payload 和文档虚假完成标记。
 - 形成一个独立、可审查的 Phase 2 治理/审计候选 commit，push 到 `origin/codex/complete-evaluation-workflow`，继续使用 PR #1；禁止 force push。
 - 等待该精确 commit SHA 的四个 GitHub Actions 必需 job 全部成功。任何失败都读取日志、修复、创建新 commit、push 并等待新 SHA；不能用本地通过替代远程绿色。
-- 只在实际完成后，把 commit/SHA、branch、Actions URL、job 结论、capacity/acceptance artifact path 与 SHA-256、命令计数和清理结果补入 Changelog、Project Status、Phase 2、计划与工作日志。
+- commit/SHA、branch、Actions URL、job 结论、capacity/acceptance artifact path 与 SHA-256、命令计数和清理结果已补入 Changelog、Project Status、Phase 2、计划与工作日志。
 
-## 第二部分：继续 Phase 2 正式闭环
+## 当前任务：继续 Phase 2 正式闭环
 
-当前治理切片取得精确 SHA 绿色后，仍必须完成以下范围，Phase 2 才能评估是否改为 `completed`。
+治理切片已经取得精确 SHA 绿色；仍必须完成以下范围，Phase 2 才能评估是否改为 `completed`。
 
 ### P2-01：正式 SLO 与容量模型
 
@@ -113,12 +115,12 @@ git diff --check
 
 ## Definition of Done
 
-- 当前候选：所有定向/全量/真实基础设施/capacity/acceptance 门禁在同一精确 SHA 上通过，三条 crash seam 有实际证据或如实保留未通过，独立 commit 已 push，精确 SHA CI 4/4，并完成 evidence/secret/diff/清理记录。
+- 当前候选：已完成。所有定向/全量/真实基础设施/capacity/acceptance 门禁在同一精确 SHA 上通过，三条 crash seam 有实际证据，独立 commit 已 push，精确 SHA CI 4/4，并完成 evidence/secret/diff/清理记录。
 - Phase 2 整体：除上述候选外，正式 SLO/容量模型、Exporter/告警、audit retention archive、Worker progress/liveness、备份恢复和剩余故障矩阵均实现并验证；所有 Phase 2 验收项有可复核证据。
 - 任一关键项未运行或失败时，Phase 2 必须保持 `in_progress`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
 
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-请执行 docs/NEXT_TASK.md 的“Phase 2 候选门禁与正式闭环”。先保护当前共享工作树，冻结并验证已实现的 0004 治理/审计候选：运行定向测试、真实 PostgreSQL integration、增强 phase2-capacity、phase2-acceptance 和全量 lint/test/smoke/migration/Compose 门禁；逐条证明四层 RPM/TPM/lifetime budget、backlog 202/429、finite quantum、跨 Model fairness、counter/ledger fail-closed、ADR-0011 pre-send retry，以及 reservation→send-start、send-started→settlement、Provider response→本地 commit 三条 crash seam。自动化只能用 Mock/Stub，不得调用真实 Provider。然后复核 diff/secret，独立 commit 并 push PR #1 分支，等待该精确 SHA 的 GitHub Actions 4/4，失败则修复新 commit 后重新等待。只有实际得到结果后才能写 SHA、artifact hash 和 CI 成功。随后继续正式 SLO/容量模型、Exporter/告警、audit retention archive、Worker progress/liveness、backup/restore 和剩余故障矩阵；任何关键项未完成时 Phase 2 保持 in_progress，不得跳到 Phase 3或宣称生产 HA/Provider exactly-once。
+请执行 docs/NEXT_TASK.md 的“Phase 2 正式 SLO、可观测性与恢复闭环”。治理/审计候选 `665244e095905083b606b8e98e946ed1a02dc0fc` 的 capacity、9/9 acceptance 与远程 4/4 CI 已完成，不要重复实现或改写既有证据。先建立新的工作日志与执行计划，定义受支持拓扑的正式 SLO/容量模型和多轮测量方法；再交付受控 exporter/告警、低基数标签、Worker DB-time progress/liveness、audit retention archive/restore；最后演练 PostgreSQL 与数据库外 keyring 配对 backup/restore、Redis 重建和剩余故障矩阵。自动化只能用 Mock/Stub，不得调用真实 Provider；保持 protocol-v1、ledger/DB truth、write-only Key 和 fail-closed 边界。每个独立切片都须测试、提交、push 并等待精确 SHA CI；正式闭环未全部满足前 Phase 2 保持 in_progress，不得跳到 Phase 3 或宣称生产 HA/Provider exactly-once。
 ```

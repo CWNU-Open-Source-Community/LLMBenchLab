@@ -1,7 +1,7 @@
 # Phase 2 并发治理、审计与性能基线执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed (governance/audit candidate slice; Phase 2 remains in progress)
 - Created: 2026-08-27
 - Updated: 2026-08-28
 - Related phase: [Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
@@ -10,7 +10,7 @@
 
 ## Context
 
-Phase 2 已有 PostgreSQL 任务事实来源、Redis at-least-once 通知、独立 Worker、租约/fencing、幂等 Response 和故障恢复。本计划新增的治理/审计切片已在共享工作树实现：`0004`、数据库权威四层治理、逐 Provider HTTP attempt ledger、有限 question quantum、typed audit/history、Provider metadata、credential audit、前端治理状态和增强容量/真实 PostgreSQL 测试。最终全量门禁、精确候选 SHA 的真实负载/故障证据、push 与 CI 仍未完成，因此计划和 Phase 2 均保持进行中。
+Phase 2 已有 PostgreSQL 任务事实来源、Redis at-least-once 通知、独立 Worker、租约/fencing、幂等 Response 和故障恢复。本计划新增的治理/审计切片已作为 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 交付：`0004`、数据库权威四层治理、逐 Provider HTTP attempt ledger、有限 question quantum、typed audit/history、Provider metadata、credential audit、前端治理状态和增强容量/真实 PostgreSQL 测试。最终全量门禁、精确 SHA 真实负载/故障证据、push 与远程 4/4 CI 均已完成；正式 Phase 2 闭环由 NEXT_TASK 继续，因此 Phase 2 本身仍保持进行中。
 
 ## Objective
 
@@ -56,21 +56,21 @@ Phase 2 已有 PostgreSQL 任务事实来源、Redis at-least-once 通知、独�
    - 已实现 policy GET/PUT、Run governance/read fields、Run audit、task history/latency、credential audit、Provider evidence 和 Run Detail 治理状态；payload 使用固定 allowlist。
 5. [completed] 形成可执行容量/故障工具和 Runbook 切片。
    - 增强 capacity 脚本已覆盖有限 policy、并发 backlog `202/429`、小于 15 题的 quantum、跨 Model 公平、Worker/Redis 故障与 ledger/audit 对账；真实 PostgreSQL 测试覆盖 RPM/TPM/lifetime budget、backlog、settlement/reconcile race 和 audit replay。最终精确候选 SHA 的实际运行属于步骤 6。
-6. [in_progress] 全量门禁与交付闭环。
+6. [completed] 全量门禁与本切片交付闭环。
    - 冻结候选树后重跑 lint/test/smoke、双方言迁移、真实 PostgreSQL integration、增强 capacity、acceptance、Compose、diff/secret 检查。
-   - 三个确定性 DB seam injection（reserved、send_started、response_committed）及断言已加入，脚本单测通过；在冻结候选运行完整 Compose acceptance 并记录恢复证据。
-   - 形成独立 commit、push PR 分支，等待该精确 SHA 的四个必需 GitHub Actions job；只把实际 SHA、evidence hash 和 CI 链接补入文档。
+   - 三个确定性 DB seam injection（reserved、send_started、response_committed）及断言已加入，脚本单测和冻结候选的 9/9 完整 Compose acceptance 均通过。
+   - 独立实现 commit 已 push PR 分支；精确 SHA `665244e…` 的 GitHub Actions run `33099260233` 四个必需 job 全部成功。
    - Phase 2 仍保持 `in_progress`，并把正式 SLO/容量模型、Exporter/告警、retention archive、备份恢复和 Worker progress/liveness 作为下一 closure 合同。
 
 ## Risks
 
 | 风险 | 控制 | 剩余边界 |
 | --- | --- | --- |
-| 四层锁死锁或限额突破 | canonical scope、global→provider→model→run 锁序、真实 PG 竞争测试 | 需在最终候选真实 integration 重跑 |
+| 四层锁死锁或限额突破 | canonical scope、global→provider→model→run 锁序、真实 PG 竞争测试 | 精确候选 integration/capacity 已通过；仍需生产规模参数校准 |
 | materialized counter 被破坏 | 每次关键 mutation 前从 ledger 聚合并 fail closed | 管理员仍可直接篡改数据库；不是 WORM |
 | Provider attempt/commit 裂缝 | `reserved` 可释放，`send_started` 保守结算，终态唯一键 | Provider 响应后本地提交前仍可能重复外部调用/费用 |
 | fixed-window 边界突发 | 数据库 UTC 窗口、typed not-before、容量证据 | 不等同平滑 token bucket 或 Provider SLA |
-| 公平改造破坏 retry | dispatch 与 failed count 分离、ADR-0011 generation/ordinal | 最终真实双 Worker evidence 尚待候选 SHA 重跑 |
+| 公平改造破坏 retry | dispatch 与 failed count 分离、ADR-0011 generation/ordinal | 精确候选双 Worker与 deterministic seam evidence 已通过；仍非 Provider SLA |
 | 审计高基数或泄密 | event/payload allowlist、无正文/URL/Key、分页 | retention archive/exporter 尚未交付 |
 | importer/migration 数据损失 | 停写只读源、空目标、单事务、12 表 fingerprint、downgrade guard | 备份恢复演练仍属 Phase 2 closure |
 
@@ -78,17 +78,16 @@ Phase 2 已有 PostgreSQL 任务事实来源、Redis at-least-once 通知、独�
 
 | 验收项 | 已实际发生的结果 | 最终门禁状态 |
 | --- | --- | --- |
-| 最新本地静态门禁 | `make lint` 通过 | 本地冻结树通过；精确 SHA CI 仍待完成 |
-| 最新本地全量测试 | `make test`：后端 `603 passed, 29 skipped`；前端 `38 passed` | 本地通过；精确候选 SHA 门禁仍待完成 |
-| 最新真实基础设施 | PostgreSQL/Redis integration `29/29 passed` | 本地真实基础设施通过；候选 capacity/acceptance 与 CI 仍待完成 |
-| acceptance seam 脚本 | 三条 deterministic DB seam 场景；定向脚本测试 `19 passed`，Ruff/format/compile/self-check 通过 | 完整 Compose acceptance 尚未运行 |
+| 最新本地静态门禁 | `make lint` 通过 | 本地冻结树与精确实现 SHA 远程门禁通过 |
+| 最新本地全量测试 | `make test`：后端 `604 passed, 29 skipped`；前端 `38 passed` | 收尾文档前重跑通过 |
+| 最新真实基础设施 | PostgreSQL/Redis integration `29/29 passed` | 本地通过；同一实现 SHA 的远程 integration 通过 |
+| acceptance seam 脚本 | 三条 deterministic DB seam 场景；定向脚本测试 `19 passed`，完整 Compose 9/9 | 精确 `665244e…` 通过，evidence `ab311665…ddec` |
 | 最新本地 Smoke | `make smoke`：`1 passed, 7 deselected`，仅 Mock | 本地冻结树通过；未调用真实 Provider |
-| 定向治理/API/Worker | 目标套件曾通过；另一次审计为 `218 passed` | 最终命令和精确计数待主线记录 |
-| SQLite/PostgreSQL migration | 隔离 SQLite 与临时 PostgreSQL 16 的 prepare/upgrade/downgrade/upgrade/check 通过 | 本地通过；精确 SHA CI 仍待完成 |
+| 定向治理/API/Worker | 目标套件曾通过；另一次审计为 `218 passed` | 已由最终全量、真实 integration 与候选 evidence 补充 |
+| SQLite/PostgreSQL migration | 隔离 SQLite 与临时 PostgreSQL 16 的 prepare/upgrade/downgrade/upgrade/check 通过 | 本地通过；精确实现 SHA 的远程 integration 亦通过 |
 | Compose config | `docker compose config --quiet` 通过 | 最新本地冻结树通过 |
-| capacity self-check | 旧/中间脚本 self-check 通过 | 增强真实 Compose capacity 尚未执行 |
-| acceptance/capacity 历史证据 | 旧共享树曾有 acceptance 8/8 与容量 artifact | 脚本已增强，不能替代精确候选 SHA 新证据 |
-| 远程门禁 | 设计/计时修复 SHA `1cd19c51ed309316047a18ed3b2a308647af495d` 的 run `33081854406` 为 4/4 | 实现候选尚无 commit/SHA/CI 结论 |
+| enhanced capacity | 1W `7.306981`、2W `13.396740`、burst `8.585309` q/s；4×202+2×429，公平/故障/对账通过 | 精确 `665244e…`，evidence `40deadeb…0588`，Mock-only 非 SLA |
+| 远程门禁 | SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 的 run `33099260233` | 4/4 成功；PR #1 未合并 |
 
 ## Rollback
 
@@ -101,14 +100,14 @@ Phase 2 已有 PostgreSQL 任务事实来源、Redis at-least-once 通知、独�
 - [x] Testing / Deployment / Operations / Performance
 - [x] ADR-0010 / ADR-0011
 - [x] CHANGELOG、PROJECT_STATUS、Roadmap、Phase 2、NEXT_TASK、工作日志
-- [ ] 精确候选 SHA、最终 evidence hash、CI 链接与完整命令结果（步骤 6 完成后由主线补充）
+- [x] 精确候选 SHA、最终 evidence hash、CI 链接与完整命令结果
 
 ## Completion evidence
 
-- Changed files: 当前共享 diff 包含 `0004`、治理/审计模型与 repository、Adapter/Runner/Worker/API/UI、增强测试/脚本及联动文档；最终 staged diff 仍待主线复核。
-- Commands run: 见上表和工作日志；最终修复后的全量、真实 PostgreSQL/Redis integration 与双方言 migration/check 已运行，enhanced capacity/acceptance 尚未运行。
-- Acceptance evidence: 旧 evidence 只作为历史诊断；增强脚本的精确候选 SHA 证据尚未生成。
-- Known issues: Phase 2 正式 SLO/容量模型、Exporter/告警、审计归档、备份恢复、Worker progress/liveness 与三条完整崩溃缝隙验收仍未闭环。
+- Changed files: 实现 commit `f587691…`，admission rollback 修复 `ecf93f7…`，canonical lock-order 修复 `665244e…`；均已普通 push 到 PR #1 分支。最终 staged/security 独立审查无 blocker/high。
+- Commands run: 见上表和工作日志；全量、真实 PostgreSQL/Redis integration、双方言 migration/check、enhanced capacity、9/9 acceptance、secret/diff/cleanup 与远程 CI 均实际运行。
+- Acceptance evidence: capacity `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-51cfadee04f5/evidence.json`，SHA-256 `40deadeb…0588`；acceptance `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-afe52c2d54cb/evidence.json`，SHA-256 `ab311665…ddec`。两者记录 `dirty=false` 与精确 SHA `665244e…`。
+- Known issues: Phase 2 正式 SLO/容量模型、Exporter/告警、审计归档、备份恢复、Worker progress/liveness 与剩余生产式故障矩阵仍未闭环。
 
 ## Decision and discovery log
 
