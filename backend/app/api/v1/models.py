@@ -39,8 +39,20 @@ from app.security import (
     EncryptedCredential,
     normalize_provider_origin,
 )
+from app.services.credential_audit import (
+    audit_credential_changed,
+    audit_credential_decrypt_failed,
+    audit_credential_rejected_after_rollback,
+    credential_change_action,
+    safe_credential_key_id,
+)
 
 router = APIRouter(prefix="/models", tags=["models"])
+
+
+def _credential_key_id(model: RegisteredModel) -> str | None:
+    credential = model.credential
+    return safe_credential_key_id(credential.key_id if credential is not None else None)
 
 
 def _get_model_or_404(
@@ -309,6 +321,7 @@ def create_model(
         updated_at=timestamp,
         **values,
     )
+    credential_key_id: str | None = None
     if source == CredentialSource.STORED:
         if model.base_url is None:
             raise AssertionError("stored credentials require base_url")
@@ -329,7 +342,16 @@ def create_model(
             settings=settings,
         )
         model.credential = _credential_row(model.id, encrypted)
+        credential_key_id = encrypted.key_id
     session.add(model)
+    if source != CredentialSource.NONE:
+        audit_credential_changed(
+            session,
+            model_id=model.id,
+            action="created",
+            source=source,
+            key_id=credential_key_id,
+        )
     try:
         session.commit()
     except IntegrityError as exc:
@@ -354,6 +376,9 @@ def update_model(
     settings: SettingsDep,
 ) -> RegisteredModel:
     model = _get_model_or_404(session, model_id, for_update=True)
+    previous_source = model.credential_source
+    previous_api_key_env = model.api_key_env
+    previous_key_id = _credential_key_id(model)
     current = {
         "name": model.name,
         "provider_type": model.provider_type,
@@ -400,28 +425,6 @@ def update_model(
             created_at=model.created_at,
             updated_at=update_timestamp,
         )
-    if model.credential_source == CredentialSource.STORED:
-        try:
-            existing_api_key = _decrypt_model_api_key(
-                model,
-                settings=settings,
-            ).get_secret_value()
-        except CredentialCryptoError as exc:
-            # A write-only replacement or an explicit switch away from stored
-            # credentials can safely repair/remove an unreadable old envelope.
-            if payload.api_key is None and source == CredentialSource.STORED:
-                _raise_credential_store_unavailable(exc)
-            if not _unreadable_credential_recovery_is_isolated(model, validated, source):
-                _reject_nonisolated_credential_recovery()
-        else:
-            _reject_public_secret_copy(
-                validated,
-                credential_source=source,
-                secret=existing_api_key,
-                model_id=model.id,
-                created_at=model.created_at,
-                updated_at=update_timestamp,
-            )
     sensitive_change = any(
         (
             validated.provider_type != model.provider_type,
@@ -433,6 +436,16 @@ def update_model(
         )
     )
     if sensitive_change and _active_run_exists(session, model.id):
+        # Reject from public, non-secret facts before touching the existing
+        # envelope.  Besides avoiding unnecessary decryption, this keeps the
+        # durable rejection audit from rolling back an earlier decrypt event.
+        audit_credential_rejected_after_rollback(
+            session,
+            model_id=model.id,
+            reason="active_run_conflict",
+            source=source,
+            key_id=previous_key_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={
@@ -440,7 +453,48 @@ def update_model(
                 "message": "Provider endpoint or credentials cannot change during active runs",
             },
         )
-
+    if model.credential_source == CredentialSource.STORED:
+        try:
+            existing_api_key = _decrypt_model_api_key(
+                model,
+                settings=settings,
+            ).get_secret_value()
+        except CredentialCryptoError as exc:
+            # A write-only replacement or an explicit switch away from stored
+            # credentials can safely repair/remove an unreadable old envelope.
+            preserving_unreadable = payload.api_key is None and source == CredentialSource.STORED
+            recovery_isolated = _unreadable_credential_recovery_is_isolated(
+                model,
+                validated,
+                source,
+            )
+            if preserving_unreadable or not recovery_isolated:
+                audit_credential_decrypt_failed(
+                    session,
+                    model_id=model.id,
+                    key_id=previous_key_id,
+                    after_rollback=True,
+                )
+            else:
+                audit_credential_decrypt_failed(
+                    session,
+                    model_id=model.id,
+                    key_id=previous_key_id,
+                    after_rollback=False,
+                )
+            if preserving_unreadable:
+                _raise_credential_store_unavailable(exc)
+            if not recovery_isolated:
+                _reject_nonisolated_credential_recovery()
+        else:
+            _reject_public_secret_copy(
+                validated,
+                credential_source=source,
+                secret=existing_api_key,
+                model_id=model.id,
+                created_at=model.created_at,
+                updated_at=update_timestamp,
+            )
     old_origin = (
         normalize_provider_origin(model.base_url)
         if model.provider_type == ProviderType.OPENAI_COMPATIBLE and model.base_url is not None
@@ -458,6 +512,13 @@ def update_model(
         and new_origin != old_origin
         and payload.api_key is None
     ):
+        audit_credential_rejected_after_rollback(
+            session,
+            model_id=model.id,
+            reason="origin_rejected",
+            source=source,
+            key_id=previous_key_id,
+        )
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail={
@@ -492,6 +553,21 @@ def update_model(
     elif source != CredentialSource.STORED:
         model.credential = None
     model.updated_at = update_timestamp
+    credential_action = credential_change_action(
+        previous_source=previous_source,
+        new_source=source,
+        api_key_replaced=payload.api_key is not None,
+        environment_name_changed=validated.api_key_env != previous_api_key_env,
+    )
+    if credential_action is not None:
+        changed_key_id = encrypted.key_id if encrypted is not None else previous_key_id
+        audit_credential_changed(
+            session,
+            model_id=model.id,
+            action=credential_action,
+            source=source,
+            key_id=changed_key_id,
+        )
     try:
         session.commit()
     except IntegrityError as exc:
@@ -510,6 +586,8 @@ def update_model(
 )
 def delete_model(model_id: str, session: SessionDep) -> Response:
     model = _get_model_or_404(session, model_id)
+    previous_source = model.credential_source
+    previous_key_id = _credential_key_id(model)
     run_id = session.scalar(
         select(EvaluationRun.id).where(EvaluationRun.model_id == model_id).limit(1)
     )
@@ -522,6 +600,14 @@ def delete_model(model_id: str, session: SessionDep) -> Response:
             },
         )
     session.delete(model)
+    if previous_source != CredentialSource.NONE:
+        audit_credential_changed(
+            session,
+            model_id=model_id,
+            action="removed",
+            source=CredentialSource.NONE,
+            key_id=previous_key_id,
+        )
     try:
         session.commit()
     except IntegrityError as exc:

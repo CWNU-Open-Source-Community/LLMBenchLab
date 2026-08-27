@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from app.core.time import utc_now
 from app.models import Benchmark, EvaluationResponse, EvaluationRun, Model, Question
 from app.models.enums import TERMINAL_RUN_STATUSES
+from app.security import normalize_http_attempt_count, normalize_provider_metadata
 
 REPORT_SCHEMA_VERSION = "llmbenchlab-run-report-v1"
 SUMMARY_FILENAME = "summary.json"
@@ -509,11 +510,23 @@ def _response_payload(
         "estimated_cost": (
             float(response.estimated_cost) if response.estimated_cost is not None else None
         ),
+        "provider_request_id": response.provider_request_id,
+        "returned_model": response.returned_model,
+        "system_fingerprint": response.system_fingerprint,
+        "finish_reason": response.finish_reason,
+        "http_attempt_count": response.http_attempt_count,
         "error_type": response.error_type,
         "error_message": response.error_message,
         "created_at": response.created_at,
     }
-    return _sanitize_value(payload, secrets)
+    sanitized = _sanitize_value(payload, secrets)
+    for field in ("provider_request_id", "returned_model", "system_fingerprint"):
+        sanitized[field] = normalize_provider_metadata(sanitized[field], max_length=256)
+    sanitized["finish_reason"] = normalize_provider_metadata(
+        sanitized["finish_reason"], max_length=128
+    )
+    sanitized["http_attempt_count"] = normalize_http_attempt_count(sanitized["http_attempt_count"])
+    return sanitized
 
 
 def _write_groups_csv(

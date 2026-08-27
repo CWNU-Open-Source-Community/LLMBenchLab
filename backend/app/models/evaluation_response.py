@@ -50,6 +50,10 @@ class EvaluationResponse(Base):
         CheckConstraint(
             "estimated_cost IS NULL OR estimated_cost >= 0", name="estimated_cost_nonnegative"
         ),
+        CheckConstraint(
+            "http_attempt_count IS NULL OR http_attempt_count >= 1",
+            name="http_attempt_count_positive",
+        ),
         Index("ix_evaluation_responses_run_created", "run_id", "created_at"),
         Index("ix_evaluation_responses_question", "question_id"),
     )
@@ -70,6 +74,11 @@ class EvaluationResponse(Base):
     input_tokens: Mapped[int | None] = mapped_column()
     output_tokens: Mapped[int | None] = mapped_column()
     estimated_cost: Mapped[Decimal | None] = mapped_column(Numeric(20, 8))
+    provider_request_id: Mapped[str | None] = mapped_column(String(256))
+    returned_model: Mapped[str | None] = mapped_column(String(256))
+    system_fingerprint: Mapped[str | None] = mapped_column(String(256))
+    finish_reason: Mapped[str | None] = mapped_column(String(128))
+    http_attempt_count: Mapped[int | None] = mapped_column()
     error_type: Mapped[str | None] = mapped_column(String(128), index=True)
     error_message: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utc_now, nullable=False)

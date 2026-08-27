@@ -51,6 +51,27 @@ function runFixture(overrides: Partial<EvaluationRun> = {}): EvaluationRun {
     output_tokens: 2000,
     estimated_cost: 0.1234,
     cancellation_requested: false,
+    attempt_count: 1,
+    max_attempts: 3,
+    failed_attempt_count: 0,
+    dispatch_count: 1,
+    last_scheduled_at: "2026-08-27T08:00:00Z",
+    governance_policy_id: "policy-001",
+    governance_status: "managed",
+    governance_reason: null,
+    governance_not_before: null,
+    input_token_reservation: null,
+    lifetime_request_budget: null,
+    lifetime_token_budget: null,
+    lifetime_cost_budget_usd: null,
+    lease_owner: null,
+    lease_token: 1,
+    lease_expires_at: null,
+    heartbeat_at: null,
+    next_attempt_at: null,
+    last_enqueued_at: "2026-08-27T07:59:01Z",
+    last_error: null,
+    dead_lettered_at: null,
     started_at: "2026-08-27T08:00:00Z",
     finished_at: "2026-08-27T08:30:00Z",
     created_at: "2026-08-27T07:59:00Z",
@@ -124,6 +145,52 @@ describe("RunDetailPage", () => {
     expect(screen.getByText("显示 1–1 / 共 198 条 · 本页 0 条错误")).toBeInTheDocument();
     expect(screen.queryByText(/共 1 条/)).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "评测记录" })).toHaveAttribute("href", "/runs");
+    expect(screen.getByText("数据库治理已启用")).toBeInTheDocument();
+  });
+
+  it("shows a delayed backpressure reason and the earliest database time explicitly in UTC", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      status: "pending",
+      governance_status: "delayed",
+      governance_reason: "governance_provider_rpm",
+      governance_not_before: "2026-08-27T09:00:00Z",
+      started_at: null,
+      finished_at: null,
+    }));
+
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "治理背压中，等待重新调度" }))
+      .toBeInTheDocument();
+    expect(screen.getByText("治理背压中，Run 已暂缓（deferred）")).toBeInTheDocument();
+    expect(screen.getByText(/Provider每分钟请求额度暂时占满/)).toBeInTheDocument();
+    expect(screen.getByText(/2026-08-27 09:00:00\.000 UTC/)).toBeInTheDocument();
+    expect(screen.queryByText("governance_provider_rpm")).not.toBeInTheDocument();
+  });
+
+  it("explains exhausted and legacy-unmanaged boundaries without reflecting unknown reasons", async () => {
+    const unsafeReason = "untrusted-reason-that-must-not-be-reflected";
+    apiMocks.run.mockResolvedValueOnce(runFixture({
+      status: "failed",
+      governance_status: "exhausted",
+      governance_reason: unsafeReason,
+      error_message: null,
+    }));
+    const exhausted = renderPage();
+
+    expect(await screen.findByText("治理硬边界已终止 Run")).toBeInTheDocument();
+    expect(screen.getByText(/未公开原因/)).toBeInTheDocument();
+    expect(screen.queryByText(unsafeReason)).not.toBeInTheDocument();
+    exhausted.unmount();
+
+    apiMocks.run.mockResolvedValueOnce(runFixture({
+      governance_policy_id: null,
+      governance_status: "legacy_unmanaged",
+    }));
+    renderPage();
+
+    expect(await screen.findByText("此 Run 未纳入数据库治理")).toBeInTheDocument();
+    expect(screen.getByText(/当前 Web\/API policy 不保证/)).toBeInTheDocument();
   });
 
   it("requests offset 100 and numbers the first item on page two as 101", async () => {

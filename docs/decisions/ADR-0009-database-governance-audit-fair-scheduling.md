@@ -6,7 +6,7 @@
 - **Scope**: Phase 2 P2-05/P2-06/P2-07；Provider attempt admission、额度账本、背压、公平调度、审计与容量验证
 - **Related requirements**: `docs/NEXT_TASK.md` P2-05、P2-06、P2-07
 - **Supersedes**: ADR-0005 中“`attempt_count < max_attempts` 同时限制所有成功领取次数”的局部语义；其数据库事实来源、租约/fencing、Response 幂等和 Provider non-exactly-once 决定继续有效
-- **Superseded by**: 无
+- **Amended by**: [ADR-0010](ADR-0010-phase-2-governance-delivery-boundaries.md) 对可信本地 CLI、Provider metadata redaction event、历史延迟来源和 credential origin payload 的交付边界修正；[ADR-0011](ADR-0011-confirmed-pre-send-release-retry-generation.md) 明确已确认 `released_pre_send` 以新本地 generation 保留 ledger、但不消耗实际 HTTP retry；其余决定继续有效
 
 ## Context
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -12,8 +13,26 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.api.deps import PaginationDep, SessionDep, SettingsDep
 from app.core.config import Settings
 from app.db.model_lock import lock_model_for_update
-from app.models import Benchmark, EvaluationResponse, EvaluationRun, Question, RunStatus
+from app.governance import (
+    AuditIntegrityError,
+    GovernanceBacklogFull,
+    GovernanceIntegrityError,
+    GovernanceRepository,
+    record_governance_integrity_event,
+    validate_audit_identity_for_read,
+    validate_audit_payload_for_read,
+)
+from app.models import (
+    AuditEvent,
+    AuditRetentionClass,
+    Benchmark,
+    EvaluationResponse,
+    EvaluationRun,
+    Question,
+    RunStatus,
+)
 from app.runners.run_leases import CancelDisposition, RunLeaseRepository
+from app.schemas.audit import AuditEventList
 from app.schemas.evaluation_response import EvaluationResponseList
 from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, EvaluationRunRead
 from app.services.run_service import build_evaluation_run
@@ -21,6 +40,15 @@ from app.task_queue import QueueUnavailable
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 logger = logging.getLogger(__name__)
+
+
+def _session_factory(session: Session) -> sessionmaker[Session]:
+    return sessionmaker(
+        bind=session.get_bind(),
+        class_=Session,
+        autoflush=False,
+        expire_on_commit=False,
+    )
 
 
 def _get_run_or_404(session: SessionDep, run_id: str) -> EvaluationRun:
@@ -35,16 +63,107 @@ def _get_run_or_404(session: SessionDep, run_id: str) -> EvaluationRun:
 
 def _lease_repository(session: Session, settings: Settings) -> RunLeaseRepository:
     return RunLeaseRepository(
-        sessionmaker(
-            bind=session.get_bind(),
-            class_=Session,
-            autoflush=False,
-            expire_on_commit=False,
-        ),
+        _session_factory(session),
         lease_for=timedelta(seconds=settings.worker_lease_seconds),
         retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
         retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
     )
+
+
+def _record_governance_integrity(
+    session: Session,
+    *,
+    run_id: str | None = None,
+    model_id: str | None = None,
+) -> None:
+    session.rollback()
+    try:
+        record_governance_integrity_event(
+            _session_factory(session),
+            run_id=run_id,
+            model_id=model_id,
+        )
+    except Exception:
+        logger.error(
+            "Governance integrity evidence could not be recorded",
+            extra={
+                "event": "governance_integrity_audit_failed",
+                "run_id": run_id,
+                "model_id": model_id,
+                "result": "not_recorded",
+            },
+        )
+
+
+def _audit_event_read_item(event: AuditEvent) -> dict[str, object]:
+    minimum_retention = timedelta(
+        days=365 if event.retention_class == AuditRetentionClass.SECURITY else 90
+    )
+    if (
+        (
+            event.attempt is not None
+            and (
+                isinstance(event.attempt, bool)
+                or not isinstance(event.attempt, int)
+                or not 0 <= event.attempt <= 2**31 - 1
+            )
+        )
+        or (
+            event.provider_attempt is not None
+            and (
+                isinstance(event.provider_attempt, bool)
+                or not isinstance(event.provider_attempt, int)
+                or not 1 <= event.provider_attempt <= 2**31 - 1
+            )
+        )
+        or (
+            event.lease_token is not None
+            and (
+                isinstance(event.lease_token, bool)
+                or not isinstance(event.lease_token, int)
+                or not 0 <= event.lease_token <= 2**63 - 1
+            )
+        )
+        or (
+            event.duration_ms is not None
+            and (
+                isinstance(event.duration_ms, bool)
+                or not isinstance(event.duration_ms, (int, float))
+                or not math.isfinite(event.duration_ms)
+                or event.duration_ms < 0
+            )
+        )
+        or event.expires_at - event.occurred_at < minimum_retention
+    ):
+        raise AuditIntegrityError("retained audit event failed integrity validation")
+    return {
+        "id": validate_audit_identity_for_read("id", event.id, maximum=36),
+        "event_type": event.event_type,
+        "payload": validate_audit_payload_for_read(
+            event.event_type,
+            event.payload,
+            event.payload_hash,
+        ),
+        "retention_class": event.retention_class,
+        "occurred_at": event.occurred_at,
+        "expires_at": event.expires_at,
+        "correlation_id": validate_audit_identity_for_read(
+            "correlation_id", event.correlation_id, maximum=128
+        ),
+        "run_id": validate_audit_identity_for_read("run_id", event.run_id, maximum=36),
+        "model_id": validate_audit_identity_for_read("model_id", event.model_id, maximum=36),
+        "question_id": validate_audit_identity_for_read(
+            "question_id", event.question_id, maximum=36
+        ),
+        "worker_id": validate_audit_identity_for_read("worker_id", event.worker_id, maximum=128),
+        "reservation_id": validate_audit_identity_for_read(
+            "reservation_id", event.reservation_id, maximum=36
+        ),
+        "attempt": event.attempt,
+        "provider_attempt": event.provider_attempt,
+        "lease_token": event.lease_token,
+        "duration_ms": event.duration_ms,
+    }
 
 
 @router.get("", response_model=EvaluationRunList, summary="分页列出 Run")
@@ -111,7 +230,43 @@ async def create_run(
         )
 
     run = build_evaluation_run(model, benchmark, payload, settings)
-    session.add(run)
+    repository = GovernanceRepository(
+        sessionmaker(
+            bind=session.get_bind(),
+            class_=Session,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+    )
+    try:
+        repository.admit_run(
+            session,
+            run,
+            provider_type=model.provider_type.value,
+            base_url=model.base_url,
+        )
+    except GovernanceBacklogFull as exc:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": exc.code,
+                "message": "The managed Run backlog is at its configured limit.",
+                "limit": exc.limit,
+            },
+        ) from None
+    except GovernanceIntegrityError:
+        _record_governance_integrity(
+            session,
+            run_id=run.id,
+            model_id=model.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "governance_integrity_error",
+                "message": "Governance state failed integrity validation.",
+            },
+        ) from None
     session.commit()
     correlation_id = run.id
     logger.info(
@@ -183,6 +338,56 @@ def get_run(run_id: str, session: SessionDep) -> EvaluationRun:
     return _get_run_or_404(session, run_id)
 
 
+@router.get(
+    "/{run_id}/audit",
+    response_model=AuditEventList,
+    summary="分页查看 Run 审计事件",
+)
+def list_run_audit_events(
+    run_id: str,
+    session: SessionDep,
+    pagination: PaginationDep,
+) -> AuditEventList:
+    """Return retained, typed events in stable chronological order."""
+
+    _get_run_or_404(session, run_id)
+    filters = (AuditEvent.run_id == run_id,)
+    total = session.scalar(select(func.count()).select_from(AuditEvent).where(*filters)) or 0
+    events = list(
+        session.scalars(
+            select(AuditEvent)
+            .where(*filters)
+            .order_by(AuditEvent.occurred_at, AuditEvent.id)
+            .offset(pagination.offset)
+            .limit(pagination.limit)
+        )
+    )
+    try:
+        items = [_audit_event_read_item(event) for event in events]
+    except AuditIntegrityError as exc:
+        logger.error(
+            "Retained Run audit event failed read validation",
+            extra={
+                "event": "run_audit_integrity_error",
+                "run_id": run_id,
+                "result": "rejected",
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "audit_event_integrity_error",
+                "message": "A retained audit event failed integrity validation",
+            },
+        ) from exc
+    return AuditEventList(
+        items=items,
+        total=total,
+        offset=pagination.offset,
+        limit=pagination.limit,
+    )
+
+
 @router.post("/{run_id}/cancel", response_model=EvaluationRunRead, summary="协作式取消 Run")
 def cancel_run(run_id: str, session: SessionDep, settings: SettingsDep) -> EvaluationRun:
     repository = _lease_repository(session, settings)
@@ -241,6 +446,11 @@ def list_responses(
             "estimated_cost": float(response.estimated_cost)
             if response.estimated_cost is not None
             else None,
+            "provider_request_id": response.provider_request_id,
+            "returned_model": response.returned_model,
+            "system_fingerprint": response.system_fingerprint,
+            "finish_reason": response.finish_reason,
+            "http_attempt_count": response.http_attempt_count,
             "error_type": response.error_type,
             "error_message": response.error_message,
             "created_at": response.created_at,

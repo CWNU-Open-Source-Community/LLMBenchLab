@@ -3,7 +3,7 @@ import { AlertTriangle, ArrowLeft, Ban, CheckCircle2, ChevronDown, Clock3, Copy,
 import { Link, useParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
-import type { EvaluationResponse, EvaluationRun } from "../api/types";
+import type { EvaluationResponse, EvaluationRun, GovernanceRunStatus } from "../api/types";
 import { EmptyState, ErrorState, LoadingState } from "../components/AsyncState";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
@@ -16,6 +16,98 @@ function snapshotLabel(run: EvaluationRun, group: "model" | "benchmark", key: st
   if (typeof value !== "object" || value === null) return "—";
   const selected = (value as Record<string, unknown>)[key];
   return typeof selected === "string" ? selected : "—";
+}
+
+type GovernanceNotice = {
+  tone: GovernanceRunStatus | "unknown";
+  title: string;
+  detail: string;
+};
+
+const governanceScopeLabels = {
+  global: "全局",
+  provider: "Provider",
+  model: "模型",
+  run: "Run",
+} as const;
+
+const governanceLimitLabels = {
+  concurrency: "并发额度暂时占满",
+  rpm: "每分钟请求额度暂时占满",
+  tpm: "每分钟 Token 额度暂时占满",
+  overdrawn: "已发生保守结算超额",
+  request_budget_exhausted: "累计请求硬预算已耗尽",
+  token_budget_exhausted: "累计 Token 硬预算已耗尽",
+  cost_budget_exhausted: "累计费用硬预算已耗尽",
+} as const;
+
+function governanceReasonLabel(reason: string | null): string {
+  if (!reason) return "治理服务未提供可公开原因";
+  const scoped = /^governance_(global|provider|model|run)_(concurrency|rpm|tpm|overdrawn|request_budget_exhausted|token_budget_exhausted|cost_budget_exhausted)$/.exec(reason);
+  if (scoped) {
+    const scope = governanceScopeLabels[scoped[1] as keyof typeof governanceScopeLabels];
+    const limit = governanceLimitLabels[scoped[2] as keyof typeof governanceLimitLabels];
+    return `${scope}${limit}`;
+  }
+  const labels: Record<string, string> = {
+    governance_input_bound_unknown: "缺少显式输入 Token 上界",
+    governance_unbounded_output: "缺少有限输出 Token 上界",
+    governance_pricing_unknown: "缺少冻结的输入或输出价格",
+    governance_provider_retry_exhausted: "Provider HTTP 重试次数已耗尽",
+    governance_integrity_error: "治理事实未通过完整性校验",
+  };
+  return labels[reason] ?? "治理服务返回了未公开原因；请查阅受控审计事件";
+}
+
+function formatDatabaseUtc(value: string | null): string {
+  if (!value) return "数据库尚未提供最早重新调度时间";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "数据库返回的重新调度时间无效";
+  return `数据库最早重新调度时间：${date.toISOString().replace("T", " ").replace("Z", " UTC")}`;
+}
+
+function governanceNotice(run: EvaluationRun): GovernanceNotice {
+  switch (run.governance_status) {
+    case "managed":
+      return {
+        tone: "managed",
+        title: "数据库治理已启用",
+        detail: "此 Run 按创建时冻结的并发、速率与累计预算策略执行。",
+      };
+    case "delayed":
+      return {
+        tone: "delayed",
+        title: "治理背压中，Run 已暂缓（deferred）",
+        detail: `${governanceReasonLabel(run.governance_reason)}。${formatDatabaseUtc(run.governance_not_before)}；到达该 UTC 时间不保证立即取得 Worker。`,
+      };
+    case "exhausted":
+      return {
+        tone: "exhausted",
+        title: "治理硬边界已终止 Run",
+        detail: `${governanceReasonLabel(run.governance_reason)}。此终态不会自动重试，请核对冻结策略后再创建新 Run。`,
+      };
+    case "legacy_unmanaged":
+      return {
+        tone: "legacy_unmanaged",
+        title: "此 Run 未纳入数据库治理",
+        detail: "legacy_unmanaged 仅兼容旧 Run 或可信本地 CLI；当前 Web/API policy 不保证其并发、RPM/TPM 或累计费用硬边界。",
+      };
+    default:
+      return {
+        tone: "unknown",
+        title: "治理状态不可识别",
+        detail: "页面不会展示未经验证的状态或原因；请以受控审计与数据库事实为准。",
+      };
+  }
+}
+
+function runStatusHeading(run: EvaluationRun): string {
+  if (run.governance_status === "delayed") return "治理背压中，等待重新调度";
+  if (run.governance_status === "exhausted") return "治理硬边界已终止运行";
+  if (run.status === "running") return "评测正在逐题执行";
+  if (run.status === "completed") return "评测证据已完整保存";
+  if (run.status === "pending") return "等待后台任务领取";
+  return "运行已进入终态";
 }
 
 export function RunDetailPage() {
@@ -73,6 +165,7 @@ export function RunDetailPage() {
   const errors = useMemo(() => responses.filter((item) => item.error_type), [responses]);
   const responseStart = responseTotal ? responseOffset + 1 : 0;
   const responseEnd = Math.min(responseOffset + responses.length, responseTotal);
+  const governance = run ? governanceNotice(run) : null;
 
   if (loading) return <LoadingState label="正在读取运行证据" />;
   if (error && !run) return <ErrorState message={error} retry={() => void load()} />;
@@ -80,7 +173,12 @@ export function RunDetailPage() {
   return <>
     <PageHeader eyebrow="EVALUATION EVIDENCE" title={snapshotLabel(run, "model", "name")} description={`${snapshotLabel(run, "benchmark", "slug")} · ${run.protocol_version}`} actions={<><Link className="secondary-button" to="/runs"><ArrowLeft size={14} /> 评测记录</Link><button className="secondary-button" onClick={copyId}><Copy size={14} /> 复制 Run ID</button>{!terminal && <button className="danger-button" disabled={cancelling} onClick={() => void cancel()}><Ban size={14} /> {cancelling ? "取消中…" : "取消 Run"}</button>}</>} />
     {error && <ErrorState message={error} retry={() => void load()} />}
-    <section className="run-status-panel panel"><div className="run-status-head"><div><StatusBadge status={run.status} /><h2>{run.status === "running" ? "评测正在逐题执行" : run.status === "completed" ? "评测证据已完整保存" : run.status === "pending" ? "等待后台任务领取" : "运行已进入终态"}</h2><p>创建于 {formatUtc8(run.created_at)}</p></div><div className="score-block"><span>严格总分</span><strong>{run.score == null ? "—" : run.score.toFixed(1)}</strong><small>/ 100</small></div></div><div className="progress-row"><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><span>{run.completed_questions} / {run.total_questions} 题 · {progress.toFixed(0)}%</span></div>{run.error_message && <div className="run-error"><AlertTriangle size={15} />{run.error_message}</div>}</section>
+    <section className="run-status-panel panel">
+      <div className="run-status-head"><div><StatusBadge status={run.status} /><h2>{runStatusHeading(run)}</h2><p>创建于 {formatUtc8(run.created_at)}</p></div><div className="score-block"><span>严格总分</span><strong>{run.score == null ? "—" : run.score.toFixed(1)}</strong><small>/ 100</small></div></div>
+      <div className="progress-row"><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><span>{run.completed_questions} / {run.total_questions} 题 · {progress.toFixed(0)}%</span></div>
+      {governance && <div className={`governance-notice governance-${governance.tone}`} aria-live="polite">{governance.tone === "managed" ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}<span><strong>{governance.title}</strong><small>{governance.detail}</small></span></div>}
+      {run.error_message && <div className="run-error"><AlertTriangle size={15} />{run.error_message}</div>}
+    </section>
     <section className="run-metrics"><article><span><CheckCircle2 size={14} /> 回答准确率</span><strong>{formatPercent(run.answered_accuracy)}</strong><small>仅可评答案</small></article><article><span>完成率</span><strong>{formatPercent(run.completion_rate)}</strong><small>成功非空响应</small></article><article><span><Clock3 size={14} /> 平均延迟</span><strong>{formatLatency(run.average_latency_ms)}</strong><small>已报告题目</small></article><article><span><Cpu size={14} /> Token</span><strong>{formatTokenTotal(run.input_tokens, run.output_tokens)}</strong><small>输入 {formatTokens(run.input_tokens)} / 输出 {formatTokens(run.output_tokens)}</small></article><article><span>估算成本</span><strong>{formatCost(run.estimated_cost)}</strong><small>按快照价格；缺失 usage 时未知</small></article><article><span>错误题</span><strong>{run.error_questions}</strong><small>正确 {run.correct_questions}</small></article></section>
     <section className="panel evidence-panel">
       <div className="panel-heading"><div><span className="section-index">EVIDENCE</span><h2>逐题结果</h2></div><span className="evidence-count">显示 {responseStart}–{responseEnd} / 共 {responseTotal} 条 · 本页 {errors.length} 条错误</span></div>

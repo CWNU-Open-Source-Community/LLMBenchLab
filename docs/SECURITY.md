@@ -2,9 +2,9 @@
 
 ## 1. 适用范围与安全结论
 
-LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用的本地评测工具，不是可直接暴露公网的服务。Phase 2 已交付 PostgreSQL、Redis 通知和独立 Worker 组成的可靠执行基础，但当前仍没有登录、授权、租户隔离、请求限流、TLS 终止或生产级秘密管理。任何能够访问 API 的人都能读取题目与参考答案、注册模型、导入数据集、启动可能产生费用的 Run，并读取原始模型输出。
+LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用的本地评测工具，不是可直接暴露公网的服务。Phase 2 工作树除 PostgreSQL、Redis 通知和独立 Worker 的可靠执行基础外，已实现 managed Web/API Run 的数据库权威四层 Provider admission、逐 attempt ledger、背压/公平调度和 typed audit/history；但当前仍没有登录、授权、租户隔离、HTTP API 按主体限流、TLS 终止或生产级秘密管理。任何能够访问 API 的人都能读取题目与参考答案、注册模型、导入数据集、改写完整 governance policy、启动可能产生费用的 Run，并读取原始模型输出。
 
-安全默认姿势是：只监听本机或可信开发网络、优先使用 Mock、只导入自己审查过的数据集、只配置可信的 Provider 地址，并分别保护数据库、部署 credential keyring、`artifacts/` 与备份。Web 可以在 Model 表单提交真实 Key，但当前 loopback HTTP、无鉴权边界不适合远程或不受信网络；可信本地正式评测 CLI 的发现、费用确认和最小 canary 也不是公网安全层或预算控制器。
+安全默认姿势是：只监听本机或可信开发网络、优先使用 Mock、只导入自己审查过的数据集、只配置可信的 Provider 地址，并分别保护数据库、部署 credential keyring、`artifacts/` 与备份。Web 可以在 Model 表单提交真实 Key，但当前 loopback HTTP、无鉴权边界不适合远程或不受信网络；Provider admission 不能替代入口鉴权，可信本地正式评测 CLI 的发现、费用确认和最小 canary 仍是 `legacy_unmanaged`，也不是公网安全层或预算控制器。
 
 本文描述已实现控制、仍存在的风险和公开部署前的硬性改造。它不构成第三方 Provider 或 Benchmark 的安全保证。
 
@@ -15,6 +15,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 - Provider API Key、访问令牌、兼容模式环境变量、AES-GCM credential envelope 与部署 keyring。
 - Benchmark 题目、参考答案、metadata、许可证与来源信息；未来可能包含私有数据。
 - 原始模型回答、解析结果、错误信息、运行配置快照和排行榜证据。
+- Governance policy/scope/minute counters、逐 Provider attempt reservation/settlement ledger、typed audit/history、credential audit 与安全归一化 Provider metadata。
 - PostgreSQL/SQLite 中的数据库事实、SQLite 源库与备份、Redis AOF/队列元数据、宿主机文件和本地网络访问能力。
 - 用户的 Provider 配额、预算与账号信誉。
 - GitHub 仓库、Actions 权限、发布产物和依赖供应链。
@@ -46,8 +47,8 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 | 固定数据源/缓存漂移 | 下载被替换、缓存投毒或第三方题目误提交 | 固定 HTTPS revision、大小和 SHA-256；缓存拒绝 symlink；`artifacts/` Git 忽略 | Hash 不是发布者签名；HTTPS redirect 只有 scheme 检查，许可与来源仍需人工复核 |
 | XSS/内容注入 | 窃取页面数据或误导操作者 | React 默认文本转义；服务端不执行内容 | 未来引入 Markdown/HTML 时可能破坏边界；无 CSP |
 | 未授权访问 | 读写全部评测数据、启动付费 Run | 建议仅绑定本机；CORS 显式配置 | CORS 不是鉴权，非浏览器客户端不受其约束 |
-| 费用滥用 | 大量、长输出或重复上游请求造成费用 | Run 题内并发为 1–4、Run attempt 有限、本地 Response 幂等；数字 `max_tokens` 限为 `1..131072`、空闲读取超时限为 `1..1800s`；Web 显示数据集建议与费用警告；真实评测 CLI 显示尝试上界、要求确认并先做小 canary | `max_tokens:null` 仅省略字段并采用 Provider 默认，不是无限或免费；数字/超时上限也不是 Token/金额预算；canary 可能计费；SSE transport 断线仍按 protocol-v1 有限重试，可能重复上游计算/计费；无 Provider 速率限制、预算、完整背压或熔断；Provider 调用不是 exactly-once |
-| 数据丢失/篡改 | 证据不可复现或 stored Key 不可用 | 数据库约束、Hash、Run 快照、租约 fencing；credential AAD 绑定 Model/origin；PostgreSQL 是任务事实来源 | 数据库/备份整体未加密；keyring 丢失不可恢复；无完整审计日志，访问与恢复仍由用户负责 |
+| 费用滥用 | 大量、长输出或重复上游请求造成费用 | managed Run 将 policy/override 冻结进快照，在 global/provider/model/run 四层原子裁决 concurrency、fixed-minute RPM/TPM 与累计 request/Token/cost；backlog 有界、逐 HTTP retry 先 reserve/`send_started` 再 actual/conservative settlement；hard Token/cost 缺输入/输出上界或价格会在外发前 fail closed | 默认 policy 可关闭限制；`legacy_unmanaged` CLI 不在该边界；fixed-minute 允许边界突发；崩溃后的 Provider 幽灵请求、重复远端调用与 Provider 账单不能由本地 permit/ledger 消除；没有熔断，Provider 调用不是 exactly-once |
+| 数据丢失/篡改 | 证据不可复现或 stored Key 不可用 | 数据库约束、Hash、Run 快照、租约 fencing；credential AAD 绑定 Model/origin；typed audit event key/payload hash 幂等，operational/security 分级保留；PostgreSQL 是任务/治理事实来源 | 数据库/备份整体未加密；keyring 丢失不可恢复；应用 append-only 不是密码学 WORM、不可抵赖或数据库管理员防篡改，访问、归档与恢复仍由用户负责 |
 | 后台任务中断 | Run 不完整或重复执行 | 独立 Worker、数据库租约/心跳/fencing、有限重试、dead-letter、数据库对账 | 不构成生产 HA；外部 Provider 副作用不能由本地幂等约束去重 |
 | Redis 暴露或篡改 | 伪造/重放任务通知、拒绝服务、元数据泄漏 | Compose 不发布 Redis 宿主端口；消息不是事实来源且不含 Prompt/Key | 本地 Compose 未启用 Redis ACL/TLS；暴露到不可信网络会破坏可用性与保密性 |
 | 供应链攻击 | 执行恶意依赖/Action | Python/Node lockfile、CI 检查 | 尚无强制 SBOM、签名验证或持续漏洞门禁 |
@@ -59,6 +60,15 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 - 对结果真实性做密码学证明；Dataset SHA-256 用于一致性，不是发布者签名。
 - 公网抗攻击、多租户隔离、合规认证、灾难恢复 SLA。
 - 安全执行任意代码。当前格式没有代码题，任何 Benchmark 内容都不会被执行。
+
+### 2.5 数据库治理与审计安全边界
+
+- 初始化前 `GET /api/v1/governance/policy` 是无副作用读取并返回 `404 governance_policy_not_initialized`；它不会把无鉴权的查询变成 policy 写入。`PUT` 必须提交全部 policy 字段，是不可变、内容寻址版本的 full-document apply，不是局部 PATCH。当前两个端点只适合可信 loopback；能够访问 `PUT` 的调用方可把限制设为 `null`（关闭）或 `0`（紧急拒绝），因此公开部署必须先加管理员授权。
+- managed Run 创建在 global admission 锁内检查 backlog，并冻结全部 20 个 policy 字段、ID/hash、opaque provider scope、question quantum 与恰好四个 Run override（input reservation、request/Token/USD lifetime budget）。policy hash 与冻结 override 在 attempt 外发前重新校验，任何一侧漂移均 fail closed。四层锁序固定为 global→provider→model→run，网络期间不持有数据库锁。hard Token/TPM 需要显式 input reservation 与有限 `max_tokens`，hard cost 还需要 USD input/output price；缺失时在外发前 fail closed。治理 USD 公开上限为 `10000000.00000000`，Decimal 响应使用 JSON string；该上限使 SQLite IEEE-754 间距低于半个 `1e-8` 量化单位，PostgreSQL 则使用精确 `NUMERIC(20,8)`。
+- 每个 HTTP attempt 的 ledger 状态只允许 `reserved → send_started → settled_actual|settled_conservative`，或可证明未开始外发时 `reserved → released_pre_send`。明确 pre-send release 保留旧 ledger 并开启新 generation，只重试当前未发送 ordinal，不重置已经 `send_started` 的较小 ordinal。commit/usage/transport 不确定一律保守结算；这防止本地预算按零释放，却可能低估剩余额度。
+- scope 和 UTC-minute 物化 counter 会在治理变更前从 never-delete ledger 重算；高、低漂移都停止新 admission/结算/对账，并由 API/Worker 边界用独立短事务尽力记录固定、不含损坏值的 `governance_integrity_error`。过期 lease takeover 在旧 ledger 校验失败时撤销新 owner 并使 Run fail closed，防止新 Worker 外发。
+- 租约失效后 reconciler 会释放/结算本地 reservation，避免永久占用 admission。该动作无法停止已从 `send_started` 外发、仍在 Provider 运行的幽灵请求，也不证明崩溃后的真实远端并发仍受本地上限约束。本地 consumed 只用于 admission 与审计，必须另行核对 Provider 账单。
+- typed audit payload 只接受 allowlist 短枚举/数值和 opaque ID，不含 Key、Authorization、URL、Prompt、原始回答或异常文本。事件重放以唯一 key 和 payload hash 检查一致性；默认 operational/security 至少保留 90/365 天。它仍是同库的应用 append-only 事实，不是 WORM 或管理员不可篡改证据。
 
 ## 3. API Key 与秘密管理
 
@@ -81,6 +91,7 @@ Web stored 流程如下：
 5. Run 没有 credential reference/envelope 列。快照只保存 source、Model ID、远端模型和 endpoint；environment 模式另保存变量名。stored 模式的 Worker 按 `run.model_id` 读取 row，并用 `run.model_id + Run snapshot base_url origin` 做 AAD 解密，绝不以当前 Model Base URL 替代快照目标。
 6. keyring 缺失/无效、未知 key id、row 缺失、密文篡改、跨 Model 或错误 origin 都会 fail closed，并在 Adapter 构造和任何 Provider 网络请求之前结束该 Run attempt。environment 变量缺失则产生安全的 `missing_api_key`，同样不会无凭据联网。
 7. 解密值只在内存中用于 `Authorization: Bearer ...`。Provider 响应在离开 Adapter 前递归脱敏：成功内容、raw usage 的对象键和所有 JSON 标量（包括数值/布尔/null）、token/status 数值、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，都会替换为 `[REDACTED]`。
+8. credential create/replace/delete/source switch 记录 `credential_changed`，origin/active-Run/恢复边界拒绝记录 `credential_rejected`，key ID/认证解密失败记录 `credential_decrypt_failed`。security audit 以数据库 UTC 记时，只保存 Model、source/action/reason 和安全 key ID，不保存 Key、origin 或 envelope；被回滚的拒绝以 server request ID 在独立短事务中幂等写入，但进程在响应前崩溃仍可能缺事件，因此不声称跨进程 exactly-once。
 
 这里的保证限定于**不把 Key 或 Provider 对 Key 的回显从凭据数据流复制进公开字段或持久化证据**。create/PATCH 精确扫描 `ModelRead` 的所有字段和 Run snapshot 的 `model` 子投影；Adapter 递归扫描 Provider 返回证据。它不扫描整个 Run 中与 Model 无关的 Benchmark/Question 固定内容，也不声称用户数据与 Key 永远不会发生独立的字面巧合。
 
@@ -105,14 +116,14 @@ Web stored 流程如下：
 - 本地 `make dev` 的 API/Worker 可能继承同一 `.env`，但只有 environment 执行路径解析已登记变量；Vite 不会自动把非 `VITE_*` 变量打入客户端。更严格部署应分别注入：API/Worker 共享 keyring，legacy Provider env 只给 Worker，frontend/migrate 两者都不给。
 - Worker 同时需要数据库与 Redis 连接能力。生产设计应拆分 API/Worker/迁移数据库角色，限制 Worker 只能访问所需表和操作，并用独立 Redis ACL、短期凭据及轮换流程代替共享本地凭据。
 - API/Worker 日志、崩溃转储、进程列表和诊断端点都属于秘密边界。不得记录环境、DSN、Authorization header、请求体、解密值或原始 Provider 请求。
-- at-least-once 只保证任务最终可再次处理；若 Worker 在 Provider 已响应而本地 Response 提交前崩溃，接管 Worker 可能重复上游调用和计费。本地 `(run_id, question_id)` 唯一约束不能消除这一外部副作用。
+- at-least-once 只保证任务最终可再次处理；逐 attempt ledger 防止同一本地逻辑 attempt 重复结算，但 `send_started` 后崩溃仍可能留下远端幽灵请求。若 Provider 已响应而本地 Response 提交前崩溃，接管 Worker 可能重复上游调用和计费；本地 `(run_id, question_id)` 唯一约束、保守 consumed 或释放 permit 都不能消除这一外部副作用或替代真实账单。
 
 ### 3.4 可信本地 CLI 秘密边界
 
 - CLI 只适合受信任的交互式机器。它将读取到的 Key 临时放入 Run 快照所引用的进程环境变量，使现有 Adapter 能复用同一秘密接口；上下文结束时恢复原值或删除临时值。拥有同一用户权限、调试/进程转储能力的程序仍可能读取内存或环境。
 - 模型发现 `GET /models`、最小 Chat canary 和正式题目请求都使用同一个 Key。任何发现到的模型 ID 若反射该 Key，预检立即失败；canary 若明确返回不同于请求目标的模型名也失败。CLI 只保存脱敏 preflight 元数据，不保存请求 header 或 Key；完整 Provider access log 不受本应用控制。
-- 在 canary 前，CLI 打印 Provider host、目标模型、题数、剩余 Run attempts 和最大 Chat HTTP 尝试数，并要求输入 `RUN`；上界按 `(缺失题数 × 剩余 Run attempts + 1 个 canary) × 3` 包含 HTTP retries，但仍不是 Token/金额预算。`--yes` 只用于操作者明确授权的非交互运行，不是预算、速率限制或安全审批。
-- `resume` 会再次读取 Key、确认并发送 canary，然后只处理本地缺失 Response。初次 canary 会固化到新 Run 快照，但 resume canary 当前不会追加为独立审计事件；逐题 request ID、返回模型名和 system fingerprint 也未持久化。远端调用不是 exactly-once，恢复前应同时检查 Provider 账单与是否仍允许继续。
+- 在 canary 前，CLI 打印 Provider host、目标模型、题数、剩余 Run attempts 和最大 Chat HTTP 尝试数，并要求输入 `RUN`；上界按 `(缺失题数 × 剩余 Run attempts + 1 个 canary) × 3` 包含 HTTP retries，但仍不是 Token/金额预算。`--yes` 只用于操作者明确授权的非交互运行，不是预算、速率限制或安全审批。该路径创建 `legacy_unmanaged` Run，不继承 managed Web/API policy。
+- `resume` 会再次读取 Key、确认并发送 canary，然后只处理本地缺失 Response。初次 canary 会固化到新 Run 快照，但 resume canary 当前不会追加为独立 audit event；逐题 request ID、返回模型名、system fingerprint、finish reason 与 HTTP attempt count 已安全归一化持久化。远端调用不是 exactly-once，恢复前应同时检查 Provider 账单与是否仍允许继续。
 - `report` 和 `prepare` 不需要 Provider Key；不得为了方便给这两条命令或 CI 注入真实凭据。
 - 正式 CLI 必须在常规 API/Worker 停止后独占数据库。代码只能拒绝已有 `running` Run，不能识别空闲 Worker；若空闲 Worker 抢到新 `pending` Run，可能在错误的 Key/进程边界发起调用。
 
@@ -126,9 +137,10 @@ Web stored 流程如下：
 - 用 `[REDACTED]` 替换当前 API Key 的精确值。
 - 识别常见 Bearer、Authorization、API key、token 和 secret 表达形式。
 - 把上游错误折叠为单行并截断到 500 字符。
-- 不保存请求头、完整上游请求或响应对象；Run 只持久化分类后的错误类型与可读消息。
+- 不保存请求头、完整上游请求或响应对象；最终 `httpx.TransportError` 在 `except` 边界外转成安全 `AdapterError`，其 `__cause__`、`__context__` 和格式化 traceback 不保留可达 request/Authorization；Run 只持久化分类后的错误类型与可读消息。
 - 不记录原始 SSE 行、事件或单个 delta；只在收到完整终止信号后使用聚合结果。
 - 对 Chat 成功内容、raw usage 的对象键和全部 JSON 标量，以及 provider request ID、返回模型名、system fingerprint、finish reason 递归执行当前 Key 的精确替换，再允许其进入后续 Runner/preflight 边界。
+- EvaluationResponse/API/report 只保存经过长度、字符和 Key 反射检查的 provider request ID、returned model、system fingerprint、finish reason 与整数 HTTP attempt count；不保存任意 raw usage object，被拒字符串归一化为 `null`。
 - SSE `delta.content` 先完整聚合、再执行当前 Key 的精确替换，覆盖 Key 被分到多个 delta 的情况；这仍不是通用 DLP。
 - 把 `finish_reason="length"` 的空输出或无法解析最终答案的输出归类为稳定的 `output_truncated`；这只是安全的诊断分类，不回显完整 Provider 响应对象或请求头。
 
@@ -176,7 +188,7 @@ Web stored 流程如下：
 3. 在连接时重新验证解析结果，处理 DNS rebinding；重定向必须禁用或对每一跳重复校验。
 4. 通过独立 egress proxy 或网络策略只允许获批 Provider，应用层校验不能替代网络层隔离。
 5. 为本地 Provider 设计显式、审计可见的 opt-in，而不是放宽所有私网访问。
-6. 增加目标审计、速率/预算限制、失败熔断和 SSRF 回归测试。
+6. 在已有 Provider attempt governance 之外增加管理员/租户对象授权、入口按主体限流、目标 allowlist audit、失败熔断和 SSRF/DNS rebinding 回归；不能把共享本地 policy 当公网身份边界。
 
 ## 6. 不可信 Benchmark
 
@@ -227,7 +239,7 @@ MVP **没有代码执行能力**。在 Phase 3 之前不得通过 `subprocess`�
 ## 8. CORS、健康探针与网络暴露
 
 - CORS Origin 来自配置；通配符 `*` 会在启动配置校验时被拒绝。
-- 默认只允许本地 Vite Origin；允许的方法为 `GET/POST/PATCH/DELETE/OPTIONS`，请求头 allowlist 只含 `Accept` 和 `Content-Type`，但会向浏览器暴露响应中的 `X-Request-ID`；`allow_credentials=false`。API 忽略任何客户端 `X-Request-ID`，每次都生成新的 server-side UUID，防止攻击者把 write-only Key 复制到该头并迫使服务反射或记录。
+- 默认只允许本地 Vite Origin；允许的方法为 `GET/POST/PUT/PATCH/DELETE/OPTIONS`，请求头 allowlist 只含 `Accept` 和 `Content-Type`，但会向浏览器暴露响应中的 `X-Request-ID`；`allow_credentials=false`。API 忽略任何客户端 `X-Request-ID`，每次都生成新的 server-side UUID，防止攻击者把 write-only Key 复制到该头并迫使服务反射或记录。
 - `TrustedHostMiddleware` 使用非空显式 Host allowlist并拒绝 `*`；不匹配的 Host 在 Model 写入/credential 持久化前被拒绝。这降低 Host-header rebinding 风险，但不是客户端认证。
 - CORS 只约束浏览器，不阻止 curl、脚本、服务端请求或被攻陷的同源页面，不能替代认证、授权或防火墙。
 - 生产前需要反向代理 TLS、认证/RBAC、请求体上限、速率限制、可信代理配置、安全响应头与审计日志。
@@ -238,7 +250,7 @@ Compose 默认只把 API 和 frontend 端口发布到宿主 `127.0.0.1`，Postgr
 健康端点也不是访问控制或完整监控：
 
 - `/live` 只证明 API 进程能响应；`/health` 只检查数据库连接；`/ready` 检查数据库、Alembic head 与 Redis，并可能在 Redis 故障时返回 `503/degraded`，同时保留数据库提交和对账能力。
-- `/tasks/metrics` 只公开数据库当前状态派生的 gauges。它没有历史 counters、延迟、完整审计或租户隔离；在无鉴权部署中，这些计数本身也是可被读取的运行元数据。
+- `/tasks/metrics` 公开数据库当前任务/governance gauges；`/tasks/history` 在同一数据库读取快照中逐条验证 retained audit 的 contract/hash/identity/retention，再公开 typed event counters 与 Run queue/execution/end-to-end p50/p95/p99，任一损坏事件使整个响应 fail closed 且不反射损坏值。pending/running cancel 都写 `run_cancel_requested`，dead-letter 单列 `run_dead_lettered`；`/runs/{id}/audit` 公开该 Run 的稳定分页 typed event。Run created/finished 与 credential audit 均取数据库 UTC。它们没有租户隔离，history 最多取 10,000 latency 样本并显式 `truncated`，audit 也不是 WORM；无鉴权时这些计数、时序、ledger 关联和 Provider metadata 都是可读取的敏感运维元数据。
 - Worker 容器 probe 只检查数据库/head 和队列依赖能力。Redis 不可用时它会报告 degraded 但以成功退出保留数据库对账路径；它**不证明 Worker 主事件循环仍在领取、心跳或推进任务**，不能替代 watchdog、进度告警或进程级 liveness。
 - API readiness 把同步数据库检查放入 `asyncio.to_thread` 并限制等待时间；asyncio 超时不会取消已进入线程的数据库驱动调用，实际资源占用仍由数据库连接/驱动/池 timeout 约束。不得把 HTTP 探针 timeout 当作数据库查询硬中止。
 
@@ -249,18 +261,21 @@ Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL
 - PostgreSQL/SQLite、Redis AOF、备份和容器 volume 整体都没有存储层加密；只有 `model_credentials` 的 Provider Key 字段在应用层形成 AES-GCM envelope。题目、回答、endpoint、环境变量名和其他元数据仍是明文，应使用专用系统账号和最小文件权限保护，不放在云盘公共共享目录。Compose 中的 `llmbenchlab-local-only` PostgreSQL 密码只是隔离本地开发占位，不是生产秘密。
 - 数据库备份可能比在线数据库保留更久，应应用同等或更严格的访问、加密、保留和销毁策略。部署 keyring 必须单独备份：不备份会失去恢复能力，与数据库备份放在一起则失去 envelope 的隔离价值。
 - Responses API 包含 raw response、Prompt、标准答案和错误；Questions API 包含参考答案和 metadata。Web Run Detail 每次分页读取 100 条只限制单次展示量，不是授权、脱敏或数据隔离；Runs 列表中的详情链接也不会改变任何人的读取权限。不要把这些接口接入公开 Dashboard。
+- Governance policy、四层 opaque scope/Token/费用聚合、逐 attempt ledger、typed audit/history 和 Provider request/model/fingerprint/finish metadata 虽不含凭据正文，仍可暴露调用规模、费用趋势、供应商关联和故障时间线，必须与 Run 证据同级保护。应用 append-only 与 payload hash 不阻止数据库管理员修改或删除这些行。
 - 正式评测报告同样包含题目、参考答案、raw response、解析和错误证据。Exporter 创建权限收紧的目录/文件、拒绝覆盖已有目标并脱敏常见秘密形态；报告指标从计划题与 Responses 重算，`metrics_provenance` 会显式标注 Run 汇总字段漂移。操作者仍须像保护数据库一样保护 `summary.json`、`groups.csv` 与 `responses.jsonl`；脱敏不是内容访问控制。
 - Run 快照用于复现，会保存模型/Benchmark 标识、`credential_source`、Model ID、endpoint，以及 environment 模式的变量名称；不会保存 credential row ID、ciphertext、nonce、key id 或 plaintext。设计环境变量名时避免包含机密业务信息。
 - 删除 Model 会在存在历史 Run 时被拒绝，以保护证据；MVP 尚无合规删除、匿名化或数据生命周期功能。
 - 备份与恢复步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
-显式 SQLite→PostgreSQL importer 会按依赖顺序复制六张核心表的**完整内容**：`models`、`model_credentials`、`benchmarks`、`questions`、`evaluation_runs`、`evaluation_responses`。因此它会复制 encrypted credential 的 algorithm/key id/nonce/ciphertext，也会复制题目、参考答案、Prompt/模型快照、原始回答、错误和 `api_key_env` 名称，但不会解密或打印 row 内容。它只能在受信环境中针对停止写入、已在 Alembic head 的源库和空目标执行；源库、目标库、对账输出与中间备份必须按最高敏感数据等级保护。工具输出只包含每表行数、主键集 SHA-256 digest 和 canonical row SHA-256 digest；摘要仍可能用于关联同一快照，不等于加密或访问控制。
+显式 SQLite→PostgreSQL importer 会按依赖顺序复制 12 张核心/治理表的**完整内容**：`governance_policies`、`models`、`model_credentials`、`benchmarks`、`questions`、`governance_scopes`、`evaluation_runs`、`evaluation_responses`、`governance_minute_buckets`、`question_executions`、`provider_call_reservations`、`audit_events`。因此它会复制 encrypted credential envelope、题目/答案/快照/原始回答、typed Provider metadata、policy、Token/费用 ledger 与 audit，但不会解密或打印 row 内容。它只能在受信环境中针对停止写入、已在 Alembic head 且无 active reservation 的源库和空目标执行；在打开目标前还会从全部 ledger 重算 scope/minute 计数，任何高/低漂移或缺 bucket 都拒绝导入。源库、目标库、对账输出与中间备份必须按最高敏感数据等级保护。工具输出只包含每表行数、主键集 SHA-256 digest 和 canonical row SHA-256 digest；摘要仍可能用于关联同一快照，不等于加密或访问控制。
 
 - 含凭据的目标 DSN 必须通过 `--target-env ENV_VAR`（默认 `LLMBENCHLAB_DATABASE_URL`）读取；`--target` 只接受无密码 URL。仍需防止环境、进程转储和 CI 配置泄露 DSN。
 - 退出码 `0` 表示提交后对账成功；退出码 `2` 表示提交前失败并回滚目标事务。
-- 退出码 `4` 表示 PostgreSQL 未确认 `COMMIT` 结果：原子事务保证目标应为“空”或“完整”，但客户端不知道是哪一种。**禁止盲目重试**，必须先检查目标六表、Alembic head 和已有对账证据。
+- 退出码 `4` 表示 PostgreSQL 未确认 `COMMIT` 结果：原子事务保证目标应为“空”或“完整”，但客户端不知道是哪一种。**禁止盲目重试**，必须先检查目标 12 表、Alembic head 和已有对账证据。
 - 退出码 `3` 表示 `COMMIT` 已确认、但提交后验证或报告失败；导入已经提交。**禁止盲目重试或把它描述为回滚**，应先只读核验目标，必要时从已验证备份执行人工恢复。
 - 工具是单向导入，不提供 PostgreSQL→SQLite 自动回迁。schema downgrade 也不等于数据平台回滚。
+
+`20260827_0004 → 0003` 会移除治理/ledger/audit/Provider metadata，guard 因而在第一条 DDL 前拒绝任何相关表行或新 Run/Response 事实。正常 bootstrap/运行后的数据库不可原地 downgrade；应优先向前修复，或恢复经核验的 pre-0004 备份并保留 post-0004 只读 ledger/audit 归档。只有隔离空数据库才用于 `0004 → 0003 → 0004` 往返验证；详见 [OPERATIONS.md](OPERATIONS.md)。
 
 ## 10. 依赖与构建供应链
 
@@ -302,10 +317,10 @@ Mock CI 不需要任何 Provider Key，也禁止配置真实模型凭据。标�
 
 下列事项未完成前，不得把实例称为生产就绪：
 
-- 身份认证、对象级授权、管理员权限、审计日志和安全会话/API Token 设计。
+- 身份认证、对象级授权、管理员权限、安全会话/API Token，以及把现有 typed audit 送入受控归档/WORM 或等价独立安全日志。
 - SSRF 应用层校验与网络层出站 allowlist。
-- Provider 级限流、全局预算、完整背压、公平调度、容量上限与生产级 Worker 隔离；当前可靠执行基础不等于生产 HA。
-- 完整历史 counters/延迟指标、不可抵赖审计事件、Worker 主循环 liveness、告警与经过演练的运行手册。
+- 将现有共享 DB governance 扩展为认证主体/租户 policy、Provider 熔断和生产级 Worker 隔离；在目标硬件与精确提交重跑真实工作负载容量/HA 验证，不能把当前 Mock dirty-worktree 基线当 SLA。
+- 将现有 typed counters/p50/p95/p99 接入 exporter、监控面板和告警，补 Worker 主循环 liveness、不可抵赖审计选项与经过演练的多主机恢复；当前 Runbook/Mock 故障演练不等于生产 HA。
 - TLS、反向代理请求体限制、安全响应头、CSP、Host/代理信任配置。
 - 私有题目、参考答案、raw response 的访问控制、静态加密、保留与删除策略。
 - 集中 secrets manager、Key 轮换、备份加密与恢复演练。
@@ -313,4 +328,4 @@ Mock CI 不需要任何 Provider Key，也禁止配置真实模型凭据。标�
 - 安全测试：鉴权绕过、IDOR、SSRF/DNS rebinding、恶意 ZIP、资源耗尽、XSS、限流、备份恢复和故障注入。
 - 如引入代码题，完成第 7 节的专用隔离与逃逸测试。
 
-部署限制与生产改造总表见 [DEPLOYMENT.md](DEPLOYMENT.md)。
+部署限制与生产改造总表见 [DEPLOYMENT.md](DEPLOYMENT.md)；治理/settlement/恢复 Runbook 见 [OPERATIONS.md](OPERATIONS.md)，当前 Mock-only 容量证据与支持边界见 [PERFORMANCE.md](PERFORMANCE.md)。

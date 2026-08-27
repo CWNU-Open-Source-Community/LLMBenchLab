@@ -113,4 +113,8 @@ def build_evaluation_run(
         code_commit_sha=git_commit_sha(),
         total_questions=benchmark.question_count,
         max_attempts=settings.worker_max_attempts,
+        input_token_reservation=payload.input_token_reservation,
+        lifetime_request_budget=payload.lifetime_request_budget,
+        lifetime_token_budget=payload.lifetime_token_budget,
+        lifetime_cost_budget_usd=payload.lifetime_cost_budget_usd,
     )

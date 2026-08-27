@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from app.adapters import AdapterError, OpenAICompatibleAdapter
 from app.core.config import get_settings
 from app.core.logging import SanitizedJsonFormatter
 from app.db.session import SessionLocal, engine
-from app.models import EvaluationRun, Model, ModelCredential
+from app.models import AuditEvent, EvaluationRun, Model, ModelCredential
 from app.reports import export_run_report
 from app.runners.evaluation_runner import EvaluationRunner
 from app.security import CredentialCryptoError, CredentialKeyring, EncryptedCredential
@@ -751,6 +752,31 @@ def test_worker_decrypts_stored_key_and_wrong_keyring_fails_closed(
         runner._load_snapshots(run["id"])
     assert str(caught.value) == "credential_keyring_unavailable"
     _assert_secret_absent(CANARY, caught.value, repr(caught.value))
+
+    with SessionLocal() as session:
+        decrypt_events = list(
+            session.scalars(
+                select(AuditEvent)
+                .where(
+                    AuditEvent.model_id == created.json()["id"],
+                    AuditEvent.event_type == "credential_decrypt_failed",
+                )
+                .order_by(AuditEvent.occurred_at, AuditEvent.id)
+            )
+        )
+    assert len(decrypt_events) == 1
+    event = decrypt_events[0]
+    assert event.payload == {"reason": "decrypt_failed", "key_id": "fixture-v1"}
+    assert event.retention_class.value == "security"
+    assert event.expires_at - event.occurred_at == timedelta(days=365)
+    assert event.run_id is None
+    assert event.question_id is None
+    assert event.worker_id is None
+    assert event.reservation_id is None
+    rendered_event = json.dumps(event.payload, sort_keys=True)
+    _assert_secret_absent(CANARY, rendered_event)
+    assert "provider.example" not in rendered_event
+    assert not ({"api_key", "ciphertext", "nonce", "base_url"} & event.payload.keys())
 
 
 @pytest.mark.asyncio

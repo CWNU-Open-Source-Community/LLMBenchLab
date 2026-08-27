@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -140,6 +141,25 @@ def test_validated_model_defaults_apply_when_run_fields_are_omitted(client) -> N
 
     assert run["status"] == "completed"
     assert run["model_parameters_snapshot"]["generation"] == defaults
+
+
+def test_run_lifecycle_timestamps_ignore_worker_host_clock_skew(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        evaluation_runner_module,
+        "utc_now",
+        lambda: datetime(2099, 1, 1, tzinfo=UTC),
+        raising=False,
+    )
+    model = _register_mock(client, "Database Clock Mock")
+    benchmark = _reload_demo(client)
+
+    run = _run_to_terminal(client, model["id"], benchmark["id"])
+
+    created_at = datetime.fromisoformat(run["created_at"])
+    started_at = datetime.fromisoformat(run["started_at"])
+    finished_at = datetime.fromisoformat(run["finished_at"])
+    assert created_at <= started_at <= finished_at
+    assert finished_at.year != 2099
 
 
 def test_parse_error_evidence_identifies_nonempty_truncated_output() -> None:

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings
 from app.core.logging import correlation_scope, normalize_correlation_id
+from app.governance import GovernanceIntegrityError, record_governance_integrity_event
 from app.runners.evaluation_runner import EvaluationRunner
 from app.runners.run_leases import ReapReport, RunLeaseRepository
 from app.task_queue import QueueUnavailable, RedisRunQueue, RunTaskDelivery
@@ -40,6 +41,7 @@ class WorkerService:
         lease_repository: RunLeaseRepository | None = None,
         runner: EvaluationRunner | None = None,
     ) -> None:
+        self._session_factory = session_factory
         self.worker_id = worker_id or default_worker_id()
         self._settings = settings
         self._run_queue = run_queue
@@ -395,7 +397,9 @@ class WorkerService:
 
     @staticmethod
     def _reaped_any(report: ReapReport) -> bool:
-        return bool(report.cancelled or report.dead_lettered or report.completed)
+        return bool(
+            report.cancelled or report.dead_lettered or report.completed or report.retry_scheduled
+        )
 
     def _queue_failure(self, event: str) -> None:
         if self._queue_available is not False:
@@ -418,11 +422,35 @@ class WorkerService:
     def _reap_expired(self) -> ReapReport | None:
         try:
             report = self._repository.reap_expired()
+        except GovernanceIntegrityError:
+            try:
+                record_governance_integrity_event(
+                    self._session_factory,
+                    worker_id=self.worker_id,
+                )
+            except Exception:
+                logger.error(
+                    "Governance integrity evidence could not be recorded",
+                    extra={
+                        "event": "governance_integrity_audit_failed",
+                        "worker_id": self.worker_id,
+                        "result": "not_recorded",
+                    },
+                )
+            logger.error(
+                "Expired Run reconciliation failed governance integrity validation",
+                extra={
+                    "event": "worker_reap_governance_integrity_error",
+                    "worker_id": self.worker_id,
+                    "result": "paused",
+                },
+            )
+            return None
         except SQLAlchemyError:
             self._database_failure("worker_reap_database_unavailable")
             return None
         self._database_recovered()
-        if report.cancelled or report.dead_lettered or report.completed:
+        if report.cancelled or report.dead_lettered or report.completed or report.retry_scheduled:
             logger.info(
                 "Expired Run reconciliation completed",
                 extra={
@@ -430,7 +458,8 @@ class WorkerService:
                     "worker_id": self.worker_id,
                     "result": (
                         f"cancelled={report.cancelled},completed={report.completed},"
-                        f"dead_lettered={report.dead_lettered}"
+                        f"dead_lettered={report.dead_lettered},"
+                        f"retry_scheduled={report.retry_scheduled}"
                     ),
                 },
             )

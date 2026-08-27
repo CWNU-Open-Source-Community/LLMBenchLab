@@ -169,6 +169,13 @@ def completed_report_run(client, db_session) -> str:
                 input_tokens=1,
                 output_tokens=2,
                 estimated_cost=Decimal("0.001"),
+                provider_request_id=(
+                    "provider-request-1" if index == 0 else _FAKE_SECRET if index == 2 else None
+                ),
+                returned_model=("vendor/model-v1" if index == 0 else None),
+                system_fingerprint=("fp_123" if index == 0 else None),
+                finish_reason=("stop" if index == 0 else None),
+                http_attempt_count=(2 if index == 0 else None),
                 error_type=error_type,
                 error_message=error_message,
             )
@@ -266,6 +273,23 @@ def test_export_run_report_pages_all_evidence_and_partitions_groups(
         "__ungrouped__",
     }
     assert all("metadata" not in item for item in responses)
+    assert {
+        field: responses[0][field]
+        for field in (
+            "provider_request_id",
+            "returned_model",
+            "system_fingerprint",
+            "finish_reason",
+            "http_attempt_count",
+        )
+    } == {
+        "provider_request_id": "provider-request-1",
+        "returned_model": "vendor/model-v1",
+        "system_fingerprint": "fp_123",
+        "finish_reason": "stop",
+        "http_attempt_count": 2,
+    }
+    assert responses[2]["provider_request_id"] is None
 
     report_text = "\n".join(
         path.read_text(encoding="utf-8")

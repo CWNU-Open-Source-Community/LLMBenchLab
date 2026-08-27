@@ -2,13 +2,101 @@
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.provider_attempts import (
+    ProviderAttemptContext,
+    ProviderAttemptController,
+    ProviderAttemptDisposition,
+    ProviderAttemptOutcome,
+    ProviderAttemptPermit,
+)
+
 Message = Mapping[str, Any]
 GenerationConfig = Mapping[str, Any]
+_ATTEMPT_FINISH_SHIELD_TIMEOUT_SECONDS = 5.0
+
+
+async def _reserve_provider_attempt(
+    controller: ProviderAttemptController | None,
+    context: ProviderAttemptContext | None,
+    *,
+    provider_attempt: int,
+) -> ProviderAttemptPermit | None:
+    if controller is None:
+        return None
+    assert context is not None
+    return await controller.reserve(context, provider_attempt=provider_attempt)
+
+
+async def _mark_provider_attempt_send_started(
+    controller: ProviderAttemptController | None,
+    permit: ProviderAttemptPermit | None,
+) -> None:
+    if controller is not None:
+        assert permit is not None
+        await controller.mark_send_started(permit)
+
+
+async def _finish_provider_attempt(
+    controller: ProviderAttemptController | None,
+    permit: ProviderAttemptPermit | None,
+    *,
+    disposition: ProviderAttemptDisposition,
+    outcome: ProviderAttemptOutcome,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> None:
+    if controller is not None:
+        assert permit is not None
+        await controller.finish(
+            permit,
+            disposition=disposition,
+            outcome=outcome,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+
+def _consume_task_result(task: asyncio.Task[None]) -> None:
+    with suppress(BaseException):
+        task.result()
+
+
+async def _finish_provider_attempt_after_cancellation(
+    controller: ProviderAttemptController | None,
+    permit: ProviderAttemptPermit | None,
+    *,
+    disposition: ProviderAttemptDisposition,
+    outcome: ProviderAttemptOutcome,
+) -> bool:
+    """Try one bounded, cancellation-shielded finish before reconciliation."""
+
+    if controller is None:
+        return True
+    task = asyncio.create_task(
+        _finish_provider_attempt(
+            controller,
+            permit,
+            disposition=disposition,
+            outcome=outcome,
+        )
+    )
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(task),
+            timeout=_ATTEMPT_FINISH_SHIELD_TIMEOUT_SECONDS,
+        )
+    except BaseException:
+        task.cancel()
+        task.add_done_callback(_consume_task_result)
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -63,6 +151,8 @@ class ModelAdapter(ABC):
         self,
         messages: Sequence[Message],
         generation_config: GenerationConfig,
+        *,
+        attempt_context: ProviderAttemptContext | None = None,
     ) -> ModelGenerationResult:
         """Generate one response for an already-rendered message sequence."""
 

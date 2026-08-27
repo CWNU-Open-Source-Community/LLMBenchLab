@@ -13,17 +13,19 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 | 后端单元测试 | Evaluator、Adapter、Loader/Hash、固定标准数据转换的边界语义 | `backend/tests/test_evaluators.py`、`test_adapters.py`、`test_dataset_loader.py`、`test_standard_datasets.py` | 禁止；Provider 用 MockTransport，下载用注入 fixture fetcher |
 | 正式流程组件测试 | CLI 秘密/确认/编排、模型发现/canary、完整报告和大题集有界 task | `test_evaluation_cli.py`、`test_provider_preflight.py`、`test_run_report.py`、`test_evaluation_runner_reliability.py` | 禁止；只用 fixture、MockTransport、Mock Adapter、临时数据库 |
 | API 与进程边界测试 | FastAPI Schema、状态码、秘密安全、Run 提交与 API/Worker 分离 | `backend/tests/test_api.py`、`test_run_dispatch.py`、`test_process_boundaries.py` | 禁止 |
+| Governance / audit 测试 | full-document policy/hash/Run overrides、四层 admission/ledger 派生物完整性、fail-closed Token/cost、pre-send generation、公平 slice、typed history/audit、Provider metadata 与 credential audit | `test_governance.py`、`test_governance_api.py`、`test_audit_api.py`、`test_task_history_api.py`、`test_response_metadata_api.py`、`test_credential_audit.py` | 禁止；SQLite/Mock/MockTransport |
 | 租约与 Worker 测试 | 条件领取、fencing、心跳、取消、幂等 Response、重试/恢复、队列 ACK | `test_run_leases.py`、`test_evaluation_runner_reliability.py`、`test_worker.py`、`test_task_queue.py` | 禁止；SQLite/假队列 |
-| 迁移与导入回归 | SQLite/真实 PostgreSQL migration 往返，以及 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
+| 迁移与导入回归 | SQLite/真实 PostgreSQL migration、0004 populated downgrade refusal/空库往返，以及 12 表 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
 | 真实基础设施集成 | PostgreSQL 并发领取/取消竞态、Redis Streams PEL/ACK/重复投递 | `backend/tests/integration/` 与 importer 的 `integration` 用例 | 只连接显式测试 PostgreSQL/Redis；禁止 Provider |
 | Mock 端到端 Smoke | API 提交 pending Run → 独立 WorkerService → Responses → Leaderboard/Metrics | `backend/tests/test_smoke.py`，marker 为 `smoke` | 禁止 |
-| Compose 故障验收 | 六服务拓扑、双 Worker、进程/Redis 故障、取消、重复消息、migration 往返 | `scripts/phase2_acceptance.py` / `make phase2-acceptance` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
+| Compose 故障验收 | 六服务拓扑、双 Worker、进程/Redis/lease 故障、治理/ledger、取消、重复消息与 0004 安全回滚 | `scripts/phase2_acceptance.py` / `make phase2-acceptance` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
+| Mock 容量基线 | 真实 PostgreSQL 16/Redis 7、全有限 policy、1/2 Worker、精确 `202/429` backlog、cooperative quantum、跨 Model 公平性、lease/Redis/重复通知故障及 DB/queue/ledger/audit 对账 | `scripts/phase2_capacity.py` / `make phase2-capacity` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | 前端单元/组件测试 | 格式化、状态/指标、错误/空态、主要页面交互 | `frontend/src/**/*.test.ts(x)`、`frontend/tests/` | API 必须 stub/mock |
 | 静态检查 | Python lint/format、ESLint、TypeScript | Ruff、ESLint、`tsc` | 不需要 |
 | 构建检查 | 确认生产前端可编译打包 | `npm run build` | 安装完成后不需要 |
 | 配置检查 | 校验 Compose 插值和服务定义 | `docker compose config` | 不启动 Provider |
 
-单元测试定位纯逻辑错误；真实 PostgreSQL/Redis 集成测试验证方言和队列语义；Smoke 证明最小离线链路；Compose 验收才覆盖真实独立进程故障。四者不能互相替代。可靠执行基础已具备证据，但 Provider 级限流、预算、完整背压/公平调度、历史 counters/延迟、完整审计和性能基线仍未完成，因此 Phase 2 保持 `in_progress`。
+单元测试定位纯逻辑错误；真实 PostgreSQL/Redis 集成测试验证方言和队列语义；Smoke 证明最小离线链路；Compose 验收覆盖真实独立进程故障；capacity harness 记录指定环境的有界 Mock 吞吐与延迟。五者不能互相替代。四层治理、逐 attempt ledger、背压/公平调度、typed audit/history 和 Provider metadata 已有自动化覆盖；增强 capacity harness 的代码合同也已写入，但新的完整真实基础设施 evidence 仍待运行。Phase 2 仍为 `in_progress`，因为本地结果和历史 dirty evidence 都不能替代阶段 commit 的精确 SHA 远程必需检查与正式阶段收尾。
 
 ## 3. 环境准备
 
@@ -59,6 +61,7 @@ make test       # 后端 pytest + 前端 Vitest
 make lint       # Ruff + ESLint + TypeScript 类型检查
 make smoke      # 只跑完全离线的后端垂直切片
 make phase2-acceptance  # 隔离的真实 Compose 八场景可靠性验收
+make phase2-capacity    # PostgreSQL 16/Redis 7/1→2 Worker 的 Mock 容量基线
 make format     # 运行项目约定的格式化器
 ```
 
@@ -87,7 +90,7 @@ uv run alembic check
 uv run pytest -m integration tests -ra
 ```
 
-不要把真实 Provider Key 放入上述环境。这里的 PostgreSQL 必须是可破坏的专用测试库：lease integration fixture 会级联清空该 management database 的六张核心表。Importer 集成测试另在同一 loopback 服务器上创建正则约束的随机专用数据库并在结束时精确删除，不会替你保护或清空 management database。绝不能把开发、共享或生产数据库 DSN 传给这组命令。
+不要把真实 Provider Key 放入上述环境。这里的 PostgreSQL 必须是可破坏的专用测试库：integration fixture 会级联清空该 management database 的核心/治理表。Importer 集成测试另在同一 loopback 服务器上创建正则约束的随机专用数据库并在结束时精确删除，不会替你保护或清空 management database。绝不能把开发、共享或生产数据库 DSN 传给这组命令。
 
 常用的目标化命令：
 
@@ -102,6 +105,15 @@ uv run pytest \
   tests/test_run_report.py \
   tests/test_evaluation_runner_reliability.py
 uv run pytest tests/test_api.py tests/test_smoke.py
+uv run pytest -q \
+  tests/test_governance.py \
+  tests/test_governance_api.py \
+  tests/test_audit_api.py \
+  tests/test_task_history_api.py \
+  tests/test_response_metadata_api.py \
+  tests/test_credential_audit.py \
+  tests/test_phase2_capacity_script.py \
+  tests/test_adapters.py
 uv run pytest -k 'multiple_choice or numeric'
 ```
 
@@ -132,7 +144,7 @@ npm run build
 docker compose config --quiet
 ```
 
-这只验证配置渲染，不证明镜像已构建、migration 已完成或服务健康。普通启动验证使用 `make docker-up`、检查 `/api/v1/live`、`/health`、`/ready` 和 Worker probe，最后执行 `make docker-down`。真实故障验收使用 `make phase2-acceptance`；该脚本创建唯一 Compose project、随机 loopback 端口和隔离卷，失败路径也执行精确 `down -v` 并检查无项目残留。不得对日常项目名手工套用其清理命令。
+这只验证配置渲染，不证明镜像已构建、migration 已完成或服务健康。普通启动验证使用 `make docker-up`、检查 `/api/v1/live`、`/health`、`/ready` 和 Worker probe，最后执行 `make docker-down`。真实故障验收使用 `make phase2-acceptance`，容量基线使用 `make phase2-capacity`；两者都创建唯一 Compose project、随机 loopback 端口和隔离卷，失败路径也执行精确 `down -v` 并检查无项目残留。不得对日常项目名手工套用其清理命令。
 
 ## 5. 后端测试覆盖
 
@@ -152,15 +164,17 @@ docker compose config --quiet
 `test_adapters.py` 覆盖：
 
 - Mock 输出、Token、延迟、request ID 可预测且不进行 I/O。
-- Mock 可注入分类错误，用于验证单题故障隔离。
+- Mock 可注入分类错误，用于验证单题故障隔离；latency/Token/usage shape 等确定性本地配置在 reserve 前全部验证，非法配置断言治理 hook 零调用，成功与模拟 Provider error 断言 reserve→mark→actual/conservative finish 顺序。
 - OpenAI-compatible 的 Chat Completions URL、messages、`Accept: text/event-stream`、`stream:true`、`stream_options.include_usage:true` 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
 - usage 缺失时 Token 字段为 `null`。
 - 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试。
+- 每个 OpenAI-compatible HTTP retry 都经过 request-local reserve→mark-send-started→finish hook；pre-send 失败 release，usage 完整 actual，transport/usage 缺失 conservative，settlement unknown 停止后续外发。
 - 远端 HTTPS 强制、loopback HTTP 例外，以及在发送 Key 前拒绝远端明文 HTTP。
 - 真 SSE 的任意网络/UTF-8 拆包与合包、LF/CRLF/独立 CR、BOM、comment ping、多 `data` 行、role/null delta、reasoning/timings 扩展忽略、finish 后继续读取可选 usage-only 块至 `[DONE]`，以及普通 JSON fallback。
 - 非法 UTF-8/JSON/字段、SSE 内 Provider error、缺失 `[DONE]`、transport 中断的有限重试，以及同一 Adapter 并发请求的 request-local 状态隔离。
 - 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat JSON 4 MiB/错误 64 KiB、SSE wire 64 MiB/单事件 1 MiB/聚合 content 4 MiB 的上限。
 - legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；`finish_reason="length"` 的空输出分类为 `output_truncated`，普通空输出仍为 `empty_response`；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换，包括 Key 横跨 SSE delta 的聚合后替换。
+- 最终 `httpx.TransportError` 的安全 `AdapterError` 同时断言 `__cause__ is None`、`__context__ is None`，格式化 traceback 不含带 Authorization request 中的 canary Key。
 
 OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
 
@@ -198,6 +212,12 @@ OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把
 - 每题 `(run_id, question_id)` 唯一；重复投递、ACK 结果未知、Worker 接管和重跑不会双写 Response 或重复增加进度。
 - pending/running 取消、自然租约过期、完整证据直接聚合、有限退避，以及 attempt 耗尽 dead-letter 前聚合已有部分 Responses。
 - API 只在数据库 commit 后 best-effort 发布通知；commit 失败不 publish，Redis 发布失败仍保留可由数据库 reconciliation 找回的 pending Run。
+- policy GET 初始化前返回无副作用 `404 governance_policy_not_initialized`；PUT 要求全部 20 个字段，相同内容幂等、历史内容重激活原版本。Run admission 原子检查 backlog，并冻结 policy ID/version、完整 policy hash、opaque provider scope、question quantum，以及 `input_token_reservation` 和 lifetime request/Token/USD 四项 override；active attempt 必须使用这份 Run 快照，不能切换到后来激活的 policy。
+- global/provider/model/run 四层按固定锁序共同裁决 concurrency/fixed-minute request+Token/lifetime budget；hard Token/TPM 缺 input reservation 或有限 `max_tokens`、hard cost 缺价格时在 Provider 外发前 fail closed。每次 reserve/send-start/finish/reconcile/lease renew 都从完整 ledger 重算四层 scope 与 minute bucket，任何高报、低报或缺 bucket 漂移都回滚并另写最小 `governance_integrity_error`，失败事务不留下部分 reservation/counter。
+- attempt ledger 覆盖 `reserved → send_started → settled_actual|settled_conservative` 与 retained `released_pre_send`。pre-send 重试递增 QuestionExecution generation 并保留当前尚未外发的 provider ordinal；已经到达 `send_started` 的较小 ordinal 仍被消费，不能因接管重置。HTTP retry、lease takeover、取消、重复投递和 commit-unknown 重放不 double-count，失租 `send_started` 只保守结算一次。
+- Run 终态/defer/exhaust 等状态先提交，再 reconcile active ledger；reconcile 完整性失败必须保留已提交 Run 状态、向调用方失败并写独立 integrity event。过期租约接管若旧 ledger reconcile 失败，必须撤销新 lease 并把 Run 收敛到 failed/exhausted（有取消意图时为 cancelled），且不得外发 Provider 请求。
+- backlog 满稳定 429；rate/concurrency defer 不生成 0 分 Response；每个 lease 只新增 frozen question quantum，cooperative yield 不增加 `failed_attempt_count`，最久未获服务 Run 优先再调度。
+- typed audit 的唯一 event key/payload hash、90/365-day retention、稳定 Run audit 分页，以及 history window/p50/p95/p99 截断语义；history 必须在单一一致性快照中校验窗口内每个 event 的 contract、payload hash、identity、retention 和数值边界，任一损坏使整个响应以 `audit_event_integrity_error` fail closed，不能返回局部统计或反射损坏 payload。credential change/reject/decrypt failure 不含 Key/origin/envelope，Provider metadata 经过安全归一化进入 Response/API/report。
 - Worker 每次只执行一个 Run，按配置心跳；优雅停止在 grace 内等待，超时后由租约过期恢复，而不是伪造成功 ACK。
 - Runner 对大题集只创建至多 `concurrency` 个消费者 task；当前可靠性用例以 2,000 题验证并发 4 的固定 task 集，并验证取消/失租停止后续取题和 Adapter 只关闭一次。另有阻塞快照物化用例验证同步加载被移出事件循环，租约心跳可在加载期间继续运行。
 - API 进程不持有 Runner/task manager；只启动 API 时 Run 保持 `pending`，启动独立 Worker 后才执行。
@@ -215,15 +235,18 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - `/live` 不访问数据库、Redis 或 Provider；`/health` 只检查数据库；`/ready` 分别报告数据库、Alembic head 与队列状态；`/info` 保持 `llmbenchlab-protocol-v1`。
 - Redis 不可用时 `/ready` 返回脱敏的 `503 degraded`，但数据库正常时 `accepting_runs=true`、database reconciliation 可用；数据库或 schema 不可用时返回 `not_ready` 并停止接受新 Run。
 - 服务端生成并回传 UUID `X-Request-ID`，忽略客户端同名值，防止调用方把 write-only Key 复制到 header 后迫使日志/响应反射；未知路径只记录 `<unmatched>`，不把用户路径或请求正文写入应用日志。
-- `/tasks/metrics` 只从数据库派生 pending/due/running/expired/cancel/retry/dead-letter/queue-notification-error/attempt gauges。
+- `/tasks/metrics` 从数据库派生任务、governance backlog/delay/exhaustion、active Provider attempt、overdrawn scope 与 attempt/failure/dispatch gauges；`/tasks/history?window_hours=1..2160` 从 retained typed audit/Run 时间聚合 counters 与 queue/execution/end-to-end p50/p95/p99，并验证 10,000 样本上限/`truncated`。history 的 DB 时钟、窗口、事件和三组 latency 查询必须共享同一事务快照（PostgreSQL `REPEATABLE READ READ ONLY`；SQLite 显式 `BEGIN`）；任一 event contract/hash/identity/retention/数值损坏都使整个响应以 500 `audit_event_integrity_error` fail closed。pending/running cancel 都贡献 `run_cancel_requested`，dead-letter 使用专用 `run_dead_lettered`，不会与一般 terminal counter 混淆。
+- governance policy GET 在初始化前无副作用返回 `404 governance_policy_not_initialized`，PUT 必须提交全部 20 个字段；相同内容幂等、历史内容重激活原 ID/version。整数限制覆盖各字段准确边界；所有 USD 限制公开上限均为 `10000000.00000000`，请求接受 Decimal-compatible JSON number 或 decimal string，响应固定为 JSON string。SQLite 回归验证该上限内 binary64 spacing 小于半个 `0.00000001` 量子，八位小数可按相同 Decimal round-trip；PostgreSQL 仍以 `NUMERIC(20,8)` 为并发生产门禁。Run audit 端点按 `(occurred_at,id)` 稳定分页并对 retained event identity/payload/retention 做读取期完整性检查。
 - Model CRUD、分页、Provider 必需字段、远端 HTTP 拒绝/loopback 例外和名称冲突。
 - Model POST/PATCH 接受 8–8192-byte visible-ASCII write-only `api_key`，并拒绝 7-byte、空白、非 ASCII 与过长输入；GET/list 的凭据相关字段只返回非秘密状态，不返回 Key、密文、nonce 或 key id。marker 测试覆盖 201、422、409、503、500、Host 与 request-ID 反射路径。
 - create/PATCH 会对新 Key 或保存旧 Key 执行精确 `ModelRead` 全字段及 Run snapshot `model` 子投影重复检查，包括生成 ID/时间戳、数值和默认参数；测试不把该保证扩大到无关 Benchmark/Question 字面巧合。缺行、未知/旧 `key_id` 或损坏 envelope 可在 active keyring 可用时通过隔离的新 Key PATCH 修复，或只切换 Mock/legacy env 清理；夹带无关公开修改返回 422，无新 Key 保留 stored 则稳定 503，且两种失败均保持事务不变。
 - stored credential 用 AES-GCM 随机 nonce 和 Model/origin AAD；Worker 的合法三态、错误 keyring、缺行、跨模型/跨 origin/篡改 snapshot 均在 Adapter 构造前 fail closed，legacy env 路径继续通过。
+- credential change/reject/decrypt failure 使用数据库 UTC 写入 security-retention typed audit；拒绝业务事务回滚后仍可另行持久化，payload 明确不含 Key、origin 或 envelope。Run `created_at`/`finished_at` 与相应 lifecycle audit 也以数据库 UTC 对齐，跨进程历史不依赖主机墙钟。
 - SQLite 并发测试断言 Model PATCH 与 Run create 在读取 Model 前以 `BEGIN IMMEDIATE` 串行化；PostgreSQL integration 断言两条路径共用 Model row `FOR UPDATE` 锁。SQLite 竞争期间允许请求短暂等待，这仍只是低并发本地模式；生产/并发评测门禁使用 PostgreSQL。
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
 - Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。生成边界测试覆盖兼容默认 `max_tokens=256`、显式 `null`、数字上限 `131072`、读取超时默认 `60s`/上限 `1800s`，并断言最终 generation 与 `execution.timeouts_seconds.read` 快照。
 - Web stored Key 纵向用例通过模拟 SSE 验证 API 写入→Worker 解密→Adapter 聚合→逐题/Run Token 持久化→报告脱敏；另一用例保留 JSON fallback，并断言 Run 的空闲读取超时和 stream payload 到达 Provider request。
+- Response/API/report 纵向用例验证安全归一化的 provider request ID、returned model、system fingerprint、finish reason 和 HTTP attempt count；过长/控制字符/非标值 fail closed 为 `null`，raw usage object 不作为任意持久化字段暴露。
 - Runner 诊断测试覆盖非空但无法解析且 `finish_reason="length"` 时的 `output_truncated`，并确认普通解析失败仍保持 `parse_error`；两者都不改变严格计零语义。
 
 增加或修改路由时至少断言：成功状态码与 Schema、一项校验错误、404/409 等业务错误、分页/筛选（若适用），以及响应中不出现秘密值。API 行为改变必须同步更新 [API.md](API.md)。
@@ -232,13 +255,14 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 
 `backend/tests/test_migrations.py` 使用独立临时 SQLite 和 Alembic 子进程验证：
 
-- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260827_0003` 最终 revision、可靠性/凭据字段、约束和索引。
+- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260827_0004` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata 字段、约束和索引。
 - 有模型、Benchmark、题目、Run 与 Response 的 legacy schema 被一致性备份、严格识别并无损升级；题目按原插入顺序回填 0-based `position`。
 - 与当前 metadata 一致但没有版本标记的库可安全收养，已有 head 重复 preflight 不生成多余备份。
 - 部分表、server default/CHECK 内容或重名、PK/UNIQUE/FK/index/partial index、trigger、SQLite conflict policy/generated column、`STRICT`/`WITHOUT ROWID` 等未知 drift 在创建版本标记和备份前被拒绝；已在 head 的库同样验证。
 - versioned legacy 的非法 Provider 配置数据会在任何 SQLite batch DDL 前失败，不残留临时重建表。
 - `0001 -> 0002` 会按冻结的 Phase 1 语义收敛旧 `running` Run；存在 active Run 时可靠性 downgrade 被拒绝，不能静默删除租约元数据。
 - `0002 -> 0003` 会把旧 OpenAI-compatible Model 回填为 `environment`、Mock 回填为 `none`；只要凭据表有任意行，credential downgrade 在 DDL 前拒绝并保留二进制内容。
+- `0003 -> 0004` 把既有 Run 标为 `legacy_unmanaged` 并保留 protocol-v1 证据；任意 policy/scope/bucket/question execution/attempt ledger/audit、新 Run fairness/governance 字段或 Response Provider metadata 存在时，`0004 -> 0003` 必须在第一条 DDL 前拒绝。只有隔离空库用于 `0004 -> 0003 -> 0004` roundtrip。
 - 应用启动 revision 门禁拒绝未迁移库；测试夹具中的 `create_all` 仅用于隔离临时库，并显式 stamp 到与 metadata 对应的 head，不是运行时建表路径。
 
 目标化运行：
@@ -248,13 +272,13 @@ cd backend
 uv run pytest tests/test_migrations.py
 ```
 
-真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 `head -> 20260824_0001 -> head` 与 `alembic check`，验证 revision/DDL 可往返；它不提供业务数据保持证据。带数据的证据来自 Compose 验收：脚本先完成一个 15 题 Mock baseline Run，停止 API/Worker，再对该 Run 的协议 v1 核心字段及其 15 条 Response 在 head/`0001`/head 三个时点生成 canonical hash。父级 Model/Benchmark/Question 的存在由外键与迁移成功间接约束，但该 hash 不是全库快照。这个 schema downgrade 也不等于 PostgreSQL→SQLite 平台回迁。
+真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline 后停止 API/Worker，尝试 `0004 -> 0003` 并断言 guard 在任何 DDL 前拒绝，revision 和 core protocol hash 不变；另建隔离空 PostgreSQL 验证 `0004 -> 0003 -> 0004`。schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
 
 ### 6.3 SQLite→PostgreSQL 导入
 
-`backend/tests/test_sqlite_postgres_import.py` 的离线路径验证 canonical hash、只读 SQLite、head/integrity/FK/active-Run 拒绝、六表复制及提交前回滚；fixture 含真实 AES-GCM nonce/ciphertext/key-id 行并断言明文不在 SQLite。标记为 `integration` 的真实 PostgreSQL 用例还验证：
+`backend/tests/test_sqlite_postgres_import.py` 的离线路径验证 canonical hash、只读 SQLite、head/integrity/FK/active-Run/active-reservation 拒绝、固定 12 表复制及提交前回滚；源 preflight 在打开目标前从完整 reservation ledger 重算每个 scope 和 minute bucket，拒绝高报、低报、缺 bucket 或其他派生漂移。fixture 含真实 AES-GCM nonce/ciphertext/key-id、governance/ledger/audit/Provider metadata 行并断言明文不在 SQLite。标记为 `integration` 的真实 PostgreSQL 用例还验证：
 
-- 随机专用空库成功导入后，六表行数、主键集合和 canonical row hash 与源一致，JSON、Decimal、UTC、协议快照、逐题证据及 credential 二进制保持；stdout/stderr 不打印 Key、key id、nonce 或 ciphertext。
+- 随机专用空库成功导入后，12 表行数、主键集合和 canonical row hash 与源一致，JSON、Decimal、UTC、协议快照、逐题证据、governance ledger/audit 及 credential 二进制保持；stdout/stderr 不打印 Key、key id、nonce 或 ciphertext。
 - 中途复制失败整体回滚；两个不同源并发导入时恰好一个成功，另一个在目标非空检查处拒绝。
 - `COMMIT` 确认丢失使用专用 `commit_outcome_unknown` 语义；已确认提交后的 snapshot 或输出失败使用 `committed_but_verification_failed`，两者都禁止盲目重试。
 - 源 SQLite 主文件 hash 不变；输出只有阶段、表名、行数与 SHA-256 摘要，不打印题目、回答或连接 URL。
@@ -267,7 +291,7 @@ uv run pytest tests/test_migrations.py
 - `/ready` 把同步数据库/head 检查放入 `asyncio.to_thread` 并设置异步等待上限，Redis ping 也有独立 timeout；测试证明半开依赖不会阻塞 `/live`。取消 `to_thread` 的等待不会终止底层数据库驱动调用，因此最终上界仍依赖 driver、连接池和 `connect_timeout`，不能把 asyncio timeout 当作强制中止。
 - Worker `app.worker_probe` 是依赖能力探针：数据库/head 失败 exit 1；Redis 不可用但数据库 reconciliation 可用时输出 `degraded` 且 exit 0；配置错误 exit 1。它不观察 Worker 主事件循环或当前 heartbeat，不能证明进程没有卡死。
 - LLMBenchLab 应用 logger 输出脱敏 JSON、request/correlation ID 与 allowlist 字段；异常只记录类型。Uvicorn 自身及 access logger 仍使用其原生 handler，不在“全部日志统一 JSON”的保证内。
-- `/tasks/metrics` 是当下数据库 gauges，不是 Prometheus exporter，也不提供历史 counters、claim/heartbeat 延迟、trace、告警或完整审计。缺少的可观测能力仍是 Phase 2 后续工作。
+- `/tasks/metrics` 是当下数据库 gauges；`/tasks/history` 和 `/runs/{id}/audit` 已提供 retained typed counters、有限样本延迟与稳定分页事件，包括 pending cancel 的 `run_cancel_requested` 和专用 `run_dead_lettered`。它们仍不是 Prometheus exporter、trace、自动告警、WORM/不可抵赖审计或 Worker 主循环 liveness；这些生产观测能力仍需后续工作。
 
 ## 7. 完全离线 Smoke Test
 
@@ -318,7 +342,7 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 
 真实模型验收应在隔离的本地数据库上先运行 `--limit`，人工核对模型发现、付费 canary、请求上界、逐题错误、Provider 账单和报告三文件，再决定是否 `--full`。这项手工操作不得写入自动化测试结果或 CI 通过数；如果本次没有真实 API URL/Key，就应明确记录“未运行”，不能用 MockTransport 结果替代“真实 Provider 已验证”。
 
-当前自动化会验证初次 canary 快照和上述安全拒绝路径，但不能把 P2-06 写成完整：`resume` 的 canary 尚未追加为独立审计事件，逐题 Provider request ID、返回模型名和 system fingerprint 也未持久化。未来补齐时必须增加跨 resume/逐题的持久化与报告回归，而不是只断言 Adapter 调用期对象。
+当前自动化已验证 typed lifecycle/credential audit、history counters/latency、逐题 Provider request ID/returned model/system fingerprint/finish reason/HTTP attempt count 的持久化/API/报告路径，以及非法值归一化。已知观测缺口是 `resume` canary 尚未追加独立 audit event，另无 exporter/告警/WORM；不能把这些剩余边界写成 Provider exactly-once 或生产可观测性完成。
 
 ## 9. 前端测试要求
 
@@ -332,6 +356,7 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 - New Run 的 GPQA `8192/600s` 初始建议、MMLU-Pro official/direct 切换建议、手动预算不被覆盖、“应用建议”恢复、`max_tokens:null` Provider 托管提交，以及数字 `131072`/超时 `1800s` DOM 上限。
 - Runs 主导航、20 条 offset 分页、状态筛选、active Run 定时刷新、错误/空状态和详情链接。
 - Run Detail 返回 Runs 列表、终态停止轮询、逐题每页 100 条的 offset 导航，以及跨页序号/总数显示。
+- Run Detail 显示 `managed`、`delayed`、`exhausted`、`legacy_unmanaged` 治理状态，稳定 closed reason 使用受控文案，`not_before` 明确按 UTC 格式化；未知 reason 只显示安全兜底，不反射服务端原值。
 
 所有 fetch 与 Recharts 均在进程内 stub，没有真实网络；这些组件测试不会调用真实 Provider，也不会验证 Provider 实际接受某个输出长度或读取超时。Benchmark Demo 导入与完整 raw/parsed/reference/score/error 证据仍以离线后端 Smoke 和手工验收补充，不能把 DOM/API stub 结果描述成真实模型兼容性验证。
 
@@ -362,7 +387,7 @@ CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/
 | 离线 Smoke | `1 passed`（其余非 smoke 用例 deselected） |
 | Compose 可靠性 | `8/8 passed`，最终 Redis consumer group `pending=0`、`lag=0`，清理后无项目容器/卷/网络 |
 
-这些数字证明“可靠任务执行基础”垂直切片，不代表 Phase 2 全部完成；限流、预算、完整背压、公平调度、完整历史可观测性/审计和性能基线仍未验收。
+这些数字只证明 2026-08-25 当时的“可靠任务执行基础”垂直切片；它们早于后续 governance/audit/capacity 工作，不能用来判断当前实现，也不代表 Phase 2 全部完成。
 
 2026-08-27 Web Provider 凭据切片的最终当前工作树本地证据如下；精确 SHA 的远程 CI 仍须在 commit/push 后独立验证：
 
@@ -376,6 +401,23 @@ CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/
 | 其他静态门禁 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、`git diff --check` 与高置信 secret scan 通过 |
 
 keyring bootstrap 的 `24` 个定向测试覆盖所有相关本地入口强制 CPython，以及原子创建、既有文件校验、权限、symlink/路径置换、清理确认后瞬时重试、open 身份不确定与 unlink/close 清理失败停止、仅符号 errno 的错误输出。部署入口还在 `PATH` 将 macOS PyPy 放在首位时对全新临时路径执行创建/二次校验，确认 `uv` 仍选择 CPython；该手工探针不改变上表测试总数。
+
+### 10.1 历史 evidence 与当前工作树回归
+
+下表记录同一治理工作树演进中实际执行的本地验证。两个旧脚本 JSON 各自冻结其运行时 dirty snapshot；它们均早于当前增强 capacity harness，不是当前候选、精确提交 SHA 或远程 CI 的结论。脚本都移除了真实 Provider credential 环境变量，模型执行只用 Demo Mock；PostgreSQL/Redis 是被测基础设施，不是模型 Provider。
+
+| 验证 | 实际结果 |
+| --- | --- |
+| 当前工作树全量（尚非候选 SHA/远程 CI） | `make test`：后端 `603 passed, 29 skipped`，前端 Vitest `38 passed` |
+| 2026-08-28 历史定向回归 | `.venv/bin/pytest -q tests/test_governance.py tests/test_governance_api.py tests/test_audit_api.py tests/test_task_history_api.py tests/test_response_metadata_api.py tests/test_credential_audit.py tests/test_phase2_capacity_script.py tests/test_adapters.py`：`114 passed`；仅既有 Starlette/pytest-asyncio deprecation warnings |
+| Compose acceptance | `8/8 passed`；`.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-5b2d8219bf59/evidence.json`，SHA-256 `3f7299d4f7e9b8fcb09d779ff92609535cdee71a33c3869c193aa87f35158a19`；场景 8 证明 populated 0004 downgrade 在 DDL 前拒绝且 Run/hash/revision 不漂移，并用独立空库完成 `0004→0003→0004`；最终 PEL/lag 为 0，cleanup 容器/卷/网络为空 |
+| Capacity 环境与输入 | `make phase2-capacity` evidence schema v1；Darwin 25.5 arm64、8 CPU/8 GiB host，Docker Desktop 29.7.2、8 CPU/约 4.1 GB，PostgreSQL 16.14、Redis 7.4.10；`llmbenchlab-protocol-v1` Demo 15 题，dataset SHA-256 `5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe`，4 Run/阶段、concurrency 1、Mock delay 80 ms、1→2 Worker；记录 HEAD `1cd19c51ed309316047a18ed3b2a308647af495d` 且 `dirty=true` |
+| 1 Worker reference | 4 Run/60 题，7.422401 s，0.538909 Run/s、8.083637 题/s；end-to-end p50/p95/p99 = 4.578112/6.953858/7.167727 s，queue p95 5.179710 s，execution p95 1.912167 s；0 question error、0 failed attempt |
+| 2 Worker baseline | 4 Run/60 题，4.085257 s，0.979131 Run/s、14.686958 题/s；end-to-end p50/p95/p99 = 2.951079/3.899837/3.907275 s，queue p95 2.015659 s，execution p95 2.010238 s；0 question error、0 failed attempt |
+| 增强前的历史 backlog/fault/reconciliation | bounded burst 4 Run/60 题：6.423057 s、9.341347 题/s，峰值 pending 4；lease-owner SIGKILL/expiry、Redis stop/start DB reconciliation、terminal duplicate delivery 均收敛。最终 14 completed Run/210 Response/211 ledger（210 actual、1 conservative）、900 audit event、无重复 key/operation、无 active/reserved/overdrawn 漂移，PEL/lag 0；该运行没有触达拒绝阈值，也不证明当前精确 `202/429`、yield 或公平性场景 |
+| Capacity artifact/cleanup | `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-bb49c6069785/evidence.json`，SHA-256 `f78886422eeb1d6b54c3fe1da401fd411042a6b4421aeae3f4f5e7ef43444340`；cleanup 容器/卷/网络为空 |
+
+这些吞吐和百分位只描述旧 evidence 中记录的机器、dirty worktree、Mock 配置和小样本，不是当前候选、Provider 兼容/费用结果、生产 SLO/SLA、无限扩展或精确 commit 结论。增强 harness 的完整真实 Compose evidence 尚待运行；不得从旧 artifact 推导新结果。完整字段解释与复现实验见 [PERFORMANCE.md](PERFORMANCE.md)，backlog/dead-letter、budget、settlement unknown、Worker 扩缩和 DB/Redis/lease 恢复见 [OPERATIONS.md](OPERATIONS.md)。
 
 ## 11. Mock 手工验收
 
@@ -396,10 +438,13 @@ make dev
    curl -sS http://127.0.0.1:8000/api/v1/health
    curl -sS http://127.0.0.1:8000/api/v1/ready
    curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
+   curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
    curl -sS http://127.0.0.1:8000/api/v1/info
    ```
 
    默认本地 `REDIS_URL` 为空时 queue 显示 `disabled`，上述请求均为 `200`，且不出现 Provider 请求。若显式配置的 Redis 不可用，`ready` 为脱敏 `503 degraded`；数据库正常时仍显示 `accepting_runs=true`。
+
+   在首次 policy apply/Run admission 前再执行 `curl -i http://127.0.0.1:8000/api/v1/governance/policy`，应得到无副作用的 `404 governance_policy_not_initialized`；查询不能偷偷 bootstrap。若要手工激活 policy，`PUT /api/v1/governance/policy` 必须按 [API.md](API.md) 一次提交全部字段，不是局部 PATCH；相同内容幂等，重新提交历史内容会重激活原 ID/version。
 
 2. 注册 Mock：
 
@@ -441,11 +486,13 @@ make dev
 
    ```bash
    curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/responses?limit=100'
+   curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/audit?limit=100'
+   curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
    curl -sS 'http://127.0.0.1:8000/api/v1/leaderboard?benchmark_id=<BENCHMARK_ID>&order=score_desc'
    curl -sS http://127.0.0.1:8000/api/v1/metrics/summary
    ```
 
-   预期 Responses 共 15 条，排行榜包含该 Run 且 `is_demo=true`，汇总包含 1 个已完成 Run。
+   预期 Responses 共 15 条，Run audit 能稳定分页看到 admission/claim/question/terminal typed event，history counters/latency 包含本次 Run；排行榜包含该 Run 且 `is_demo=true`，汇总包含 1 个已完成 Run。
 
 ### 11.2 前端验收
 
@@ -484,9 +531,23 @@ make phase2-acceptance
 5. Redis 完全 stop/start；`live`/`health` 保持可用、`ready` 降级，API 仍以 `202` 提交数据库事实，Worker 仅靠 DB reconciliation 完成；Redis 恢复后新消息正常 ACK。
 6. Worker 停止时取消 pending Run；Worker 恢复消费旧通知后终态和 0 Response 不漂移。
 7. 运行中取消并再次 XADD 同一 Run；Response 数在取消后冻结，重复投递被 ACK 且 canonical snapshot 不变。
-8. 停止 API/Worker 后执行 PostgreSQL `head -> 20260824_0001 -> head`；同一个 15 题 baseline Run 的协议 v1 核心字段及其 15 条 Response 在三个时点的 canonical hash 相同。该 hash 不是全库快照。
+8. 停止 API/Worker 后在 populated PostgreSQL 上尝试 `20260827_0004 -> 0003`：policy/ledger/audit 等数据存在时必须在第一条 DDL 前拒绝，application revision、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0004 -> 0003 -> 0004` 和 check，随后重启 API/Worker。schema downgrade 不是数据平台回迁。
 
 任何一个场景失败、未运行、使用真实 Provider、最终 PEL/lag 非零或清理不完整，都不能把可靠执行基础写成通过。`--self-check-only` 只验证 Docker/Compose、隔离和清理 guard，不执行八场景，不能替代正式命令。
+
+### 12.1 Phase 2 Mock 容量基线
+
+从仓库根目录运行：
+
+```bash
+make phase2-capacity
+```
+
+脚本复用隔离 Compose guard，启动真实 PostgreSQL 16/Redis 7/API 与至少两个独立 Worker，但所有 Model 都是 deterministic Demo Mock，且启动前移除真实 Provider credential 环境变量。它先通过 API apply 并 read-back 全部 20 字段均非 `null` 的有限 policy；每个 Run 显式携带 input Token reservation 和 lifetime request/Token/USD budgets。默认先把 Worker 缩到 1 记录 reference，再扩到 2；每阶段提交 4 个 15 题 Run、Run concurrency 1、`question_quantum=5`、Mock generation delay 80 ms，并记录 wall time、Run/题吞吐、queue/execution/end-to-end p50/p95/p99、错误/重试、PostgreSQL counter delta、task gauges 与 Redis stream/PEL/lag。
+
+除 steady-state 外，默认先停止 Worker，以 6 路并发提交 6 个 Run，必须精确得到 4 个 `202` 和 2 个带 `run_backlog_full`/`limit=4` 的 `429`，再排空已接纳 Run；每个测量 Run 必须有至少两次 dispatch 和 cooperative yield。跨 Model 公平性场景在单 Worker 下先压入高流量 Model 的 3 个 Run，再用最后一个 slot 接纳低流量 Run，并以 durable audit 顺序断言低流量 Run 在高流量 backlog 全部终态前获得 claim/slice。脚本还必测 lease owner SIGKILL/自然过期接管、Redis stop/start 下 DB reconciliation，以及终态重复投递 no-op；最后从 DB ledger 重算 active/reserved/consumed，检查 audit/operation key 唯一、Response/QuestionExecution 对齐、overdrawn/漂移、queue lag/PEL 和项目 cleanup。证据写入 `.pytest_cache/artifacts/phase2-capacity/<project>/evidence.json`，schema 为 `llmbenchlab-phase2-capacity-evidence-v1`，包含被测 commit/dirty 状态、脚本/Compose hash、主机/容器资源、数据 Hash、配置、测量、故障、公平性、reconciliation、secret self-review 与 cleanup。
+
+失败、字段缺失、非 Mock Model、真实 Provider credential、非有限 policy/read-back 漂移、错误的 `202/429` 分布、缺少 cooperative yield/公平顺序、少于两个 Worker、DB/queue/ledger/audit 漂移或残留资源都会使脚本失败。`--self-check-only` 只验证工具、guard、配置和清理，不能替代基线。增强合同已有代码和离线测试，但当前候选的新一轮完整真实 Compose evidence 尚未产生；历史 dirty artifact 不能替代它。结果只对证据中的硬件、dirty worktree/commit 与配置成立；小样本 Mock 吞吐不是 Provider 性能、费用、生产 SLO/SLA 或水平扩展上限。
 
 ## 13. 失败排查与完成证据
 

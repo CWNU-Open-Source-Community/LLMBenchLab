@@ -40,7 +40,8 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set
 
 EVIDENCE_SCHEMA = "llmbenchlab-phase2-acceptance-evidence-v1"
 PROTOCOL_VERSION = "llmbenchlab-protocol-v1"
-PHASE1_REVISION = "20260824_0001"
+PRE_GOVERNANCE_REVISION = "20260827_0003"
+GOVERNANCE_REVISION = "20260827_0004"
 TASK_MESSAGE_VERSION = "llmbenchlab-run-task-v1"
 TASK_STREAM = "llmbenchlab:runs:v1"
 TASK_GROUP = "llmbenchlab-workers-v1"
@@ -53,6 +54,156 @@ DATABASE_TIMESTAMP_PATTERN = re.compile(
 )
 LOCAL_PASSWORD = "llmbenchlab-local-only"
 DEFAULT_ARTIFACTS_ROOT = Path(".pytest_cache/artifacts/phase2-acceptance")
+
+# Executed inside the already-isolated API container.  The helper uses the same
+# production repositories as a Worker to create a coherent attempt boundary,
+# then expires only the database lease.  This is deliberately a deterministic
+# database seam injection, not a claim that a SIGKILL landed in a sub-millisecond
+# code window.
+DB_SEAM_HELPER_SOURCE = r"""
+import json
+import sys
+from datetime import timedelta
+from decimal import Decimal
+from uuid import uuid4
+
+from sqlalchemy import select, text
+
+from app.db.session import SessionLocal
+from app.governance import GovernanceRepository, provider_scope_key
+from app.models import EvaluationResponse, EvaluationRun, Question
+from app.provider_attempts import ProviderAttemptDisposition, ProviderAttemptOutcome
+from app.runners.run_leases import ResponseDisposition, RunLeaseRepository
+
+
+mode = sys.argv[1]
+run_id = sys.argv[2]
+baseline_run_id = None if len(sys.argv) < 4 or sys.argv[3] == "-" else sys.argv[3]
+if mode not in {"reserved", "send_started", "response_committed"}:
+    raise RuntimeError("unsupported database seam mode")
+if mode == "response_committed" and baseline_run_id is None:
+    raise RuntimeError("response_committed requires a baseline Run")
+
+owner = "acceptance-db-seam:" + mode
+leases = RunLeaseRepository(SessionLocal, lease_for=timedelta(seconds=30))
+governance = GovernanceRepository(SessionLocal)
+lease = leases.claim(run_id, owner=owner)
+if lease is None:
+    raise RuntimeError("database seam Run was not claimable")
+
+with SessionLocal() as session:
+    run = session.get(EvaluationRun, run_id)
+    if run is None:
+        raise RuntimeError("database seam Run disappeared")
+    question = session.scalar(
+        select(Question)
+        .where(Question.benchmark_id == run.benchmark_id)
+        .order_by(Question.position, Question.id)
+        .limit(1)
+    )
+    if question is None:
+        raise RuntimeError("database seam question was unavailable")
+    model_id = run.model_id
+    question_id = question.id
+
+context = governance.question_context(
+    run_id=run_id,
+    question_id=question_id,
+    model_id=model_id,
+    provider_scope=provider_scope_key("mock", None),
+    lease_owner=owner,
+    lease_token=lease.token,
+    estimated_input_tokens=8,
+    reserved_output_tokens=64,
+    reserved_cost_usd=Decimal("0"),
+)
+permit = governance.reserve(context, provider_attempt=1, lease_owner=owner)
+response_id = None
+if mode in {"send_started", "response_committed"}:
+    governance.mark_send_started(permit, lease_owner=owner)
+if mode == "response_committed":
+    governance.finish(
+        permit,
+        disposition=ProviderAttemptDisposition.SETTLED_ACTUAL,
+        outcome=ProviderAttemptOutcome.SUCCEEDED,
+        input_tokens=8,
+        output_tokens=2,
+        actual_cost_usd=Decimal("0"),
+    )
+    with SessionLocal() as session:
+        baseline = session.scalar(
+            select(EvaluationResponse).where(
+                EvaluationResponse.run_id == baseline_run_id,
+                EvaluationResponse.question_id == question_id,
+            )
+        )
+        if baseline is None:
+            raise RuntimeError("baseline Response for database seam was unavailable")
+        response_id = str(uuid4())
+        response = EvaluationResponse(
+            id=response_id,
+            run_id=run_id,
+            question_id=question_id,
+            raw_response=baseline.raw_response,
+            parsed_answer=baseline.parsed_answer,
+            reference_answer_snapshot=baseline.reference_answer_snapshot,
+            score=baseline.score,
+            evaluator_name=baseline.evaluator_name,
+            latency_ms=baseline.latency_ms,
+            input_tokens=baseline.input_tokens,
+            output_tokens=baseline.output_tokens,
+            estimated_cost=baseline.estimated_cost,
+            provider_request_id=baseline.provider_request_id,
+            returned_model=baseline.returned_model,
+            system_fingerprint=baseline.system_fingerprint,
+            finish_reason=baseline.finish_reason,
+            http_attempt_count=baseline.http_attempt_count,
+            error_type=baseline.error_type,
+            error_message=baseline.error_message,
+        )
+    disposition = leases.persist_response(lease, response)
+    if disposition != ResponseDisposition.INSERTED:
+        raise RuntimeError("database seam Response did not commit exactly once")
+
+with SessionLocal() as session, session.begin():
+    session.execute(
+        text(
+            "UPDATE evaluation_runs "
+            "SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second', "
+            "heartbeat_at = CURRENT_TIMESTAMP - INTERVAL '1 second' "
+            "WHERE id = :run_id"
+        ),
+        {"run_id": run_id},
+    )
+    session.execute(
+        text(
+            "UPDATE provider_call_reservations "
+            "SET lease_expires_at = CURRENT_TIMESTAMP - INTERVAL '1 second' "
+            "WHERE id = :reservation_id "
+            "AND state IN ('reserved', 'send_started')"
+        ),
+        {"reservation_id": permit.reservation_id},
+    )
+
+print(
+    json.dumps(
+        {
+            "fault_method": "deterministic_database_seam_injection",
+            "sigkill_used": False,
+            "mode": mode,
+            "run_id": run_id,
+            "lease_owner": owner,
+            "lease_token": lease.token,
+            "question_id": question_id,
+            "reservation_id": permit.reservation_id,
+            "execution_generation": context.execution_generation,
+            "provider_attempt": permit.provider_attempt,
+            "response_id": response_id,
+        },
+        sort_keys=True,
+    )
+)
+"""
 
 RUN_SNAPSHOT_FIELDS = (
     "id",
@@ -227,9 +378,9 @@ class Phase2Acceptance:
                 {
                     "active_key_id": "acceptance-v1",
                     "keys": {
-                        "acceptance-v1": base64.urlsafe_b64encode(
-                            secrets.token_bytes(32)
-                        ).decode("ascii")
+                        "acceptance-v1": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode(
+                            "ascii"
+                        )
                     },
                 },
                 separators=(",", ":"),
@@ -252,9 +403,7 @@ class Phase2Acceptance:
                 "API_PORT": str(self.api_port),
                 "FRONTEND_PORT": str(self.frontend_port),
                 "LLMBENCHLAB_IMAGE_TAG": "p2-" + suffix,
-                "LLMBENCHLAB_COMPOSE_CREDENTIAL_KEYS_FILE": str(
-                    credential_keys_path
-                ),
+                "LLMBENCHLAB_COMPOSE_CREDENTIAL_KEYS_FILE": str(credential_keys_path),
                 "LLMBENCHLAB_COMPOSE_DATABASE_URL": (
                     "postgresql+psycopg://llmbenchlab:{}@postgres:5432/"
                     "llmbenchlab?connect_timeout=3"
@@ -351,7 +500,10 @@ class Phase2Acceptance:
                     }
                 )
             raise AcceptanceFailure(
-                "command exceeded {:.1f}s: {}".format(timeout, " ".join(command))
+                "command exceeded {:.1f}s: {}".format(
+                    timeout,
+                    redact_text(" ".join(command)),
+                )
             ) from exc
 
         duration = round(time.monotonic() - started, 3)
@@ -371,7 +523,7 @@ class Phase2Acceptance:
             raise AcceptanceFailure(
                 "command failed with {}: {}\n{}".format(
                     completed.returncode,
-                    " ".join(command),
+                    redact_text(" ".join(command)),
                     detail,
                 )
             )
@@ -794,6 +946,191 @@ class Phase2Acceptance:
         return snapshot
 
     def psql(self, sql: str, check: bool = True) -> subprocess.CompletedProcess:
+        return self.psql_database(sql, database="llmbenchlab", check=check)
+
+    def run_database_seam_helper(
+        self,
+        mode: str,
+        run_id: str,
+        *,
+        baseline_run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create one coherent boundary and expire its lease inside PostgreSQL."""
+
+        allowed_modes = {"reserved", "send_started", "response_committed"}
+        self.require(mode in allowed_modes, "unsupported database seam mode", mode)
+        self.require(SAFE_ID_PATTERN.fullmatch(run_id) is not None, "unsafe Run ID")
+        if baseline_run_id is not None:
+            self.require(
+                SAFE_ID_PATTERN.fullmatch(baseline_run_id) is not None,
+                "unsafe baseline Run ID",
+            )
+        self.require(
+            mode != "response_committed" or baseline_run_id is not None,
+            "response commit seam requires a baseline Run",
+        )
+        completed = self.compose(
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "-c",
+            DB_SEAM_HELPER_SOURCE,
+            mode,
+            run_id,
+            baseline_run_id or "-",
+            timeout=60,
+            check=False,
+            # The full inline source is intentionally omitted from command evidence;
+            # its SHA-256 is retained below and the script itself is repository tracked.
+            record=False,
+        )
+        self.require(
+            completed.returncode == 0,
+            "database seam helper failed",
+            {
+                "mode": mode,
+                "returncode": completed.returncode,
+                "stderr_tail": redact_text(completed.stderr[-4000:]),
+            },
+        )
+        raw = completed.stdout.strip().splitlines()
+        self.require(bool(raw), "database seam helper returned no evidence")
+        try:
+            result = json.loads(raw[-1])
+        except json.JSONDecodeError as exc:
+            raise AcceptanceFailure("database seam helper evidence was not valid JSON") from exc
+        self.require(isinstance(result, dict), "database seam evidence was not a mapping")
+        expected = {
+            "fault_method": "deterministic_database_seam_injection",
+            "sigkill_used": False,
+            "mode": mode,
+            "run_id": run_id,
+        }
+        self.require(
+            all(result.get(key) == value for key, value in expected.items()),
+            "database seam helper returned mismatched evidence",
+            result,
+        )
+        result["helper_source_sha256"] = hashlib.sha256(
+            DB_SEAM_HELPER_SOURCE.encode("utf-8")
+        ).hexdigest()
+        return result
+
+    def db_crash_seam_snapshot(self, run_id: str) -> Dict[str, Any]:
+        """Return an allowlisted ledger/Response/audit projection for one Run."""
+
+        self.require(SAFE_ID_PATTERN.fullmatch(run_id) is not None, "unsafe Run ID")
+        sql = """
+SELECT json_build_object(
+  'run', (
+    SELECT json_build_object(
+      'id', r.id,
+      'status', r.status,
+      'attempt_count', r.attempt_count,
+      'failed_attempt_count', r.failed_attempt_count,
+      'lease_token', r.lease_token,
+      'completed_questions', r.completed_questions
+    )
+    FROM evaluation_runs r WHERE r.id = '{run_id}'
+  ),
+  'question_executions', COALESCE((
+    SELECT json_agg(json_build_object(
+      'id', q.id,
+      'question_id', q.question_id,
+      'execution_generation', q.execution_generation,
+      'next_provider_attempt', q.next_provider_attempt
+    ) ORDER BY q.question_id, q.id)
+    FROM question_executions q WHERE q.run_id = '{run_id}'
+  ), '[]'::json),
+  'reservations', COALESCE((
+    SELECT json_agg(json_build_object(
+      'id', p.id,
+      'question_id', p.question_id,
+      'execution_generation', p.execution_generation,
+      'provider_attempt', p.provider_attempt,
+      'state', p.state,
+      'reserved_input_tokens', p.reserved_input_tokens,
+      'reserved_output_tokens', p.reserved_output_tokens,
+      'reserved_cost_usd', p.reserved_cost_usd,
+      'actual_input_tokens', p.actual_input_tokens,
+      'actual_output_tokens', p.actual_output_tokens,
+      'actual_cost_usd', p.actual_cost_usd,
+      'send_started', p.send_started_at IS NOT NULL,
+      'settled', p.settled_at IS NOT NULL,
+      'reserved_event_count', (
+        SELECT count(*) FROM audit_events a
+        WHERE a.reservation_id = p.id AND a.event_type = 'provider_attempt_reserved'
+      ),
+      'send_started_event_count', (
+        SELECT count(*) FROM audit_events a
+        WHERE a.reservation_id = p.id AND a.event_type = 'provider_attempt_send_started'
+      ),
+      'settled_event_count', (
+        SELECT count(*) FROM audit_events a
+        WHERE a.reservation_id = p.id AND a.event_type = 'provider_attempt_settled'
+      ),
+      'settlement_dispositions', COALESCE((
+        SELECT json_agg(a.payload->>'disposition' ORDER BY a.occurred_at, a.id)
+        FROM audit_events a
+        WHERE a.reservation_id = p.id AND a.event_type = 'provider_attempt_settled'
+      ), '[]'::json)
+    ) ORDER BY p.question_id, p.execution_generation, p.provider_attempt, p.id)
+    FROM provider_call_reservations p WHERE p.run_id = '{run_id}'
+  ), '[]'::json),
+  'response_count', (
+    SELECT count(*) FROM evaluation_responses e WHERE e.run_id = '{run_id}'
+  ),
+  'distinct_response_questions', (
+    SELECT count(DISTINCT e.question_id)
+    FROM evaluation_responses e WHERE e.run_id = '{run_id}'
+  ),
+  'response_ids', COALESCE((
+    SELECT json_agg(e.id ORDER BY e.question_id, e.id)
+    FROM evaluation_responses e WHERE e.run_id = '{run_id}'
+  ), '[]'::json),
+  'responses', COALESCE((
+    SELECT json_agg(json_build_object(
+      'id', e.id,
+      'question_id', e.question_id,
+      'persisted_event_count', (
+        SELECT count(*) FROM audit_events a
+        WHERE a.event_key = 'response:' || e.id || ':persisted'
+          AND a.event_type = 'question_evidence_persisted'
+      )
+    ) ORDER BY e.question_id, e.id)
+    FROM evaluation_responses e WHERE e.run_id = '{run_id}'
+  ), '[]'::json),
+  'audit_event_type_counts', COALESCE((
+    SELECT json_object_agg(grouped.event_type, grouped.event_count)
+    FROM (
+      SELECT a.event_type, count(*) AS event_count
+      FROM audit_events a WHERE a.run_id = '{run_id}'
+      GROUP BY a.event_type ORDER BY a.event_type
+    ) grouped
+  ), '{{}}'::json)
+)::text;
+""".format(run_id=run_id)
+        raw = self.psql(sql).stdout.strip()
+        self.require(bool(raw), "PostgreSQL returned no database seam snapshot")
+        try:
+            snapshot = json.loads(raw.splitlines()[-1])
+        except json.JSONDecodeError as exc:
+            raise AcceptanceFailure("database seam snapshot was not valid JSON") from exc
+        snapshot["sha256"] = canonical_hash(snapshot)
+        return snapshot
+
+    def psql_database(
+        self,
+        sql: str,
+        *,
+        database: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess:
+        self.require(
+            SAFE_ID_PATTERN.fullmatch(database) is not None,
+            "unsafe PostgreSQL database name",
+        )
         return self.compose(
             "exec",
             "-T",
@@ -808,7 +1145,7 @@ class Phase2Acceptance:
             "-U",
             "llmbenchlab",
             "-d",
-            "llmbenchlab",
+            database,
             "-c",
             sql,
             timeout=30,
@@ -1404,6 +1741,202 @@ WHERE r.id = '{}';
                 "queue_after_ack": queue,
             }
 
+    def database_crash_seams_scenario(self) -> None:
+        """Exercise exact DB boundaries that process-level timing cannot target."""
+
+        with self.scenario(
+            "deterministic_database_seam_provider_and_response_commit_recovery"
+        ) as entry:
+            self.require(self.baseline_run_id is not None, "baseline Run is unavailable")
+            self.compose("stop", "worker", timeout=90)
+            stopped_workers = self.service_metas("worker", include_stopped=True)
+            self.require(
+                len(stopped_workers) == 2
+                and all(worker["status"] == "exited" for worker in stopped_workers),
+                "Workers did not stop before database seam injection",
+                stopped_workers,
+            )
+
+            injections: Dict[str, Dict[str, Any]] = {}
+            created_runs: Dict[str, Dict[str, Any]] = {}
+            for mode in ("reserved", "send_started", "response_committed"):
+                created = self.create_run()
+                created_runs[mode] = created
+                injections[mode] = self.run_database_seam_helper(
+                    mode,
+                    created["id"],
+                    baseline_run_id=(
+                        self.baseline_run_id if mode == "response_committed" else None
+                    ),
+                )
+
+            response_run_id = created_runs["response_committed"]["id"]
+            duplicate_message_id = self.redis_cli(
+                "XADD",
+                TASK_STREAM,
+                "*",
+                "version",
+                TASK_MESSAGE_VERSION,
+                "run_id",
+                response_run_id,
+                "correlation_id",
+                response_run_id,
+            ).stdout.strip()
+            self.require(bool(duplicate_message_id), "Redis rejected the duplicate seam delivery")
+
+            self.start_validated_containers(stopped_workers, expected_service="worker")
+            restored_workers = self.wait_service_healthy("worker", count=2, timeout=90)
+            protocol_snapshots: Dict[str, Dict[str, Any]] = {}
+            for mode, created in created_runs.items():
+                final = self.wait_run(
+                    created["id"],
+                    "{} database seam recovery".format(mode),
+                    lambda run: run["status"] == "completed",
+                    timeout=120,
+                )
+                protocol_snapshots[mode] = self.assert_complete_protocol(
+                    final["id"], expected_attempts=2
+                )
+            queue = self.wait_message_delivered_and_acked(duplicate_message_id, timeout=60)
+
+            snapshots = {
+                mode: self.db_crash_seam_snapshot(created["id"])
+                for mode, created in created_runs.items()
+            }
+
+            def injected_reservation(mode: str) -> Dict[str, Any]:
+                reservation_id = injections[mode]["reservation_id"]
+                matching = [
+                    row for row in snapshots[mode]["reservations"] if row["id"] == reservation_id
+                ]
+                self.require(
+                    len(matching) == 1,
+                    "injected reservation was not uniquely preserved",
+                    {"mode": mode, "reservation_id": reservation_id},
+                )
+                return matching[0]
+
+            reserved = injected_reservation("reserved")
+            self.require(
+                reserved["state"] == "released_pre_send"
+                and reserved["send_started"] is False
+                and reserved["settled"] is True,
+                "pre-send reservation did not reconcile to released_pre_send",
+                reserved,
+            )
+            self.require(
+                reserved["reserved_event_count"] == 1
+                and reserved["send_started_event_count"] == 0
+                and reserved["settled_event_count"] == 1
+                and reserved["settlement_dispositions"] == ["released_pre_send"],
+                "pre-send reservation audit was not exactly-once",
+                reserved,
+            )
+            reused_ordinal = [
+                row
+                for row in snapshots["reserved"]["reservations"]
+                if row["question_id"] == reserved["question_id"]
+                and row["id"] != reserved["id"]
+                and row["provider_attempt"] == reserved["provider_attempt"]
+                and row["execution_generation"] > reserved["execution_generation"]
+                and row["state"] == "settled_actual"
+            ]
+            self.require(
+                len(reused_ordinal) == 1,
+                "confirmed unsent Provider ordinal was not reused in a new generation",
+                snapshots["reserved"]["reservations"],
+            )
+
+            send_started = injected_reservation("send_started")
+            self.require(
+                send_started["state"] == "settled_conservative"
+                and send_started["send_started"] is True
+                and send_started["settled"] is True,
+                "send-started reservation did not reconcile conservatively",
+                send_started,
+            )
+            self.require(
+                send_started["reserved_event_count"] == 1
+                and send_started["send_started_event_count"] == 1
+                and send_started["settled_event_count"] == 1
+                and send_started["settlement_dispositions"] == ["settled_conservative"],
+                "send-started conservative settlement was not exactly-once",
+                send_started,
+            )
+            self.require(
+                send_started["actual_input_tokens"] == send_started["reserved_input_tokens"]
+                and send_started["actual_output_tokens"] == send_started["reserved_output_tokens"]
+                and math.isclose(
+                    float(send_started["actual_cost_usd"]),
+                    float(send_started["reserved_cost_usd"]),
+                    rel_tol=0,
+                    abs_tol=1e-12,
+                ),
+                "conservative settlement did not consume the reserved bounds",
+                send_started,
+            )
+
+            response_injection = injections["response_committed"]
+            response_snapshot = snapshots["response_committed"]
+            response_reservation = injected_reservation("response_committed")
+            seeded_question_reservations = [
+                row
+                for row in response_snapshot["reservations"]
+                if row["question_id"] == response_injection["question_id"]
+            ]
+            seeded_responses = [
+                response
+                for response in response_snapshot["responses"]
+                if response["id"] == response_injection["response_id"]
+            ]
+            self.require(
+                response_snapshot["response_count"] == 15
+                and response_snapshot["distinct_response_questions"] == 15,
+                "Response commit seam produced duplicate or missing question evidence",
+                response_snapshot,
+            )
+            self.require(
+                len(seeded_question_reservations) == 1
+                and seeded_question_reservations[0]["id"] == response_reservation["id"]
+                and response_reservation["state"] == "settled_actual",
+                "duplicate delivery created a second ledger row for committed evidence",
+                seeded_question_reservations,
+            )
+            self.require(
+                len(seeded_responses) == 1 and seeded_responses[0]["persisted_event_count"] == 1,
+                "committed Response or its persistence audit was not exactly-once",
+                seeded_responses,
+            )
+            self.require(
+                response_reservation["reserved_event_count"] == 1
+                and response_reservation["send_started_event_count"] == 1
+                and response_reservation["settled_event_count"] == 1,
+                "committed Response ledger audit was not exactly-once",
+                response_reservation,
+            )
+
+            entry["evidence"] = {
+                "fault_injection": {
+                    "method": "deterministic_database_seam_injection",
+                    "sigkill_used": False,
+                    "reason": (
+                        "exact transaction boundaries are injected without fragile process-kill "
+                        "timing"
+                    ),
+                },
+                "injections": injections,
+                "database_snapshots": snapshots,
+                "protocol_snapshot_sha256": {
+                    mode: snapshot["sha256"] for mode, snapshot in protocol_snapshots.items()
+                },
+                "pre_send_ordinal_reused": True,
+                "send_started_conservative_settlement_count": 1,
+                "response_commit_exactly_once": True,
+                "duplicate_message_id": duplicate_message_id,
+                "queue_after_duplicate_ack": queue,
+                "restored_worker_count": len(restored_workers),
+            }
+
     def redis_outage_scenario(self) -> None:
         with self.scenario("redis_stop_start_and_database_reconciliation") as entry:
             # Stopping idle Workers first removes the notification-audit race: the
@@ -1658,7 +2191,9 @@ WHERE r.id = '{}';
             }
 
     def migration_round_trip_scenario(self) -> None:
-        with self.scenario("postgres_head_0001_head_protocol_round_trip") as entry:
+        with self.scenario(
+            "postgres_populated_0004_downgrade_refusal_and_empty_round_trip"
+        ) as entry:
             self.require(self.baseline_run_id is not None, "baseline Run is unavailable")
             run_id = self.baseline_run_id
             queue_before = self.wait_queue_drained(timeout=60)
@@ -1668,6 +2203,21 @@ WHERE r.id = '{}';
             self.require(active_raw == "0", "migration round trip found active Runs", active_raw)
             core_before = self.db_core_protocol_snapshot(run_id)
             reliability_before = self.db_run_snapshot(run_id)
+            populated_counts = json.loads(
+                self.psql(
+                    "SELECT json_build_object("
+                    "'policies', (SELECT count(*) FROM governance_policies), "
+                    "'reservations', (SELECT count(*) FROM provider_call_reservations), "
+                    "'audit_events', (SELECT count(*) FROM audit_events))::text;"
+                ).stdout.strip()
+            )
+            self.require(
+                populated_counts["policies"] > 0
+                and populated_counts["reservations"] > 0
+                and populated_counts["audit_events"] > 0,
+                "0004 downgrade refusal requires populated policy, ledger, and audit evidence",
+                populated_counts,
+            )
 
             self.compose("stop", "api", "worker", timeout=90)
             stopped_api = self.service_metas("api", include_stopped=True)
@@ -1684,46 +2234,137 @@ WHERE r.id = '{}';
                 stopped_workers,
             )
 
-            downgrade = self.compose(
+            populated_downgrade = self.compose(
                 "run",
                 "--rm",
                 "--no-deps",
                 "migrate",
                 "alembic",
                 "downgrade",
-                PHASE1_REVISION,
+                PRE_GOVERNANCE_REVISION,
                 timeout=180,
+                check=False,
             )
-            revision_0001 = self.psql("SELECT version_num FROM alembic_version;").stdout.strip()
             self.require(
-                revision_0001 == PHASE1_REVISION,
-                "PostgreSQL downgrade did not reach 0001",
-                revision_0001,
+                populated_downgrade.returncode != 0,
+                "populated 0004 downgrade unexpectedly discarded governance evidence",
             )
-            core_at_0001 = self.db_core_protocol_snapshot(run_id)
+            refusal_output = populated_downgrade.stderr or populated_downgrade.stdout
+            self.require(
+                "Cannot downgrade governance schema" in refusal_output,
+                "populated 0004 downgrade did not return the stable refusal reason",
+                redact_text(refusal_output[-2000:]),
+            )
+            populated_revision = self.psql(
+                "SELECT version_num FROM alembic_version;"
+            ).stdout.strip()
+            self.require(
+                populated_revision == GOVERNANCE_REVISION,
+                "failed populated downgrade changed the application database revision",
+                populated_revision,
+            )
+            core_after_refusal = self.db_core_protocol_snapshot(run_id)
+            reliability_after_refusal = self.db_run_snapshot(run_id)
 
-            upgrade = self.compose(
-                "run",
-                "--rm",
-                "--no-deps",
-                "migrate",
-                "sh",
-                "-c",
-                "alembic upgrade head && alembic check",
-                timeout=180,
+            empty_database = "p2roundtrip_" + self.project[-12:]
+            empty_database_url = (
+                "postgresql+psycopg://llmbenchlab:{}@postgres:5432/{}?connect_timeout=3"
+            ).format(LOCAL_PASSWORD, empty_database)
+            empty_round_trip: Dict[str, Any] = {"database": empty_database}
+            self.psql_database(
+                'CREATE DATABASE "{}";'.format(empty_database),
+                database="postgres",
             )
-            head_revision = self.psql("SELECT version_num FROM alembic_version;").stdout.strip()
+            try:
+                upgrade_empty = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    "DATABASE_URL={}".format(empty_database_url),
+                    "migrate",
+                    "alembic",
+                    "upgrade",
+                    "head",
+                    timeout=180,
+                )
+                empty_head_before = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=empty_database,
+                ).stdout.strip()
+                self.require(
+                    empty_head_before == GOVERNANCE_REVISION,
+                    "empty PostgreSQL database did not upgrade to 0004",
+                    empty_head_before,
+                )
+                downgrade_empty = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    "DATABASE_URL={}".format(empty_database_url),
+                    "migrate",
+                    "alembic",
+                    "downgrade",
+                    PRE_GOVERNANCE_REVISION,
+                    timeout=180,
+                )
+                empty_pre_governance = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=empty_database,
+                ).stdout.strip()
+                self.require(
+                    empty_pre_governance == PRE_GOVERNANCE_REVISION,
+                    "empty PostgreSQL database did not downgrade across 0004",
+                    empty_pre_governance,
+                )
+                reupgrade_empty = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    "DATABASE_URL={}".format(empty_database_url),
+                    "migrate",
+                    "sh",
+                    "-c",
+                    "alembic upgrade head && alembic check",
+                    timeout=180,
+                )
+                empty_head_after = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=empty_database,
+                ).stdout.strip()
+                self.require(
+                    empty_head_after == GOVERNANCE_REVISION,
+                    "empty PostgreSQL database did not return to 0004",
+                    empty_head_after,
+                )
+                empty_round_trip.update(
+                    {
+                        "upgrade_returncode": upgrade_empty.returncode,
+                        "head_before": empty_head_before,
+                        "downgrade_returncode": downgrade_empty.returncode,
+                        "pre_governance_revision": empty_pre_governance,
+                        "reupgrade_and_check_returncode": reupgrade_empty.returncode,
+                        "head_after": empty_head_after,
+                    }
+                )
+            finally:
+                drop_empty = self.psql_database(
+                    'DROP DATABASE IF EXISTS "{}" WITH (FORCE);'.format(empty_database),
+                    database="postgres",
+                    check=False,
+                )
+                empty_round_trip["drop_returncode"] = drop_empty.returncode
             self.require(
-                head_revision != PHASE1_REVISION and bool(head_revision),
-                "PostgreSQL upgrade did not return to head",
-                head_revision,
+                empty_round_trip["drop_returncode"] == 0,
+                "isolated empty migration database cleanup failed",
+                empty_round_trip,
             )
-            core_after = self.db_core_protocol_snapshot(run_id)
-            reliability_after = self.db_run_snapshot(run_id)
+
             hashes = {
                 "before": core_before["sha256"],
-                "at_0001": core_at_0001["sha256"],
-                "after": core_after["sha256"],
+                "after_refused_downgrade": core_after_refusal["sha256"],
             }
             entry["evidence"] = {
                 "run_id": run_id,
@@ -1731,19 +2372,20 @@ WHERE r.id = '{}';
                 "active_runs_before": 0,
                 "api_stopped": stopped_api,
                 "workers_stopped": stopped_workers,
-                "downgrade_returncode": downgrade.returncode,
-                "revision_at_0001": revision_0001,
-                "upgrade_and_check_returncode": upgrade.returncode,
-                "head_revision": head_revision,
+                "populated_counts": populated_counts,
+                "populated_downgrade_returncode": populated_downgrade.returncode,
+                "populated_downgrade_refusal": "Cannot downgrade governance schema",
+                "application_revision_after_refusal": populated_revision,
+                "empty_database_round_trip": empty_round_trip,
                 "core_protocol_hashes": hashes,
                 "core_snapshot_before": core_before,
                 "reliability_before": reliability_before,
-                "reliability_after": reliability_after,
+                "reliability_after_refusal": reliability_after_refusal,
             }
             self.write_evidence()
             self.require(
                 len(set(hashes.values())) == 1,
-                "core protocol/Response evidence changed across migration round trip",
+                "core protocol/Response evidence changed after refused populated downgrade",
                 hashes,
             )
 
@@ -1770,6 +2412,7 @@ WHERE r.id = '{}';
         self.baseline_scenario()
         self.api_restart_scenario()
         self.worker_crash_scenario()
+        self.database_crash_seams_scenario()
         self.redis_outage_scenario()
         self.pending_cancel_scenario()
         self.running_cancel_scenario()

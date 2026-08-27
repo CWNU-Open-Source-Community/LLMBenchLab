@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 
 import httpx
 import pytest
@@ -11,8 +12,99 @@ from app.adapters import (
     AdapterError,
     MockModelAdapter,
     OpenAICompatibleAdapter,
+    ProviderAttemptContext,
+    ProviderAttemptDisposition,
+    ProviderAttemptOutcome,
+    ProviderAttemptPermit,
+    ProviderAttemptStateUnknown,
     build_adapter,
 )
+
+
+def _attempt_context(
+    question_id: str = "question-1",
+    *,
+    next_provider_attempt: int = 1,
+) -> ProviderAttemptContext:
+    return ProviderAttemptContext(
+        run_id="run-1",
+        question_id=question_id,
+        model_id="model-1",
+        provider_scope="provider-scope-1",
+        lease_token=7,
+        execution_generation=2,
+        next_provider_attempt=next_provider_attempt,
+        reserved_input_tokens=16,
+        reserved_output_tokens=8,
+    )
+
+
+class _RecordingAttemptController:
+    def __init__(
+        self,
+        *,
+        events: list[tuple[object, ...]] | None = None,
+        mark_error: BaseException | None = None,
+        finish_error_at: int | None = None,
+    ) -> None:
+        self.events = events if events is not None else []
+        self.contexts: list[ProviderAttemptContext] = []
+        self.mark_error = mark_error
+        self.finish_error_at = finish_error_at
+        self.finish_calls = 0
+
+    async def reserve(
+        self,
+        context: ProviderAttemptContext,
+        *,
+        provider_attempt: int,
+    ) -> ProviderAttemptPermit:
+        self.contexts.append(context)
+        permit = ProviderAttemptPermit(
+            reservation_id=f"reservation-{context.question_id}-{provider_attempt}",
+            provider_attempt=provider_attempt,
+        )
+        self.events.append(("reserve", context.question_id, provider_attempt))
+        return permit
+
+    async def mark_send_started(self, permit: ProviderAttemptPermit) -> None:
+        self.events.append(("mark", permit.reservation_id, permit.provider_attempt))
+        if self.mark_error is not None:
+            raise self.mark_error
+
+    async def finish(
+        self,
+        permit: ProviderAttemptPermit,
+        *,
+        disposition: ProviderAttemptDisposition,
+        outcome: ProviderAttemptOutcome,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+    ) -> None:
+        self.finish_calls += 1
+        self.events.append(
+            (
+                "finish",
+                permit.reservation_id,
+                permit.provider_attempt,
+                disposition,
+                outcome,
+                input_tokens,
+                output_tokens,
+            )
+        )
+        if self.finish_error_at == self.finish_calls:
+            raise RuntimeError("settlement outcome is unknown")
+
+
+class _CancellingTransport(httpx.AsyncBaseTransport):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        del request
+        self.calls += 1
+        raise asyncio.CancelledError
 
 
 class _TrackedAsyncByteStream(httpx.AsyncByteStream):
@@ -120,6 +212,99 @@ async def test_mock_adapter_supports_bounded_offline_fault_delay() -> None:
             [],
             {"mock_generation_delay_seconds": 5.1},
         )
+
+
+@pytest.mark.asyncio
+async def test_mock_adapter_uses_one_synthetic_governed_attempt() -> None:
+    controller = _RecordingAttemptController()
+    context = _attempt_context(next_provider_attempt=3)
+
+    result = await MockModelAdapter(attempt_controller=controller).generate(
+        [],
+        {
+            "mock_response": "A",
+            "mock_input_tokens": 4,
+            "mock_output_tokens": 1,
+        },
+        attempt_context=context,
+    )
+
+    assert result.text == "A"
+    assert controller.contexts == [context]
+    assert controller.events == [
+        ("reserve", "question-1", 3),
+        ("mark", "reservation-question-1-3", 3),
+        (
+            "finish",
+            "reservation-question-1-3",
+            3,
+            ProviderAttemptDisposition.SETTLED_ACTUAL,
+            ProviderAttemptOutcome.SUCCEEDED,
+            4,
+            1,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_mock_adapter_conservatively_settles_configured_failure() -> None:
+    controller = _RecordingAttemptController()
+
+    with pytest.raises(AdapterError, match="try later"):
+        await MockModelAdapter(attempt_controller=controller).generate(
+            [],
+            {"mock_error": {"type": "rate_limited", "message": "try later"}},
+            attempt_context=_attempt_context(),
+        )
+
+    assert controller.events == [
+        ("reserve", "question-1", 1),
+        ("mark", "reservation-question-1-1", 1),
+        (
+            "finish",
+            "reservation-question-1-1",
+            1,
+            ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+            ProviderAttemptOutcome.PROVIDER_RESPONSE_ERROR,
+            None,
+            None,
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "generation_config",
+    [
+        {"mock_generation_delay_seconds": True},
+        {"mock_generation_delay_seconds": float("inf")},
+        {"mock_latency_ms": True},
+        {"mock_latency_ms": -0.1},
+        {"mock_input_tokens": -1},
+        {"mock_output_tokens": 1.5},
+        {"mock_usage": []},
+        {
+            "mock_error": {"type": "rate_limited", "message": "try later"},
+            "mock_latency_ms": float("nan"),
+        },
+    ],
+)
+async def test_mock_adapter_rejects_invalid_local_config_before_governance_reservation(
+    generation_config: dict[str, object],
+) -> None:
+    controller = _RecordingAttemptController()
+
+    with pytest.raises(AdapterError) as caught:
+        await MockModelAdapter(attempt_controller=controller).generate(
+            [],
+            generation_config,
+            attempt_context=_attempt_context(),
+        )
+
+    assert caught.value.error_type == "mock_configuration_error"
+    assert controller.contexts == []
+    assert controller.events == []
+    assert controller.finish_calls == 0
 
 
 @pytest.mark.asyncio
@@ -565,6 +750,7 @@ async def test_openai_compatible_keeps_concurrent_sse_state_request_local(
 ) -> None:
     monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
     streams: list[_TrackedAsyncByteStream] = []
+    controller = _RecordingAttemptController()
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
@@ -602,10 +788,19 @@ async def test_openai_compatible_keeps_concurrent_sse_state_request_local(
             "model",
             "TEST_PROVIDER_KEY",
             client=client,
+            attempt_controller=controller,
         )
         first, second = await asyncio.gather(
-            adapter.generate([{"role": "user", "content": "first"}], {}),
-            adapter.generate([{"role": "user", "content": "second"}], {}),
+            adapter.generate(
+                [{"role": "user", "content": "first"}],
+                {},
+                attempt_context=_attempt_context("question-first"),
+            ),
+            adapter.generate(
+                [{"role": "user", "content": "second"}],
+                {},
+                attempt_context=_attempt_context("question-second"),
+            ),
         )
 
     assert (first.text, first.provider_request_id, first.output_tokens) == (
@@ -620,6 +815,15 @@ async def test_openai_compatible_keeps_concurrent_sse_state_request_local(
     )
     assert len(streams) == 2
     assert all(stream.closed for stream in streams)
+    assert {context.question_id for context in controller.contexts} == {
+        "question-first",
+        "question-second",
+    }
+    finished_reservations = {event[1] for event in controller.events if event[0] == "finish"}
+    assert finished_reservations == {
+        "reservation-question-first-1",
+        "reservation-question-second-1",
+    }
 
 
 @pytest.mark.asyncio
@@ -919,6 +1123,475 @@ async def test_openai_compatible_reuses_and_closes_owned_client_pool(
 
 
 @pytest.mark.asyncio
+async def test_openai_governance_settles_each_attempt_before_retry_and_hides_secret(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "governance-boundary-secret"
+    monkeypatch.setenv("TEST_PROVIDER_KEY", secret)
+    statuses = iter([429, 503, 200])
+    events: list[tuple[object, ...]] = []
+    controller = _RecordingAttemptController(events=events)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["authorization"] == f"Bearer {secret}"
+        status = next(statuses)
+        events.append(("http", status))
+        if status == 200:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                },
+            )
+        return httpx.Response(status, json={"error": {"message": "temporarily unavailable"}})
+
+    async def fake_sleep(delay: float) -> None:
+        events.append(("sleep", delay))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            max_retries=2,
+            retry_backoff_base_seconds=0.1,
+            client=client,
+            sleep=fake_sleep,
+            attempt_controller=controller,
+        ).generate(
+            [{"role": "user", "content": "hello"}],
+            {},
+            attempt_context=_attempt_context(),
+        )
+
+    assert result.text == "ok"
+    assert result.metadata["attempts"] == 3
+    assert events == [
+        ("reserve", "question-1", 1),
+        ("mark", "reservation-question-1-1", 1),
+        ("http", 429),
+        (
+            "finish",
+            "reservation-question-1-1",
+            1,
+            ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+            ProviderAttemptOutcome.HTTP_ERROR,
+            None,
+            None,
+        ),
+        ("sleep", 0.1),
+        ("reserve", "question-1", 2),
+        ("mark", "reservation-question-1-2", 2),
+        ("http", 503),
+        (
+            "finish",
+            "reservation-question-1-2",
+            2,
+            ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+            ProviderAttemptOutcome.HTTP_ERROR,
+            None,
+            None,
+        ),
+        ("sleep", 0.2),
+        ("reserve", "question-1", 3),
+        ("mark", "reservation-question-1-3", 3),
+        ("http", 200),
+        (
+            "finish",
+            "reservation-question-1-3",
+            3,
+            ProviderAttemptDisposition.SETTLED_ACTUAL,
+            ProviderAttemptOutcome.SUCCEEDED,
+            3,
+            2,
+        ),
+    ]
+    assert secret not in repr(controller.contexts)
+    assert secret not in repr(controller.events)
+    for context in controller.contexts:
+        assert not hasattr(context, "api_key")
+        assert not hasattr(context, "headers")
+        assert not hasattr(context, "body")
+        assert not hasattr(context, "raw_usage")
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_keeps_known_usage_and_conservatively_settles_missing_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController()
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 3},
+            },
+        )
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        result = await OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+            attempt_controller=controller,
+        ).generate(
+            [{"role": "user", "content": "hello"}],
+            {},
+            attempt_context=_attempt_context(),
+        )
+
+    assert result.input_tokens == 3
+    assert result.output_tokens is None
+    assert controller.events[-1] == (
+        "finish",
+        "reservation-question-1-1",
+        1,
+        ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+        ProviderAttemptOutcome.USAGE_INCOMPLETE,
+        3,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_resumes_from_persisted_provider_attempt_ordinal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    statuses = iter([503, 200])
+    controller = _RecordingAttemptController()
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        status = next(statuses)
+        if status == 200:
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok"}}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                },
+            )
+        return httpx.Response(503, json={"error": {"message": "retry"}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            max_retries=2,
+            retry_backoff_base_seconds=0,
+            client=client,
+            attempt_controller=controller,
+        ).generate(
+            [{"role": "user", "content": "hello"}],
+            {},
+            attempt_context=_attempt_context(next_provider_attempt=2),
+        )
+
+    assert result.metadata["attempts"] == 3
+    assert [event[2] for event in controller.events if event[0] == "reserve"] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_preflight_failures_do_not_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    missing_key_controller = _RecordingAttemptController()
+    monkeypatch.delenv("MISSING_PROVIDER_KEY", raising=False)
+    missing_key_adapter = OpenAICompatibleAdapter(
+        "https://provider.example/v1",
+        "model",
+        "MISSING_PROVIDER_KEY",
+        attempt_controller=missing_key_controller,
+    )
+    with pytest.raises(AdapterError, match="is not set"):
+        await missing_key_adapter.generate(
+            [{"role": "user", "content": "hello"}],
+            {},
+            attempt_context=_attempt_context(),
+        )
+    assert missing_key_controller.events == []
+
+    invalid_payload_controller = _RecordingAttemptController()
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    invalid_payload_adapter = OpenAICompatibleAdapter(
+        "https://provider.example/v1",
+        "model",
+        "TEST_PROVIDER_KEY",
+        attempt_controller=invalid_payload_controller,
+    )
+    with pytest.raises(AdapterError, match="At least one message"):
+        await invalid_payload_adapter.generate(
+            [],
+            {},
+            attempt_context=_attempt_context(),
+        )
+    assert invalid_payload_controller.events == []
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_requires_context_and_controller_as_a_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController()
+    with_controller = OpenAICompatibleAdapter(
+        "https://provider.example/v1",
+        "model",
+        "TEST_PROVIDER_KEY",
+        attempt_controller=controller,
+    )
+    with pytest.raises(ValueError, match="attempt_context is required"):
+        await with_controller.generate([{"role": "user", "content": "hello"}], {})
+    assert controller.events == []
+
+    without_controller = OpenAICompatibleAdapter(
+        "https://provider.example/v1",
+        "model",
+        "TEST_PROVIDER_KEY",
+    )
+    with pytest.raises(ValueError, match="requires an attempt_controller"):
+        await without_controller.generate(
+            [{"role": "user", "content": "hello"}],
+            {},
+            attempt_context=_attempt_context(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_releases_when_mark_send_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController(mark_error=RuntimeError("mark failed"))
+    http_calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+            attempt_controller=controller,
+        )
+        with pytest.raises(RuntimeError, match="mark failed"):
+            await adapter.generate(
+                [{"role": "user", "content": "hello"}],
+                {},
+                attempt_context=_attempt_context(),
+            )
+
+    assert http_calls == 0
+    assert controller.events[-1] == (
+        "finish",
+        "reservation-question-1-1",
+        1,
+        ProviderAttemptDisposition.RELEASED_PRE_SEND,
+        ProviderAttemptOutcome.MARK_SEND_FAILED,
+        None,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_leaves_cancelled_send_start_for_reconciliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController(mark_error=asyncio.CancelledError())
+    http_calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+            attempt_controller=controller,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.generate(
+                [{"role": "user", "content": "hello"}],
+                {},
+                attempt_context=_attempt_context(),
+            )
+
+    assert http_calls == 0
+    assert [event[0] for event in controller.events] == ["reserve", "mark"]
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_unknown_send_start_is_never_released(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController(
+        mark_error=ProviderAttemptStateUnknown("commit acknowledgement lost")
+    )
+    http_calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "A"}}]})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+            attempt_controller=controller,
+        )
+        with pytest.raises(ProviderAttemptStateUnknown):
+            await adapter.generate(
+                [{"role": "user", "content": "hello"}],
+                {},
+                attempt_context=_attempt_context(),
+            )
+
+    assert http_calls == 0
+    assert [event[0] for event in controller.events] == ["reserve", "mark"]
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_conservatively_settles_cancellation_after_mark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController()
+    transport = _CancellingTransport()
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+            attempt_controller=controller,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.generate(
+                [{"role": "user", "content": "hello"}],
+                {},
+                attempt_context=_attempt_context(),
+            )
+
+    assert transport.calls == 1
+    assert controller.events[-1] == (
+        "finish",
+        "reservation-question-1-1",
+        1,
+        ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+        ProviderAttemptOutcome.CANCELLED,
+        None,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_unknown_settlement_stops_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController(finish_error_at=1)
+    http_calls = 0
+    delays: list[float] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal http_calls
+        http_calls += 1
+        return httpx.Response(429, json={"error": {"message": "retry"}})
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            max_retries=2,
+            client=client,
+            sleep=fake_sleep,
+            attempt_controller=controller,
+        )
+        with pytest.raises(RuntimeError, match="settlement outcome is unknown"):
+            await adapter.generate(
+                [{"role": "user", "content": "hello"}],
+                {},
+                attempt_context=_attempt_context(),
+            )
+
+    assert http_calls == 1
+    assert delays == []
+    assert [event[0] for event in controller.events] == ["reserve", "mark", "finish"]
+
+
+@pytest.mark.asyncio
+async def test_openai_governance_conservatively_settles_transport_failure_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    controller = _RecordingAttemptController()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise httpx.ConnectError("connection failed", request=request)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "ok"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            max_retries=1,
+            retry_backoff_base_seconds=0,
+            client=client,
+            attempt_controller=controller,
+        ).generate(
+            [{"role": "user", "content": "hello"}],
+            {},
+            attempt_context=_attempt_context(),
+        )
+
+    assert result.text == "ok"
+    finishes = [event for event in controller.events if event[0] == "finish"]
+    assert finishes[0][3:5] == (
+        ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+        ProviderAttemptOutcome.TRANSPORT_ERROR,
+    )
+    assert finishes[1][3:5] == (
+        ProviderAttemptDisposition.SETTLED_ACTUAL,
+        ProviderAttemptOutcome.SUCCEEDED,
+    )
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_retries_429_and_selected_5xx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -985,7 +1658,7 @@ async def test_openai_compatible_does_not_retry_plain_4xx_and_redacts_secrets(
 async def test_openai_compatible_retries_and_classifies_network_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "network-secret"
+    secret = "transport-exception-canary-key"
     monkeypatch.setenv("TEST_PROVIDER_KEY", secret)
     calls = 0
 
@@ -1010,6 +1683,10 @@ async def test_openai_compatible_retries_and_classifies_network_failure(
     assert caught.value.error_type == "network_error"
     assert caught.value.attempts == 2
     assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    formatted_traceback = "".join(traceback.format_exception(caught.type, caught.value, caught.tb))
+    assert secret not in formatted_traceback
 
 
 @pytest.mark.asyncio
@@ -1046,19 +1723,49 @@ async def test_openai_compatible_rejects_empty_provider_response(
 
 
 def test_adapter_registry() -> None:
+    controller = _RecordingAttemptController()
     assert isinstance(build_adapter("mock", base_url="ignored"), MockModelAdapter)
-    assert isinstance(
-        build_adapter(
-            "openai_compatible",
-            base_url="https://provider.example/v1",
-            remote_model_name="model",
-            api_key_env="KEY",
-            connect_timeout=None,
-        ),
-        OpenAICompatibleAdapter,
+    governed_mock = build_adapter(
+        "mock",
+        base_url="ignored",
+        attempt_controller=controller,
     )
+    governed_openai = build_adapter(
+        "openai_compatible",
+        base_url="https://provider.example/v1",
+        remote_model_name="model",
+        api_key_env="KEY",
+        connect_timeout=None,
+        attempt_controller=controller,
+    )
+    assert isinstance(governed_mock, MockModelAdapter)
+    assert isinstance(governed_openai, OpenAICompatibleAdapter)
+    assert governed_mock._attempt_controller is controller  # type: ignore[attr-defined]
+    assert governed_openai._attempt_controller is controller  # type: ignore[attr-defined]
     with pytest.raises(ValueError, match="Unsupported provider_type"):
         build_adapter("unknown")
+
+
+@pytest.mark.asyncio
+async def test_adapter_registry_forwards_only_supported_mock_hooks() -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    adapter = build_adapter(
+        "mock",
+        sleep=fake_sleep,
+        base_url="ignored",
+        api_key="ignored",
+    )
+    result = await adapter.generate(
+        [],
+        {"mock_response": "A", "mock_generation_delay_seconds": 0.25},
+    )
+
+    assert result.text == "A"
+    assert delays == [0.25]
 
 
 @pytest.mark.parametrize(

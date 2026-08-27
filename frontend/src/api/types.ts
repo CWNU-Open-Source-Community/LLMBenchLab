@@ -1,6 +1,7 @@
 export type ProviderType = "mock" | "openai_compatible";
 export type CredentialSource = "none" | "environment" | "stored";
 export type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type GovernanceRunStatus = "legacy_unmanaged" | "managed" | "delayed" | "exhausted";
 export type QuestionType = "exact_match" | "multiple_choice" | "numeric";
 
 export interface ListResponse<T> {
@@ -83,6 +84,27 @@ export interface EvaluationRun {
   output_tokens: number | null;
   estimated_cost: number | null;
   cancellation_requested: boolean;
+  attempt_count: number;
+  max_attempts: number;
+  failed_attempt_count: number;
+  dispatch_count: number;
+  last_scheduled_at: string | null;
+  governance_policy_id: string | null;
+  governance_status: GovernanceRunStatus;
+  governance_reason: string | null;
+  governance_not_before: string | null;
+  input_token_reservation: number | null;
+  lifetime_request_budget: number | null;
+  lifetime_token_budget: number | null;
+  lifetime_cost_budget_usd: string | null;
+  lease_owner: string | null;
+  lease_token: number;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  next_attempt_at: string | null;
+  last_enqueued_at: string | null;
+  last_error: string | null;
+  dead_lettered_at: string | null;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
@@ -98,6 +120,10 @@ export interface RunPayload {
   seed: number | null;
   system_prompt?: string | null;
   concurrency: number;
+  input_token_reservation?: number | null;
+  lifetime_request_budget?: number | null;
+  lifetime_token_budget?: number | null;
+  lifetime_cost_budget_usd?: number | string | null;
   read_timeout_seconds: number;
 }
 

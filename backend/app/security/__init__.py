@@ -13,6 +13,7 @@ from .credentials import (
     EncryptedCredential,
     normalize_provider_origin,
 )
+from .provider_metadata import normalize_http_attempt_count, normalize_provider_metadata
 
 __all__ = [
     "CREDENTIAL_ALGORITHM",
@@ -25,5 +26,7 @@ __all__ = [
     "CredentialKeyringInvalidError",
     "CredentialKeyringUnavailableError",
     "EncryptedCredential",
+    "normalize_http_attempt_count",
+    "normalize_provider_metadata",
     "normalize_provider_origin",
 ]

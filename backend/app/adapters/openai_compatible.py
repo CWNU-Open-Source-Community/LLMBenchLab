@@ -28,8 +28,23 @@ from app.core.constants import (
     DEFAULT_WRITE_TIMEOUT_SECONDS,
     RETRYABLE_PROVIDER_STATUS_CODES,
 )
+from app.provider_attempts import ProviderAttemptStateUnknown
 
-from .base import AdapterError, GenerationConfig, Message, ModelAdapter, ModelGenerationResult
+from .base import (
+    AdapterError,
+    GenerationConfig,
+    Message,
+    ModelAdapter,
+    ModelGenerationResult,
+    ProviderAttemptContext,
+    ProviderAttemptController,
+    ProviderAttemptDisposition,
+    ProviderAttemptOutcome,
+    _finish_provider_attempt,
+    _finish_provider_attempt_after_cancellation,
+    _mark_provider_attempt_send_started,
+    _reserve_provider_attempt,
+)
 
 _RETRYABLE_STATUS_CODES = frozenset(RETRYABLE_PROVIDER_STATUS_CODES)
 _AUTHORIZATION_RE = re.compile(
@@ -44,6 +59,15 @@ MAX_CHAT_ERROR_RESPONSE_BYTES = 64 * 1024
 MAX_CHAT_STREAM_WIRE_BYTES = 64 * 1024 * 1024
 MAX_CHAT_STREAM_EVENT_BYTES = 1024 * 1024
 _RESPONSE_READ_CHUNK_BYTES = 64 * 1024
+_HTTP_ADAPTER_ERROR_TYPES = frozenset(
+    {
+        "authentication_error",
+        "rate_limited",
+        "provider_5xx",
+        "provider_4xx",
+        "provider_http_error",
+    }
+)
 
 
 class _ResponseBodyTooLarge(RuntimeError):
@@ -286,6 +310,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         retry_backoff_cap_seconds: float = DEFAULT_RETRY_BACKOFF_CAP_SECONDS,
         client: httpx.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
+        attempt_controller: ProviderAttemptController | None = None,
     ) -> None:
         if not isinstance(base_url, str) or not isinstance(remote_model_name, str):
             raise ValueError("base_url and remote_model_name must be strings")
@@ -303,6 +328,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self._client = client
         self._owns_client = client is None
         self._sleep = sleep or asyncio.sleep
+        self._attempt_controller = attempt_controller
 
         if not self.base_url or not self.remote_model_name:
             raise ValueError("base_url and remote_model_name are required")
@@ -354,6 +380,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self,
         messages: Sequence[Message],
         generation_config: GenerationConfig,
+        *,
+        attempt_context: ProviderAttemptContext | None = None,
     ) -> ModelGenerationResult:
         api_key = (
             self._api_key.get_secret_value()
@@ -378,6 +406,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             "Accept-Encoding": "identity",
             "Content-Type": "application/json",
         }
+        first_attempt = self._first_provider_attempt(attempt_context)
         started = time.perf_counter()
         client = self._client
         if client is None:
@@ -387,9 +416,31 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 trust_env=False,
             )
             self._client = client
-        for attempt in range(1, self.max_retries + 2):
+        for attempt in range(first_attempt, self.max_retries + 2):
+            permit = await _reserve_provider_attempt(
+                self._attempt_controller,
+                attempt_context,
+                provider_attempt=attempt,
+            )
+            try:
+                await _mark_provider_attempt_send_started(self._attempt_controller, permit)
+            except asyncio.CancelledError as exc:
+                exc.add_note("Provider send-start outcome is unknown; reconciliation is required.")
+                raise
+            except ProviderAttemptStateUnknown:
+                raise
+            except BaseException:
+                await _finish_provider_attempt(
+                    self._attempt_controller,
+                    permit,
+                    disposition=ProviderAttemptDisposition.RELEASED_PRE_SEND,
+                    outcome=ProviderAttemptOutcome.MARK_SEND_FAILED,
+                )
+                raise
+
             stream_result: _SSEAccumulator | None = None
             response_body: bytes | None = None
+            terminal_transport_error: AdapterError | None = None
             try:
                 async with client.stream(
                     "POST",
@@ -425,7 +476,65 @@ class OpenAICompatibleAdapter(ModelAdapter):
                             response,
                             limit=MAX_CHAT_SUCCESS_RESPONSE_BYTES,
                         )
+
+                if not 200 <= response.status_code < 300:
+                    assert response_body is not None
+                    error_type, retryable = self._status_error_type(response.status_code)
+                    safe_detail = self._safe_response_error(response, response_body, api_key)
+                    raise AdapterError(
+                        error_type,
+                        sanitize_error_message(
+                            f"Upstream returned HTTP {response.status_code}: {safe_detail}",
+                            api_key,
+                        ),
+                        retryable=retryable,
+                        status_code=_safe_status_code(response.status_code, api_key),
+                        attempts=attempt,
+                    )
+
+                latency_ms = (time.perf_counter() - started) * 1000
+                if stream_result is not None:
+                    result = self._build_generation_result(
+                        response,
+                        content=stream_result.content,
+                        finish_reason=stream_result.finish_reason,
+                        usage_obj=stream_result.usage,
+                        provider_request_id=stream_result.provider_request_id,
+                        returned_model=stream_result.returned_model,
+                        system_fingerprint=stream_result.system_fingerprint,
+                        latency_ms=latency_ms,
+                        attempts=attempt,
+                        api_key=api_key,
+                        response_mode="sse",
+                    )
+                else:
+                    assert response_body is not None
+                    result = self._parse_success_response(
+                        response,
+                        response_body,
+                        latency_ms=latency_ms,
+                        attempts=attempt,
+                        api_key=api_key,
+                    )
+            except asyncio.CancelledError as exc:
+                confirmed = await _finish_provider_attempt_after_cancellation(
+                    self._attempt_controller,
+                    permit,
+                    disposition=ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+                    outcome=ProviderAttemptOutcome.CANCELLED,
+                )
+                if not confirmed:
+                    exc.add_note(
+                        "Provider attempt settlement was not confirmed; reconciliation is required."
+                    )
+                raise
             except _ResponseBodyTooLarge as exc:
+                await _finish_provider_attempt(
+                    self._attempt_controller,
+                    permit,
+                    disposition=ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+                    outcome=ProviderAttemptOutcome.PROVIDER_RESPONSE_ERROR,
+                )
                 raise AdapterError(
                     "provider_response_too_large",
                     sanitize_error_message(
@@ -436,61 +545,92 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     attempts=attempt,
                 ) from exc
             except httpx.TransportError as exc:
+                await _finish_provider_attempt(
+                    self._attempt_controller,
+                    permit,
+                    disposition=ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+                    outcome=ProviderAttemptOutcome.TRANSPORT_ERROR,
+                )
                 error_type = self._transport_error_type(exc)
                 safe_message = sanitize_error_message(exc, api_key)
                 if attempt <= self.max_retries:
                     await self._backoff(attempt)
                     continue
-                raise AdapterError(
+                terminal_transport_error = AdapterError(
                     error_type,
                     f"OpenAI-compatible request failed: {safe_message}",
                     retryable=True,
                     attempts=attempt,
-                ) from exc
-
-            if not 200 <= response.status_code < 300:
-                assert response_body is not None
-                error_type, retryable = self._status_error_type(response.status_code)
-                safe_detail = self._safe_response_error(response, response_body, api_key)
-                if retryable and attempt <= self.max_retries:
+                )
+            except AdapterError as exc:
+                outcome = (
+                    ProviderAttemptOutcome.HTTP_ERROR
+                    if exc.error_type in _HTTP_ADAPTER_ERROR_TYPES
+                    else ProviderAttemptOutcome.PROVIDER_RESPONSE_ERROR
+                )
+                await _finish_provider_attempt(
+                    self._attempt_controller,
+                    permit,
+                    disposition=ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+                    outcome=outcome,
+                )
+                if exc.retryable and attempt <= self.max_retries:
                     await self._backoff(attempt)
                     continue
-                raise AdapterError(
-                    error_type,
-                    sanitize_error_message(
-                        f"Upstream returned HTTP {response.status_code}: {safe_detail}",
-                        api_key,
-                    ),
-                    retryable=retryable,
-                    status_code=_safe_status_code(response.status_code, api_key),
-                    attempts=attempt,
+                raise
+            except BaseException:
+                await _finish_provider_attempt(
+                    self._attempt_controller,
+                    permit,
+                    disposition=ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
+                    outcome=ProviderAttemptOutcome.UNEXPECTED_ERROR,
                 )
+                raise
 
-            latency_ms = (time.perf_counter() - started) * 1000
-            if stream_result is not None:
-                return self._build_generation_result(
-                    response,
-                    content=stream_result.content,
-                    finish_reason=stream_result.finish_reason,
-                    usage_obj=stream_result.usage,
-                    provider_request_id=stream_result.provider_request_id,
-                    returned_model=stream_result.returned_model,
-                    system_fingerprint=stream_result.system_fingerprint,
-                    latency_ms=latency_ms,
-                    attempts=attempt,
-                    api_key=api_key,
-                    response_mode="sse",
-                )
-            assert response_body is not None
-            return self._parse_success_response(
-                response,
-                response_body,
-                latency_ms=latency_ms,
-                attempts=attempt,
-                api_key=api_key,
+            # Raise only after leaving the TransportError handler.  httpx transport
+            # exceptions retain their request (including Authorization), and Python
+            # otherwise attaches that exception as both cause/context to AdapterError.
+            if terminal_transport_error is not None:
+                raise terminal_transport_error
+
+            usage_complete = result.input_tokens is not None and result.output_tokens is not None
+            await _finish_provider_attempt(
+                self._attempt_controller,
+                permit,
+                disposition=(
+                    ProviderAttemptDisposition.SETTLED_ACTUAL
+                    if usage_complete
+                    else ProviderAttemptDisposition.SETTLED_CONSERVATIVE
+                ),
+                outcome=(
+                    ProviderAttemptOutcome.SUCCEEDED
+                    if usage_complete
+                    else ProviderAttemptOutcome.USAGE_INCOMPLETE
+                ),
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
             )
+            return result
 
         raise AssertionError("unreachable")
+
+    def _first_provider_attempt(self, context: ProviderAttemptContext | None) -> int:
+        if self._attempt_controller is None:
+            if context is not None:
+                raise ValueError("attempt_context requires an attempt_controller")
+            return 1
+        if context is None:
+            raise ValueError("attempt_context is required when attempt_controller is configured")
+        first_attempt = context.next_provider_attempt
+        if (
+            isinstance(first_attempt, bool)
+            or not isinstance(first_attempt, int)
+            or not 1 <= first_attempt <= self.max_retries + 1
+        ):
+            raise ValueError(
+                "attempt_context.next_provider_attempt exceeds the configured retry policy"
+            )
+        return first_attempt
 
     async def aclose(self) -> None:
         """Close the lazily-created connection pool owned by this adapter."""

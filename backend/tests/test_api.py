@@ -20,6 +20,7 @@ from app.models import (
     Benchmark,
     EvaluationResponse,
     EvaluationRun,
+    GovernanceRunStatus,
     Model,
     Question,
     RunStatus,
@@ -252,7 +253,14 @@ def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(
         "retry_scheduled": 0,
         "dead_lettered": 0,
         "runs_with_queue_notification_error": 0,
+        "managed_backlog": 0,
+        "governance_delayed": 0,
+        "governance_exhausted": 0,
+        "active_provider_attempts": 0,
+        "overdrawn_governance_scopes": 0,
         "total_attempts": 0,
+        "total_failed_attempts": 0,
+        "total_dispatches": 0,
     }
     model = client.post(
         "/api/v1/models",
@@ -267,8 +275,24 @@ def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(
 
     pending = client.get("/api/v1/tasks/metrics").json()
     assert pending["pending"] == pending["due_pending"] == 1
+    assert pending["managed_backlog"] == 1
     assert pending["running"] == pending["total_attempts"] == 0
     assert client.get("/api/v1/metrics/summary").status_code == 200
+
+    with SessionLocal() as session, session.begin():
+        delayed_run = session.get(EvaluationRun, run.json()["id"])
+        assert delayed_run is not None
+        delayed_run.governance_status = GovernanceRunStatus.DELAYED
+        delayed_run.governance_not_before = datetime.now(UTC) + timedelta(hours=1)
+    delayed = client.get("/api/v1/tasks/metrics").json()
+    assert delayed["pending"] == delayed["managed_backlog"] == 1
+    assert delayed["due_pending"] == 0
+    assert delayed["governance_delayed"] == 1
+    with SessionLocal() as session, session.begin():
+        delayed_run = session.get(EvaluationRun, run.json()["id"])
+        assert delayed_run is not None
+        delayed_run.governance_status = GovernanceRunStatus.MANAGED
+        delayed_run.governance_not_before = None
 
     settings = get_settings()
     repository = RunLeaseRepository(
@@ -282,6 +306,8 @@ def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(
     assert after_cancel["pending"] == after_cancel["due_pending"] == 0
     assert after_cancel["running"] == 1
     assert after_cancel["active_cancellation_requests"] == 1
+    assert after_cancel["total_dispatches"] == 1
+    assert after_cancel["total_failed_attempts"] == 0
 
 
 def test_model_crud_pagination_and_secret_value_not_returned(client) -> None:
@@ -545,6 +571,12 @@ def test_run_preserves_protocol_defaults_and_explicit_null_overrides_model_defau
         ("max_tokens", "8192"),
         ("read_timeout_seconds", True),
         ("read_timeout_seconds", "300"),
+        ("input_token_reservation", True),
+        ("input_token_reservation", 128.0),
+        ("lifetime_request_budget", True),
+        ("lifetime_request_budget", 10.0),
+        ("lifetime_token_budget", True),
+        ("lifetime_token_budget", 1024.0),
     ],
 )
 def test_run_rejects_invalid_output_budget_and_timeout_types_or_limits(

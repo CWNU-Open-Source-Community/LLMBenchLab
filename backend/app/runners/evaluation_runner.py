@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from collections.abc import Awaitable, Callable
+import re
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
@@ -14,29 +15,64 @@ from uuid import uuid4
 
 from pydantic import SecretStr
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.adapters import AdapterError, build_adapter
 from app.core.config import get_settings
-from app.core.time import utc_now
+from app.db.clock import database_utc_now
 from app.evaluators import get_evaluator
+from app.governance import (
+    DatabaseProviderAttemptController,
+    GovernanceDeferred,
+    GovernanceExhausted,
+    GovernanceFenceLost,
+    GovernanceIntegrityError,
+    GovernanceRepository,
+    GovernanceSettlementUnknown,
+    append_audit_event,
+)
 from app.models import (
     Benchmark,
     EvaluationResponse,
     EvaluationRun,
+    GovernanceRunStatus,
     ModelCredential,
     Question,
     RunStatus,
 )
 from app.runners.run_leases import (
+    AttemptDisposition,
     ResponseDisposition,
     RunLease,
     RunLeaseRepository,
     aggregate_run_evidence,
 )
-from app.security import CredentialKeyring, EncryptedCredential
+from app.security import (
+    CredentialCryptoError,
+    CredentialKeyring,
+    EncryptedCredential,
+    normalize_http_attempt_count,
+    normalize_provider_metadata,
+)
+from app.services.credential_audit import audit_credential_decrypt_failed
 
 logger = logging.getLogger(__name__)
+
+_OPAQUE_PROVIDER_SCOPE_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True, slots=True)
+class _GovernanceSnapshot:
+    """Frozen, secret-free inputs needed to govern one Run slice."""
+
+    model_id: str
+    provider_scope: str
+    question_quantum: int
+    input_token_reservation: int | None
+    lifetime_request_budget: int | None
+    lifetime_token_budget: int | None
+    lifetime_cost_budget_usd: Decimal | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +85,7 @@ class _ModelSnapshot:
     output_price: Decimal | None
     credential_source: str = "none"
     api_key: SecretStr | None = field(default=None, repr=False)
+    governance: _GovernanceSnapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +117,7 @@ class EvaluationRunner:
         *,
         worker_id: str | None = None,
         lease_repository: RunLeaseRepository | None = None,
+        governance_repository: GovernanceRepository | None = None,
     ) -> None:
         settings = get_settings()
         self._settings = settings
@@ -91,6 +129,7 @@ class EvaluationRunner:
             retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
             retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
         )
+        self._governance_repository = governance_repository or GovernanceRepository(session_factory)
         self._heartbeat_seconds = settings.worker_heartbeat_seconds
         self._mock_generation_delay_seconds = settings.mock_generation_delay_seconds
 
@@ -104,7 +143,7 @@ class EvaluationRunner:
 
         if shutdown_requested is not None and shutdown_requested.is_set():
             return False
-        lease = self._claim(run_id)
+        lease = await asyncio.to_thread(self._claim, run_id)
         if lease is None:
             logger.info(
                 "Run claim was a durable no-op",
@@ -147,31 +186,45 @@ class EvaluationRunner:
                 raise _ShutdownRequested("process_shutdown_requested")
             timeouts = dict(execution.get("timeouts_seconds", {}))
             retry_policy = dict(execution.get("retry_policy", {}))
-            adapter = build_adapter(
-                model.provider_type,
-                base_url=model.base_url,
-                remote_model_name=model.remote_model_name,
-                api_key_env=model.api_key_env,
-                api_key=model.api_key,
-                connect_timeout_seconds=timeouts.get("connect"),
-                read_timeout_seconds=timeouts.get("read"),
-                write_timeout_seconds=timeouts.get("write"),
-                pool_timeout_seconds=timeouts.get("pool"),
-                max_retries=retry_policy.get("max_retries"),
-                retry_backoff_base_seconds=retry_policy.get("backoff_base_seconds"),
-                retry_backoff_cap_seconds=retry_policy.get("backoff_cap_seconds"),
-            )
+            adapter_options: dict[str, Any] = {
+                "base_url": model.base_url,
+                "remote_model_name": model.remote_model_name,
+                "api_key_env": model.api_key_env,
+                "api_key": model.api_key,
+                "connect_timeout_seconds": timeouts.get("connect"),
+                "read_timeout_seconds": timeouts.get("read"),
+                "write_timeout_seconds": timeouts.get("write"),
+                "pool_timeout_seconds": timeouts.get("pool"),
+                "max_retries": retry_policy.get("max_retries"),
+                "retry_backoff_base_seconds": retry_policy.get("backoff_base_seconds"),
+                "retry_backoff_cap_seconds": retry_policy.get("backoff_cap_seconds"),
+            }
+            if model.governance is not None:
+                adapter_options["attempt_controller"] = DatabaseProviderAttemptController(
+                    self._governance_repository,
+                    lease_owner=lease.owner,
+                    input_price_per_million=model.input_price,
+                    output_price_per_million=model.output_price,
+                )
+            adapter = build_adapter(model.provider_type, **adapter_options)
             configured_concurrency = execution.get("concurrency", 1)
             concurrency = max(1, min(4, int(configured_concurrency)))
+            slice_questions = questions
+            questions_remain = False
+            if model.governance is not None:
+                slice_questions = questions[: model.governance.question_quantum]
+                questions_remain = len(questions) > len(slice_questions)
+            responses_added = 0
 
             async def evaluate_bounded(question: _QuestionSnapshot) -> bool:
+                nonlocal responses_added
                 if lease_lost.is_set():
                     raise _LeaseUnavailable("heartbeat_fence_lost")
                 if shutdown_requested is not None and shutdown_requested.is_set():
                     return False
-                if self._cancellation_requested(run_id):
+                if await asyncio.to_thread(self._cancellation_requested, run_id):
                     return False
-                await self._evaluate_question(
+                response_disposition = await self._evaluate_question(
                     lease,
                     model,
                     question,
@@ -179,10 +232,12 @@ class EvaluationRunner:
                     prompt_template,
                     adapter,
                 )
+                if response_disposition == ResponseDisposition.INSERTED:
+                    responses_added += 1
                 return True
 
-            await self._run_questions(
-                questions,
+            governance_signal = await self._run_questions(
+                slice_questions,
                 evaluate=evaluate_bounded,
                 concurrency=concurrency,
                 lease_lost=lease_lost,
@@ -191,10 +246,73 @@ class EvaluationRunner:
                 raise _LeaseUnavailable("heartbeat_fence_lost")
             if shutdown_requested is not None and shutdown_requested.is_set():
                 raise _ShutdownRequested("process_shutdown_requested")
-            final_status = (
-                RunStatus.CANCELLED if self._cancellation_requested(run_id) else RunStatus.COMPLETED
-            )
-            finished_status = self._finish(lease, final_status)
+            cancellation_requested = await asyncio.to_thread(self._cancellation_requested, run_id)
+            if not cancellation_requested and governance_signal is not None:
+                if isinstance(governance_signal, GovernanceDeferred):
+                    disposition = await asyncio.to_thread(
+                        self._lease_repository.defer_governance,
+                        lease,
+                        reason=governance_signal.code,
+                        not_before=governance_signal.not_before,
+                    )
+                elif isinstance(
+                    governance_signal,
+                    (GovernanceExhausted, GovernanceIntegrityError),
+                ):
+                    disposition = await asyncio.to_thread(
+                        self._lease_repository.exhaust_governance,
+                        lease,
+                        reason=governance_signal.code,
+                        integrity_error=isinstance(
+                            governance_signal,
+                            GovernanceIntegrityError,
+                        ),
+                    )
+                else:
+                    # An uncertain settlement may already have committed.  Yielding
+                    # reconciles the old lease and never risks a duplicate retry.
+                    disposition = await asyncio.to_thread(
+                        self._lease_repository.cooperative_yield,
+                        lease,
+                        responses_added=responses_added,
+                    )
+                logger.info(
+                    "Evaluation run governance transition resolved",
+                    extra={
+                        "event": "run_governance_transition_resolved",
+                        "run_id": run_id,
+                        "worker_id": lease.owner,
+                        "attempt": lease.attempt,
+                        "lease_token": lease.token,
+                        "error_code": governance_signal.code,
+                        "result": disposition.value,
+                    },
+                )
+                if disposition == AttemptDisposition.FENCE_LOST:
+                    raise _LeaseUnavailable("governance_transition_fence_lost")
+                return True
+            if not cancellation_requested and model.governance is not None and questions_remain:
+                disposition = await asyncio.to_thread(
+                    self._lease_repository.cooperative_yield,
+                    lease,
+                    responses_added=responses_added,
+                )
+                logger.info(
+                    "Evaluation run question quantum yielded",
+                    extra={
+                        "event": "run_question_quantum_yielded",
+                        "run_id": run_id,
+                        "worker_id": lease.owner,
+                        "attempt": lease.attempt,
+                        "lease_token": lease.token,
+                        "result": disposition.value,
+                    },
+                )
+                if disposition == AttemptDisposition.FENCE_LOST:
+                    raise _LeaseUnavailable("cooperative_yield_fence_lost")
+                return True
+            final_status = RunStatus.CANCELLED if cancellation_requested else RunStatus.COMPLETED
+            finished_status = await asyncio.to_thread(self._finish, lease, final_status)
             logger.info(
                 "Evaluation run finish transition resolved",
                 extra={
@@ -234,7 +352,7 @@ class EvaluationRunner:
             )
             return False
         except _LeaseUnavailable:
-            if self._lease_repository.finish_cancelled(lease):
+            if await asyncio.to_thread(self._lease_repository.finish_cancelled, lease):
                 logger.info(
                     "Evaluation run stopped after cancellation",
                     extra={
@@ -272,8 +390,10 @@ class EvaluationRunner:
                     "result": "retry_or_dead_letter",
                 },
             )
-            disposition = self._lease_repository.fail_attempt(
-                lease, error_code=f"runner_error:{type(exc).__name__}"
+            disposition = await asyncio.to_thread(
+                self._lease_repository.fail_attempt,
+                lease,
+                error_code=f"runner_error:{type(exc).__name__}",
             )
             logger.warning(
                 "Evaluation run failure transition resolved",
@@ -325,7 +445,7 @@ class EvaluationRunner:
                 await asyncio.wait_for(stop.wait(), timeout=self._heartbeat_seconds)
             except TimeoutError:
                 try:
-                    renewed = self._lease_repository.heartbeat(lease)
+                    renewed = await asyncio.to_thread(self._lease_repository.heartbeat, lease)
                 except Exception:
                     logger.error(
                         "Run lease heartbeat failed",
@@ -373,20 +493,63 @@ class EvaluationRunner:
         evaluate: Callable[[_QuestionSnapshot], Awaitable[bool]],
         concurrency: int,
         lease_lost: asyncio.Event,
-    ) -> None:
+    ) -> (
+        GovernanceDeferred
+        | GovernanceExhausted
+        | GovernanceIntegrityError
+        | GovernanceSettlementUnknown
+        | None
+    ):
         """Run a large question set with a fixed number of consumer tasks.
 
         A shared iterator keeps scheduling memory constant instead of creating one
         coroutine and task per question.  Returning ``False`` from ``evaluate``
         stops consumers from taking more work after shutdown or cancellation.
+        Governance pressure stops new work but drains already-started questions.
         Lease loss and unexpected errors still cancel every in-flight consumer.
         """
 
         if not questions:
-            return
+            return None
 
         question_iterator = iter(questions)
         stop_scheduling = asyncio.Event()
+        governance_signal: (
+            GovernanceDeferred
+            | GovernanceExhausted
+            | GovernanceIntegrityError
+            | GovernanceSettlementUnknown
+            | None
+        ) = None
+
+        def remember_governance_signal(
+            candidate: (
+                GovernanceDeferred
+                | GovernanceExhausted
+                | GovernanceIntegrityError
+                | GovernanceSettlementUnknown
+            ),
+        ) -> None:
+            """Keep the safest transition if concurrent attempts signal together."""
+
+            nonlocal governance_signal
+            priority = {
+                GovernanceDeferred: 1,
+                GovernanceSettlementUnknown: 2,
+                GovernanceExhausted: 3,
+                GovernanceIntegrityError: 4,
+            }
+            should_replace = (
+                governance_signal is None
+                or priority[type(candidate)] > priority[type(governance_signal)]
+            )
+            should_replace = should_replace or (
+                isinstance(candidate, GovernanceDeferred)
+                and isinstance(governance_signal, GovernanceDeferred)
+                and candidate.not_before > governance_signal.not_before
+            )
+            if should_replace:
+                governance_signal = candidate
 
         async def consume_questions() -> None:
             while not stop_scheduling.is_set():
@@ -396,7 +559,19 @@ class EvaluationRunner:
                     question = next(question_iterator)
                 except StopIteration:
                     return
-                if not await evaluate(question):
+                try:
+                    if not await evaluate(question):
+                        stop_scheduling.set()
+                        return
+                except GovernanceFenceLost as exc:
+                    raise _LeaseUnavailable(exc.code) from None
+                except (
+                    GovernanceDeferred,
+                    GovernanceExhausted,
+                    GovernanceIntegrityError,
+                    GovernanceSettlementUnknown,
+                ) as exc:
+                    remember_governance_signal(exc)
                     stop_scheduling.set()
                     return
 
@@ -430,6 +605,7 @@ class EvaluationRunner:
                 await asyncio.gather(questions_task, return_exceptions=True)
                 raise _LeaseUnavailable("heartbeat_fence_lost")
             await questions_task
+            return governance_signal
         finally:
             for task in question_tasks:
                 task.cancel()
@@ -467,6 +643,48 @@ class EvaluationRunner:
             }
             if not required_model_fields.issubset(model_values):
                 raise ValueError("run_model_snapshot_incomplete")
+            governance_snapshot: _GovernanceSnapshot | None = None
+            if run.governance_status != GovernanceRunStatus.LEGACY_UNMANAGED:
+                governance_values = persisted_snapshot.get("governance")
+                if not isinstance(governance_values, dict):
+                    raise ValueError("run_governance_snapshot_incomplete")
+                provider_scope = governance_values.get("provider_scope_key")
+                policy_hash = governance_values.get("policy_hash")
+                question_quantum = governance_values.get("question_quantum")
+                run_overrides = governance_values.get("run_overrides")
+                expected_run_overrides = {
+                    "input_token_reservation": run.input_token_reservation,
+                    "lifetime_request_budget": run.lifetime_request_budget,
+                    "lifetime_token_budget": run.lifetime_token_budget,
+                    "lifetime_cost_budget_usd": (
+                        format(run.lifetime_cost_budget_usd, "f")
+                        if run.lifetime_cost_budget_usd is not None
+                        else None
+                    ),
+                }
+                if (
+                    not isinstance(provider_scope, str)
+                    or _OPAQUE_PROVIDER_SCOPE_PATTERN.fullmatch(provider_scope) is None
+                    or not isinstance(policy_hash, str)
+                    or _OPAQUE_PROVIDER_SCOPE_PATTERN.fullmatch(policy_hash) is None
+                    or governance_values.get("policy_id") != run.governance_policy_id
+                    or model_values.get("id") != run.model_id
+                    or isinstance(question_quantum, bool)
+                    or not isinstance(question_quantum, int)
+                    or question_quantum < 1
+                    or not isinstance(run_overrides, dict)
+                    or run_overrides != expected_run_overrides
+                ):
+                    raise ValueError("run_governance_snapshot_incomplete")
+                governance_snapshot = _GovernanceSnapshot(
+                    model_id=run.model_id,
+                    provider_scope=provider_scope,
+                    question_quantum=question_quantum,
+                    input_token_reservation=run.input_token_reservation,
+                    lifetime_request_budget=run.lifetime_request_budget,
+                    lifetime_token_budget=run.lifetime_token_budget,
+                    lifetime_cost_budget_usd=run.lifetime_cost_budget_usd,
+                )
             rows = session.scalars(
                 select(Question)
                 .where(
@@ -512,6 +730,7 @@ class EvaluationRunner:
                     if model_values["output_price_per_million"] is not None
                     else None
                 ),
+                governance=governance_snapshot,
             )
             credential_source = model_snapshot.credential_source
             if credential_source not in {"none", "environment", "stored"}:
@@ -555,13 +774,27 @@ class EvaluationRunner:
                     nonce=credential.nonce,
                     ciphertext=credential.ciphertext,
                 )
-                api_key = CredentialKeyring.from_file(self._settings.credential_keys_file).decrypt(
-                    encrypted,
-                    model_id=run.model_id,
-                    # Security invariant: bind to the immutable Run target, never
-                    # the Model's current Base URL.
-                    provider_base_url=model_snapshot.base_url,
-                )
+                try:
+                    api_key = CredentialKeyring.from_file(
+                        self._settings.credential_keys_file
+                    ).decrypt(
+                        encrypted,
+                        model_id=run.model_id,
+                        # Security invariant: bind to the immutable Run target, never
+                        # the Model's current Base URL.
+                        provider_base_url=model_snapshot.base_url,
+                    )
+                except CredentialCryptoError:
+                    # End the snapshot read transaction before opening the short,
+                    # independent audit transaction.  The event writer accepts no
+                    # exception text or encrypted envelope fields.
+                    audit_credential_decrypt_failed(
+                        session,
+                        model_id=run.model_id,
+                        key_id=credential.key_id,
+                        after_rollback=True,
+                    )
+                    raise
                 model_snapshot = _ModelSnapshot(
                     provider_type=model_snapshot.provider_type,
                     base_url=model_snapshot.base_url,
@@ -571,6 +804,7 @@ class EvaluationRunner:
                     api_key=api_key,
                     input_price=model_snapshot.input_price,
                     output_price=model_snapshot.output_price,
+                    governance=model_snapshot.governance,
                 )
             question_snapshots = [
                 _QuestionSnapshot(
@@ -602,7 +836,7 @@ class EvaluationRunner:
         generation: dict[str, Any],
         prompt_template: dict[str, Any],
         adapter: Any,
-    ) -> None:
+    ) -> ResponseDisposition:
         run_id = lease.run_id
         evaluator = get_evaluator(question.question_type)
         config = dict(generation)
@@ -617,9 +851,56 @@ class EvaluationRunner:
 
         messages = self._render_messages(question, prompt_template)
         try:
-            generated = await adapter.generate(messages, config)
+            if model.governance is None:
+                # Keep the pre-governance call shape intact for legacy adapters and
+                # old Runs migrated as explicitly unmanaged.
+                generated = await adapter.generate(messages, config)
+            else:
+                estimated_input_tokens = self._estimate_input_tokens(messages)
+                reserved_output_tokens = self._reserved_output_tokens(config)
+                reserved_input_tokens = (
+                    model.governance.input_token_reservation
+                    if model.governance.input_token_reservation is not None
+                    else estimated_input_tokens
+                )
+                reserved_cost = self._cost(
+                    model,
+                    reserved_input_tokens,
+                    reserved_output_tokens,
+                )
+                try:
+                    attempt_context = await asyncio.to_thread(
+                        self._governance_repository.question_context,
+                        run_id=run_id,
+                        question_id=question.id,
+                        model_id=model.governance.model_id,
+                        provider_scope=model.governance.provider_scope,
+                        lease_owner=lease.owner,
+                        lease_token=lease.token,
+                        estimated_input_tokens=estimated_input_tokens,
+                        reserved_output_tokens=reserved_output_tokens,
+                        reserved_cost_usd=reserved_cost,
+                    )
+                except SQLAlchemyError:
+                    # The context transaction may have committed even when its
+                    # acknowledgement failed.  Stop before Adapter invocation so a
+                    # later retry cannot duplicate the Provider request.
+                    raise GovernanceSettlementUnknown() from None
+                generated = await adapter.generate(
+                    messages,
+                    config,
+                    attempt_context=attempt_context,
+                )
             if not generated.text.strip():
                 raise AdapterError("empty_response", "The model returned an empty response.")
+        except (
+            GovernanceDeferred,
+            GovernanceExhausted,
+            GovernanceFenceLost,
+            GovernanceIntegrityError,
+            GovernanceSettlementUnknown,
+        ):
+            raise
         except AdapterError as exc:
             response = EvaluationResponse(
                 run_id=run_id,
@@ -658,6 +939,10 @@ class EvaluationRunner:
                 error_message=f"Question processing failed: {type(exc).__name__}",
             )
         else:
+            provider_evidence = self._provider_evidence(
+                generated,
+                default_attempts=1 if model.provider_type == "mock" else None,
+            )
             evaluator_config = dict(question.evaluator_config)
             if question.choices:
                 evaluator_config["choices"] = question.choices
@@ -697,12 +982,13 @@ class EvaluationRunner:
                     ),
                     error_type="evaluator_internal_error",
                     error_message=f"Evaluator failed: {type(exc).__name__}",
+                    **provider_evidence,
                 )
             else:
                 parse_error = evaluated.parse_error
                 error_type, error_message = self._parse_error_evidence(
                     parse_error,
-                    dict(generated.metadata),
+                    provider_evidence,
                 )
                 response = EvaluationResponse(
                     run_id=run_id,
@@ -720,9 +1006,14 @@ class EvaluationRunner:
                     ),
                     error_type=error_type,
                     error_message=error_message,
+                    **provider_evidence,
                 )
 
-        disposition = self._lease_repository.persist_response(lease, response)
+        disposition = await asyncio.to_thread(
+            self._lease_repository.persist_response,
+            lease,
+            response,
+        )
         logger.info(
             "Question evidence persistence resolved",
             extra={
@@ -738,6 +1029,58 @@ class EvaluationRunner:
         )
         if disposition == ResponseDisposition.FENCE_LOST:
             raise _LeaseUnavailable("response_fence_lost")
+        return disposition
+
+    @staticmethod
+    def _estimate_input_tokens(messages: list[dict[str, str]]) -> int:
+        """Return an observational UTF-8/protocol estimate, never a hard bound."""
+
+        encoded_bytes = sum(
+            len(message["role"].encode("utf-8")) + len(message["content"].encode("utf-8")) + 8
+            for message in messages
+        )
+        return max(1, (encoded_bytes + 3) // 4)
+
+    @staticmethod
+    def _reserved_output_tokens(generation: Mapping[str, Any]) -> int | None:
+        value = generation.get("max_tokens")
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError("run_generation_snapshot_invalid")
+        return value
+
+    @staticmethod
+    def _provider_evidence(
+        generated: Any,
+        *,
+        default_attempts: int | None = None,
+    ) -> dict[str, Any]:
+        """Allowlist stable Provider evidence without persisting raw usage."""
+
+        metadata = generated.metadata if isinstance(generated.metadata, Mapping) else {}
+        attempts = normalize_http_attempt_count(metadata.get("attempts"))
+        if attempts is None:
+            attempts = normalize_http_attempt_count(default_attempts)
+        return {
+            "provider_request_id": normalize_provider_metadata(
+                generated.provider_request_id,
+                max_length=256,
+            ),
+            "returned_model": normalize_provider_metadata(
+                metadata.get("returned_model"),
+                max_length=256,
+            ),
+            "system_fingerprint": normalize_provider_metadata(
+                metadata.get("system_fingerprint"),
+                max_length=256,
+            ),
+            "finish_reason": normalize_provider_metadata(
+                metadata.get("finish_reason"),
+                max_length=128,
+            ),
+            "http_attempt_count": attempts,
+        }
 
     @staticmethod
     def _render_messages(
@@ -813,9 +1156,29 @@ class EvaluationRunner:
                 raise RuntimeError("run_response_set_incomplete")
             actual_status = RunStatus.CANCELLED if run.cancellation_requested else status
             run.status = actual_status
-            run.finished_at = utc_now()
+            finished_at = database_utc_now(session)
+            run.finished_at = finished_at
             run.next_attempt_at = None
             run.lease_owner = None
             run.lease_expires_at = None
             run.heartbeat_at = None
+            duration_ms = (
+                max(0.0, (finished_at - run.started_at).total_seconds() * 1000)
+                if run.started_at is not None
+                else None
+            )
+            append_audit_event(
+                session,
+                event_key=f"run:{run.id}:terminal:{actual_status.value}",
+                event_type="run_terminal",
+                occurred_at=finished_at,
+                payload={"status": actual_status.value, "reason": "none"},
+                correlation_id=run.id,
+                run_id=run.id,
+                model_id=run.model_id,
+                worker_id=lease.owner,
+                attempt=lease.attempt,
+                lease_token=lease.token,
+                duration_ms=duration_ms,
+            )
             return actual_status

@@ -88,6 +88,16 @@ def _insert_complete_mock_evidence(
     benchmark_id = f"benchmark-import{suffix}"
     run_id = f"run-import{suffix}"
     question_ids = (f"question-import-1{suffix}", f"question-import-2{suffix}")
+    policy_id = f"policy-import{suffix}"
+    scope_ids = {
+        "global": f"scope-global-import{suffix}",
+        "provider": f"scope-provider-import{suffix}",
+        "model": f"scope-model-import{suffix}",
+        "run": f"scope-run-import{suffix}",
+    }
+    question_execution_id = f"question-execution-import{suffix}"
+    reservation_id = f"reservation-import{suffix}"
+    window_start = created_at.replace(second=0, microsecond=0)
     engine = create_database_engine(_sqlite_url(path))
     tables = Base.metadata.tables
     encrypted = CredentialKeyring(
@@ -151,6 +161,37 @@ def _insert_complete_mock_evidence(
                 },
             )
             connection.execute(
+                tables["governance_policies"].insert(),
+                {
+                    "id": policy_id,
+                    "version": 1,
+                    "policy_hash": "c" * 64,
+                    "is_active": True,
+                    "global_concurrency_limit": 8,
+                    "provider_concurrency_limit": 4,
+                    "model_concurrency_limit": 2,
+                    "run_concurrency_limit": 1,
+                    "global_requests_per_minute": 120,
+                    "provider_requests_per_minute": 60,
+                    "model_requests_per_minute": 30,
+                    "run_requests_per_minute": 10,
+                    "global_tokens_per_minute": 100_000,
+                    "provider_tokens_per_minute": 50_000,
+                    "model_tokens_per_minute": 25_000,
+                    "run_tokens_per_minute": 5_000,
+                    "global_lifetime_request_budget": 10_000,
+                    "global_lifetime_token_budget": 1_000_000,
+                    "global_lifetime_cost_budget_usd": Decimal("100.00000000"),
+                    "run_lifetime_request_budget": 10,
+                    "run_lifetime_token_budget": 10_000,
+                    "run_lifetime_cost_budget_usd": Decimal("1.00000000"),
+                    "backlog_limit": 32,
+                    "question_quantum": 2,
+                    "activated_at": created_at,
+                    "created_at": created_at,
+                },
+            )
+            connection.execute(
                 tables["benchmarks"].insert(),
                 {
                     "id": benchmark_id,
@@ -201,6 +242,33 @@ def _insert_complete_mock_evidence(
                     },
                 ],
             )
+            connection.execute(
+                tables["governance_scopes"].insert(),
+                [
+                    {
+                        "id": scope_id,
+                        "scope_type": scope_type,
+                        "scope_key": (
+                            "global"
+                            if scope_type == "global"
+                            else f"{scope_type}-opaque-{namespace or 'primary'}"
+                        ),
+                        "active_reservations": 0,
+                        "reserved_requests": 0,
+                        "reserved_input_tokens": 0,
+                        "reserved_output_tokens": 0,
+                        "reserved_cost_usd": Decimal(0),
+                        "consumed_requests": 1,
+                        "consumed_input_tokens": 8,
+                        "consumed_output_tokens": 3,
+                        "consumed_cost_usd": Decimal("0.00000050"),
+                        "overdrawn": False,
+                        "created_at": created_at,
+                        "updated_at": finished_at,
+                    }
+                    for scope_type, scope_id in scope_ids.items()
+                ],
+            )
             completed = 2 if status == RunStatus.COMPLETED else 0
             connection.execute(
                 tables["evaluation_runs"].insert(),
@@ -233,6 +301,17 @@ def _insert_complete_mock_evidence(
                     "cancellation_requested": False,
                     "attempt_count": 2,
                     "max_attempts": 4,
+                    "failed_attempt_count": 1,
+                    "dispatch_count": 3,
+                    "last_scheduled_at": finished_at if completed else None,
+                    "governance_policy_id": policy_id,
+                    "governance_status": "managed",
+                    "governance_reason": None,
+                    "governance_not_before": None,
+                    "input_token_reservation": 64,
+                    "lifetime_request_budget": 10,
+                    "lifetime_token_budget": 10_000,
+                    "lifetime_cost_budget_usd": Decimal("1.00000000"),
                     "lease_owner": "worker-import" if status == RunStatus.RUNNING else None,
                     "lease_token": 7,
                     "lease_expires_at": (
@@ -266,6 +345,11 @@ def _insert_complete_mock_evidence(
                             "input_tokens": 8,
                             "output_tokens": 3,
                             "estimated_cost": Decimal("0.00000050"),
+                            "provider_request_id": "provider-request-import-1",
+                            "returned_model": "provider-model-v1",
+                            "system_fingerprint": "fixture-fingerprint-v1",
+                            "finish_reason": "stop",
+                            "http_attempt_count": 1,
                             "error_type": None,
                             "error_message": None,
                             "created_at": created_at + timedelta(seconds=1),
@@ -283,11 +367,111 @@ def _insert_complete_mock_evidence(
                             "input_tokens": 9,
                             "output_tokens": 4,
                             "estimated_cost": Decimal("0.00000073"),
+                            "provider_request_id": "provider-request-import-2",
+                            "returned_model": "provider-model-v1",
+                            "system_fingerprint": "fixture-fingerprint-v1",
+                            "finish_reason": "stop",
+                            "http_attempt_count": 2,
                             "error_type": None,
                             "error_message": None,
                             "created_at": finished_at,
                         },
                     ],
+                )
+                connection.execute(
+                    tables["governance_minute_buckets"].insert(),
+                    [
+                        {
+                            "id": (
+                                f"minute-bucket-import{suffix}"
+                                if scope_type == "global"
+                                else f"minute-bucket-{scope_type}-import{suffix}"
+                            ),
+                            "scope_id": scope_id,
+                            "policy_id": policy_id,
+                            "window_start": window_start,
+                            "reserved_requests": 0,
+                            "reserved_input_tokens": 0,
+                            "reserved_output_tokens": 0,
+                            "consumed_requests": 1,
+                            "consumed_input_tokens": 8,
+                            "consumed_output_tokens": 3,
+                            "created_at": created_at,
+                            "updated_at": finished_at,
+                        }
+                        for scope_type, scope_id in scope_ids.items()
+                    ],
+                )
+                connection.execute(
+                    tables["question_executions"].insert(),
+                    {
+                        "id": question_execution_id,
+                        "run_id": run_id,
+                        "question_id": question_ids[0],
+                        "execution_generation": 0,
+                        "next_provider_attempt": 2,
+                        "first_attempt_at": created_at,
+                        "retry_not_before": None,
+                        "created_at": created_at,
+                        "updated_at": finished_at,
+                    },
+                )
+                connection.execute(
+                    tables["provider_call_reservations"].insert(),
+                    {
+                        "id": reservation_id,
+                        "operation_key": f"run:{run_id}:question:{question_ids[0]}:0:1",
+                        "policy_id": policy_id,
+                        "question_execution_id": question_execution_id,
+                        "run_id": run_id,
+                        "question_id": question_ids[0],
+                        "model_id": model_id,
+                        "global_scope_id": scope_ids["global"],
+                        "provider_scope_id": scope_ids["provider"],
+                        "model_scope_id": scope_ids["model"],
+                        "run_scope_id": scope_ids["run"],
+                        "execution_generation": 0,
+                        "provider_attempt": 1,
+                        "lease_owner": "worker-import",
+                        "lease_token": 7,
+                        "state": "settled_actual",
+                        "lease_expires_at": finished_at + timedelta(seconds=30),
+                        "window_start": window_start,
+                        "reserved_input_tokens": 16,
+                        "reserved_output_tokens": 8,
+                        "reserved_cost_usd": Decimal("0.00000100"),
+                        "actual_input_tokens": 8,
+                        "actual_output_tokens": 3,
+                        "actual_cost_usd": Decimal("0.00000050"),
+                        "outcome_code": "succeeded",
+                        "send_started_at": created_at + timedelta(milliseconds=10),
+                        "settled_at": created_at + timedelta(seconds=1),
+                        "created_at": created_at,
+                        "updated_at": finished_at,
+                    },
+                )
+                connection.execute(
+                    tables["audit_events"].insert(),
+                    {
+                        "id": f"audit-import{suffix}",
+                        "event_key": f"reservation:{reservation_id}:settled_actual",
+                        "event_type": "provider_attempt_settled",
+                        "payload_hash": "d" * 64,
+                        "payload": {"disposition": "settled_actual", "requests": 1},
+                        "retention_class": "operational",
+                        "occurred_at": created_at + timedelta(seconds=1),
+                        "expires_at": created_at + timedelta(days=90, seconds=1),
+                        "correlation_id": run_id,
+                        "run_id": run_id,
+                        "model_id": model_id,
+                        "question_id": question_ids[0],
+                        "worker_id": "worker-import",
+                        "reservation_id": reservation_id,
+                        "attempt": 2,
+                        "provider_attempt": 1,
+                        "lease_token": 7,
+                        "duration_ms": 1000.0,
+                    },
                 )
     finally:
         engine.dispose()
@@ -318,8 +502,7 @@ def _core_counts(engine) -> dict[str, int]:
 def _truncate_postgres(engine) -> None:
     with engine.begin() as connection:
         connection.exec_driver_sql(
-            "TRUNCATE evaluation_responses, evaluation_runs, questions, benchmarks, models "
-            "RESTART IDENTITY CASCADE"
+            "TRUNCATE " + ", ".join(reversed(CORE_TABLE_NAMES)) + " RESTART IDENTITY CASCADE"
         )
 
 
@@ -486,6 +669,12 @@ def test_read_only_source_preflight_preserves_file_and_reconciles_rows(tmp_path:
 
     assert snapshot.summaries["models"].row_count == 2
     assert snapshot.summaries["model_credentials"].row_count == 1
+    assert snapshot.summaries["governance_policies"].row_count == 1
+    assert snapshot.summaries["governance_scopes"].row_count == 4
+    assert snapshot.summaries["governance_minute_buckets"].row_count == 4
+    assert snapshot.summaries["question_executions"].row_count == 1
+    assert snapshot.summaries["provider_call_reservations"].row_count == 1
+    assert snapshot.summaries["audit_events"].row_count == 1
     assert snapshot.summaries["questions"].row_count == 2
     assert snapshot.summaries["evaluation_responses"].row_count == 2
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
@@ -505,6 +694,63 @@ def test_source_preflight_rejects_non_head_database(tmp_path: Path) -> None:
         engine.dispose()
 
 
+@pytest.mark.parametrize("active_state", ["missing", "multiple"])
+def test_source_preflight_rejects_invalid_active_policy_history(
+    tmp_path: Path,
+    active_state: str,
+) -> None:
+    source = tmp_path / f"policy-history-{active_state}.db"
+    _run_alembic(source)
+    _insert_complete_mock_evidence(source)
+    with sqlite3.connect(source) as connection:
+        if active_state == "missing":
+            connection.execute("UPDATE governance_policies SET is_active = 0")
+        else:
+            connection.execute("DROP INDEX uq_governance_policies_single_active")
+            columns = [
+                row[1] for row in connection.execute("PRAGMA table_info(governance_policies)")
+            ]
+            duplicate = list(
+                connection.execute(
+                    "SELECT * FROM governance_policies WHERE id = 'policy-import'"
+                ).fetchone()
+            )
+            duplicate[columns.index("id")] = "policy-import-duplicate"
+            duplicate[columns.index("version")] = 2
+            duplicate[columns.index("policy_hash")] = "e" * 64
+            connection.execute(
+                f"INSERT INTO governance_policies ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _column in columns)})",
+                duplicate,
+            )
+
+    engine = _read_only_sqlite_engine(source)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            with pytest.raises(SQLiteImportError, match="exactly one active"):
+                preflight_sqlite_source(connection)
+    finally:
+        engine.dispose()
+
+
+def test_source_preflight_rejects_schema_fingerprint_drift(tmp_path: Path) -> None:
+    source = tmp_path / "schema-fingerprint-drift.db"
+    _run_alembic(source)
+    _insert_complete_mock_evidence(source)
+    with sqlite3.connect(source) as connection:
+        connection.execute("DROP INDEX uq_governance_policies_single_active")
+
+    engine = _read_only_sqlite_engine(source)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            with pytest.raises(SQLiteImportError, match="schema fingerprint"):
+                preflight_sqlite_source(connection)
+    finally:
+        engine.dispose()
+
+
 @pytest.mark.parametrize("status", [RunStatus.PENDING, RunStatus.RUNNING])
 def test_source_preflight_rejects_active_runs(tmp_path: Path, status: RunStatus) -> None:
     source = tmp_path / f"active-{status.value}.db"
@@ -518,6 +764,147 @@ def test_source_preflight_rejects_active_runs(tmp_path: Path, status: RunStatus)
                 preflight_sqlite_source(connection)
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("state", "send_started_at"),
+    [
+        ("reserved", None),
+        ("send_started", "2026-08-25 04:05:06.133456"),
+    ],
+)
+def test_source_preflight_rejects_active_provider_reservations(
+    tmp_path: Path,
+    state: str,
+    send_started_at: str | None,
+) -> None:
+    source = tmp_path / f"active-reservation-{state}.db"
+    _run_alembic(source)
+    _insert_complete_mock_evidence(source)
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "UPDATE provider_call_reservations "
+            "SET state = ?, send_started_at = ?, settled_at = NULL "
+            "WHERE id = 'reservation-import'",
+            (state, send_started_at),
+        )
+
+    engine = _read_only_sqlite_engine(source)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            with pytest.raises(SQLiteImportError, match="active Provider call reservations"):
+                preflight_sqlite_source(connection)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE governance_scopes SET active_reservations = 1 WHERE id = 'scope-global-import'",
+        "UPDATE governance_scopes SET reserved_requests = 1 WHERE id = 'scope-global-import'",
+        "UPDATE governance_scopes SET overdrawn = 1 WHERE id = 'scope-global-import'",
+        "UPDATE governance_minute_buckets SET reserved_requests = 1 "
+        "WHERE id = 'minute-bucket-import'",
+        "DELETE FROM governance_minute_buckets WHERE id = 'minute-bucket-model-import'",
+    ],
+)
+def test_source_preflight_rejects_reserved_governance_aggregates(
+    tmp_path: Path,
+    statement: str,
+) -> None:
+    source = tmp_path / "reserved-governance-capacity.db"
+    _run_alembic(source)
+    _insert_complete_mock_evidence(source)
+    with sqlite3.connect(source) as connection:
+        connection.execute(statement)
+
+    engine = _read_only_sqlite_engine(source)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            with pytest.raises(SQLiteImportError, match="materialized counter drift"):
+                preflight_sqlite_source(connection)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("table_name", "column_name", "value", "direction", "error_pattern"),
+    [
+        (
+            "governance_scopes",
+            "consumed_requests",
+            0,
+            "low",
+            "scope materialized counter drift",
+        ),
+        (
+            "governance_scopes",
+            "consumed_requests",
+            2,
+            "high",
+            "scope materialized counter drift",
+        ),
+        (
+            "governance_minute_buckets",
+            "consumed_input_tokens",
+            7,
+            "low",
+            "minute-bucket materialized counter drift",
+        ),
+        (
+            "governance_minute_buckets",
+            "consumed_input_tokens",
+            9,
+            "high",
+            "minute-bucket materialized counter drift",
+        ),
+    ],
+)
+def test_import_rejects_low_and_high_governance_counter_drift_before_target_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    table_name: str,
+    column_name: str,
+    value: int,
+    direction: str,
+    error_pattern: str,
+) -> None:
+    source = tmp_path / f"{table_name}-{column_name}-{direction}.db"
+    _run_alembic(source)
+    _insert_complete_mock_evidence(source)
+    row_id = "scope-global-import" if table_name == "governance_scopes" else "minute-bucket-import"
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            f"UPDATE {table_name} SET {column_name} = ? WHERE id = ?",
+            (value, row_id),
+        )
+
+    class TargetProbe:
+        connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise AssertionError("drifted source must not open the target database")
+
+        def dispose(self) -> None:
+            return None
+
+    target = TargetProbe()
+    monkeypatch.setattr(import_sqlite_module, "create_database_engine", lambda _url: target)
+    output = io.StringIO()
+
+    with pytest.raises(SQLiteImportError, match=error_pattern):
+        import_sqlite_to_postgres(
+            str(source),
+            "postgresql+psycopg://llmbenchlab@localhost/empty_target",
+            output=output,
+        )
+
+    assert target.connect_calls == 0
+    assert output.getvalue() == ""
 
 
 def test_source_preflight_rejects_foreign_key_damage(tmp_path: Path) -> None:
@@ -596,7 +983,7 @@ def test_copy_failure_rolls_back_every_target_table(tmp_path: Path) -> None:
         _context,
         _executemany,
     ) -> None:
-        if statement.lstrip().upper().startswith("INSERT INTO QUESTIONS"):
+        if statement.lstrip().upper().startswith("INSERT INTO AUDIT_EVENTS"):
             raise RuntimeError("injected copy failure")
 
     sa.event.listen(target, "before_cursor_execute", fail_on_questions)
@@ -615,7 +1002,7 @@ def test_copy_failure_rolls_back_every_target_table(tmp_path: Path) -> None:
         target.dispose()
 
 
-def test_copy_snapshot_preserves_all_six_tables_in_sqlite(tmp_path: Path) -> None:
+def test_copy_snapshot_preserves_all_governance_tables_in_sqlite(tmp_path: Path) -> None:
     source = tmp_path / "copy-source.db"
     target_path = tmp_path / "copy-target.db"
     _run_alembic(source)
@@ -640,7 +1027,21 @@ def test_copy_snapshot_preserves_all_six_tables_in_sqlite(tmp_path: Path) -> Non
     }
     assert postcommit.rows["evaluation_runs"][0]["protocol_version"] == PROTOCOL_VERSION
     assert postcommit.rows["evaluation_runs"][0]["attempt_count"] == 2
+    assert postcommit.rows["evaluation_runs"][0]["failed_attempt_count"] == 1
+    assert postcommit.rows["evaluation_runs"][0]["governance_status"].value == "managed"
     assert postcommit.rows["evaluation_responses"][1]["estimated_cost"] == Decimal("0.00000073")
+    assert postcommit.rows["evaluation_responses"][1]["provider_request_id"] == (
+        "provider-request-import-2"
+    )
+    assert postcommit.rows["evaluation_responses"][1]["http_attempt_count"] == 2
+    assert postcommit.rows["provider_call_reservations"][0]["state"].value == "settled_actual"
+    assert postcommit.rows["provider_call_reservations"][0]["actual_cost_usd"] == Decimal(
+        "0.00000050"
+    )
+    assert postcommit.rows["audit_events"][0]["payload"] == {
+        "disposition": "settled_actual",
+        "requests": 1,
+    }
     assert len(postcommit.rows["model_credentials"]) == 1
     assert postcommit.rows["model_credentials"][0] == source_snapshot.rows["model_credentials"][0]
     assert IMPORT_CREDENTIAL_CANARY.encode() not in target_path.read_bytes()
@@ -700,8 +1101,8 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
         if actual_database != target_database:
             pytest.fail("Connected PostgreSQL database is not the dedicated import test target")
 
-        def fail_after_parent_tables(snapshot, connection) -> None:
-            for table_name in CORE_TABLE_NAMES[:2]:
+        def fail_before_audit_table(snapshot, connection) -> None:
+            for table_name in CORE_TABLE_NAMES[:-1]:
                 table = Base.metadata.tables[table_name]
                 connection.execute(
                     table.insert(),
@@ -713,7 +1114,7 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
             failure_patch.setattr(
                 import_sqlite_module,
                 "copy_snapshot",
-                fail_after_parent_tables,
+                fail_before_audit_table,
             )
             with pytest.raises(RuntimeError, match="injected PostgreSQL copy failure"):
                 import_sqlite_to_postgres(str(source), target_url, output=io.StringIO())
@@ -850,6 +1251,12 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
         assert report.source == report.precommit_target == report.postcommit_target
         assert report.source["models"].row_count == 2
         assert report.source["model_credentials"].row_count == 1
+        assert report.source["governance_policies"].row_count == 1
+        assert report.source["governance_scopes"].row_count == 4
+        assert report.source["governance_minute_buckets"].row_count == 4
+        assert report.source["question_executions"].row_count == 1
+        assert report.source["provider_call_reservations"].row_count == 1
+        assert report.source["audit_events"].row_count == 1
         assert report.source["benchmarks"].row_count == 1
         assert report.source["questions"].row_count == 2
         assert report.source["evaluation_runs"].row_count == 1
@@ -881,6 +1288,9 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
         assert target_snapshot.summaries == source_summary
         assert run["protocol_version"] == PROTOCOL_VERSION
         assert run["attempt_count"] == 2
+        assert run["failed_attempt_count"] == 1
+        assert run["dispatch_count"] == 3
+        assert run["governance_status"].value == "managed"
         assert run["max_attempts"] == 4
         assert run["lease_token"] == 7
         assert run["model_parameters_snapshot"]["execution"]["restart_recovery"] == (
@@ -892,6 +1302,11 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
             "response-import-2",
         ]
         assert responses[1]["parsed_answer"] == {"choice": "B", "confidence": 0.25}
+        assert responses[1]["provider_request_id"] == "provider-request-import-2"
+        assert responses[1]["returned_model"] == "provider-model-v1"
+        assert responses[1]["system_fingerprint"] == "fixture-fingerprint-v1"
+        assert responses[1]["finish_reason"] == "stop"
+        assert responses[1]["http_attempt_count"] == 2
 
         with pytest.raises(SQLiteImportError, match="must be empty"):
             import_sqlite_to_postgres(str(source), target_url, output=io.StringIO())

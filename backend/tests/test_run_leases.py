@@ -14,12 +14,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.base import Base
 from app.db.session import create_database_engine
+from app.governance import GovernanceIntegrityError, GovernanceRepository
 from app.models import (
+    AuditEvent,
     Benchmark,
     EvaluationResponse,
     EvaluationRun,
+    GovernanceRunStatus,
     Model,
     Question,
+    QuestionExecution,
     RunStatus,
 )
 from app.runners.evaluation_runner import EvaluationRunner
@@ -272,6 +276,15 @@ def test_sqlite_finish_and_cancel_race_resolves_to_one_terminal_state(lease_stor
 def test_heartbeat_takeover_and_response_writes_are_fenced(lease_store) -> None:
     clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
     repository = _repository(lease_store, clock)
+    with lease_store() as session, session.begin():
+        session.add(
+            QuestionExecution(
+                run_id="run-1",
+                question_id="question-1",
+                execution_generation=0,
+                next_provider_attempt=3,
+            )
+        )
     first = repository.claim("run-1", owner="worker-a")
     assert first is not None
     assert first.expires_at == clock.current + timedelta(seconds=30)
@@ -297,8 +310,285 @@ def test_heartbeat_takeover_and_response_writes_are_fenced(lease_store) -> None:
             select(func.count(EvaluationResponse.id)).where(EvaluationResponse.run_id == "run-1")
         )
         run = session.get(EvaluationRun, "run-1")
+        execution = session.scalar(select(QuestionExecution))
         assert response_count == 1
         assert run is not None and run.completed_questions == 1
+        assert execution is not None
+        assert execution.execution_generation == 1
+        assert execution.next_provider_attempt == 1
+        assert run.failed_attempt_count == 1
+
+
+def test_takeover_reconcile_integrity_failure_revokes_new_lease_and_is_audited(
+    lease_store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
+    repository = _repository(lease_store, clock)
+    governance = GovernanceRepository(lease_store, clock=clock)
+    with lease_store() as session, session.begin():
+        policy = governance.ensure_default_policy(session)
+        run = session.get(EvaluationRun, "run-1")
+        assert run is not None
+        run.governance_policy_id = policy.id
+        run.governance_status = GovernanceRunStatus.MANAGED
+
+    first = repository.claim("run-1", owner="worker-a")
+    assert first is not None
+    clock.advance(seconds=31)
+
+    def fail_reconcile(
+        _repository: GovernanceRepository,
+        *,
+        run_id: str,
+        lease_token: int,
+    ) -> tuple[int, int]:
+        assert (run_id, lease_token) == ("run-1", first.token)
+        raise GovernanceIntegrityError("canary-ledger-value-must-not-persist")
+
+    monkeypatch.setattr(GovernanceRepository, "reconcile_run_lease", fail_reconcile)
+
+    with pytest.raises(GovernanceIntegrityError, match="canary-ledger-value"):
+        repository.claim("run-1", owner="worker-b")
+
+    with lease_store() as session:
+        run = session.get(EvaluationRun, "run-1")
+        integrity_events = list(
+            session.scalars(
+                select(AuditEvent).where(AuditEvent.event_type == "governance_integrity_error")
+            )
+        )
+        terminal = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.event_type == "run_terminal",
+                AuditEvent.payload["reason"].as_string() == "governance_integrity_error",
+            )
+        )
+        assert run is not None
+        assert run.status == RunStatus.FAILED
+        assert run.governance_status == GovernanceRunStatus.EXHAUSTED
+        assert run.governance_reason == "governance_integrity_error"
+        assert run.last_error == run.error_message == "governance_integrity_error"
+        assert run.lease_token == first.token + 1
+        assert run.lease_owner is run.lease_expires_at is run.heartbeat_at is None
+        assert len(integrity_events) == 1
+        assert integrity_events[0].payload == {"reason": "governance_integrity_error"}
+        assert integrity_events[0].run_id == run.id
+        assert integrity_events[0].model_id == run.model_id
+        assert integrity_events[0].worker_id == "worker-b"
+        assert "canary-ledger-value" not in str(integrity_events[0].payload)
+        assert terminal is not None
+
+
+def test_failed_attempt_resets_only_unfinished_question_retry_generation(lease_store) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
+    repository = _repository(lease_store, clock)
+    with lease_store() as session, session.begin():
+        run = session.get(EvaluationRun, "run-1")
+        assert run is not None
+        run.total_questions = 2
+        session.add(
+            QuestionExecution(
+                run_id="run-1",
+                question_id="question-1",
+                execution_generation=4,
+                next_provider_attempt=3,
+            )
+        )
+
+    lease = repository.claim("run-1", owner="worker-a")
+    assert lease is not None
+    assert (
+        repository.fail_attempt(lease, error_code="worker_interrupted")
+        == AttemptDisposition.RETRY_SCHEDULED
+    )
+
+    with lease_store() as session:
+        run = session.get(EvaluationRun, "run-1")
+        execution = session.scalar(select(QuestionExecution))
+        assert run is not None and run.failed_attempt_count == 1
+        assert execution is not None
+        assert execution.execution_generation == 5
+        assert execution.next_provider_attempt == 1
+        assert execution.first_attempt_at is None
+        assert execution.retry_not_before is None
+
+
+def test_fair_yield_and_governance_delay_do_not_consume_failure_budget(lease_store) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
+    repository = _repository(lease_store, clock)
+    governance = GovernanceRepository(lease_store, clock=clock)
+    with lease_store() as session, session.begin():
+        policy = governance.ensure_default_policy(session)
+        first = session.get(EvaluationRun, "run-1")
+        assert first is not None
+        first.total_questions = 5
+        first.created_at = clock.current
+        first.governance_policy_id = policy.id
+        first.governance_status = GovernanceRunStatus.MANAGED
+        for index in (2, 3):
+            session.add(
+                EvaluationRun(
+                    id=f"run-{index}",
+                    model_id="model-1",
+                    benchmark_id="benchmark-1",
+                    status=RunStatus.PENDING,
+                    model_parameters_snapshot={},
+                    benchmark_hash_snapshot="lease-hash",
+                    prompt_template_snapshot={},
+                    total_questions=5,
+                    governance_policy_id=policy.id,
+                    governance_status=GovernanceRunStatus.MANAGED,
+                    created_at=clock.current + timedelta(microseconds=index),
+                )
+            )
+
+    # Scheduling begins after every initial backlog row exists. A yielded Run's
+    # service timestamp then rotates behind older, never-served rows.
+    clock.advance(microseconds=4)
+
+    claimed_ids: list[str] = []
+    for index in range(3):
+        lease = repository.claim_next(owner=f"worker-{index}")
+        assert lease is not None
+        claimed_ids.append(lease.run_id)
+        assert (
+            repository.cooperative_yield(lease, responses_added=1)
+            == AttemptDisposition.COOPERATIVE_YIELD
+        )
+        clock.advance(microseconds=1)
+    assert claimed_ids == ["run-1", "run-2", "run-3"]
+
+    with lease_store() as session, session.begin():
+        session.add(
+            EvaluationRun(
+                id="run-4",
+                model_id="model-1",
+                benchmark_id="benchmark-1",
+                status=RunStatus.PENDING,
+                model_parameters_snapshot={},
+                benchmark_hash_snapshot="lease-hash",
+                prompt_template_snapshot={},
+                total_questions=5,
+                governance_policy_id=policy.id,
+                governance_status=GovernanceRunStatus.MANAGED,
+                created_at=clock.current,
+            )
+        )
+
+    delayed = repository.claim_next(owner="worker-delay")
+    assert delayed is not None and delayed.run_id == "run-1"
+    not_before = clock.current + timedelta(seconds=10)
+    assert (
+        repository.defer_governance(
+            delayed,
+            reason="governance_global_concurrency",
+            not_before=not_before,
+        )
+        == AttemptDisposition.GOVERNANCE_DEFERRED
+    )
+    assert "run-1" not in repository.due_run_ids()
+    clock.advance(seconds=10)
+    assert "run-1" in repository.due_run_ids()
+
+    with lease_store() as session:
+        runs = list(session.scalars(select(EvaluationRun).order_by(EvaluationRun.id)))
+        assert [run.failed_attempt_count for run in runs] == [0, 0, 0, 0]
+        assert [run.attempt_count for run in runs] == [2, 1, 1, 0]
+
+
+def test_defer_preserves_committed_state_and_audits_reconcile_integrity_failure(
+    lease_store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
+    repository = _repository(lease_store, clock)
+    governance = GovernanceRepository(lease_store, clock=clock)
+    with lease_store() as session, session.begin():
+        policy = governance.ensure_default_policy(session)
+        run = session.get(EvaluationRun, "run-1")
+        assert run is not None
+        run.governance_policy_id = policy.id
+        run.governance_status = GovernanceRunStatus.MANAGED
+    lease = repository.claim("run-1", owner="worker-defer-integrity")
+    assert lease is not None
+    not_before = clock.current + timedelta(seconds=10)
+
+    def fail_reconcile(
+        _repository: GovernanceRepository,
+        *,
+        run_id: str,
+        lease_token: int,
+    ) -> tuple[int, int]:
+        assert (run_id, lease_token) == (lease.run_id, lease.token)
+        raise GovernanceIntegrityError("canary-defer-detail-must-not-persist")
+
+    monkeypatch.setattr(GovernanceRepository, "reconcile_run_lease", fail_reconcile)
+
+    with pytest.raises(GovernanceIntegrityError, match="canary-defer-detail"):
+        repository.defer_governance(
+            lease,
+            reason="governance_global_concurrency",
+            not_before=not_before,
+        )
+
+    with lease_store() as session:
+        run = session.get(EvaluationRun, "run-1")
+        integrity_event = session.scalar(
+            select(AuditEvent).where(AuditEvent.event_type == "governance_integrity_error")
+        )
+        deferred_event = session.scalar(
+            select(AuditEvent).where(AuditEvent.event_type == "run_deferred")
+        )
+        assert run is not None
+        assert run.status == RunStatus.PENDING
+        assert run.governance_status == GovernanceRunStatus.DELAYED
+        assert run.governance_reason == "governance_global_concurrency"
+        assert run.governance_not_before == not_before
+        assert run.lease_owner is run.lease_expires_at is run.heartbeat_at is None
+        assert deferred_event is not None
+        assert integrity_event is not None
+        assert integrity_event.payload == {"reason": "governance_integrity_error"}
+        assert integrity_event.run_id == run.id
+        assert integrity_event.worker_id == lease.owner
+        assert "canary-defer-detail" not in str(integrity_event.payload)
+
+
+def test_governance_integrity_exhaustion_emits_typed_audit_event(lease_store) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
+    repository = _repository(lease_store, clock)
+    governance = GovernanceRepository(lease_store, clock=clock)
+    with lease_store() as session, session.begin():
+        policy = governance.ensure_default_policy(session)
+        run = session.get(EvaluationRun, "run-1")
+        assert run is not None
+        run.governance_policy_id = policy.id
+        run.governance_status = GovernanceRunStatus.MANAGED
+    lease = repository.claim("run-1", owner="worker-integrity")
+    assert lease is not None
+
+    assert (
+        repository.exhaust_governance(
+            lease,
+            reason="governance_scope_missing",
+            integrity_error=True,
+        )
+        == AttemptDisposition.GOVERNANCE_EXHAUSTED
+    )
+
+    with lease_store() as session:
+        run = session.get(EvaluationRun, "run-1")
+        event = session.scalar(
+            select(AuditEvent).where(AuditEvent.event_type == "governance_integrity_error")
+        )
+        assert run is not None
+        assert run.status == RunStatus.FAILED
+        assert run.governance_reason == "governance_scope_missing"
+        assert event is not None
+        assert event.payload == {"reason": "governance_integrity_error"}
+        assert event.run_id == run.id
+        assert event.worker_id == lease.owner
+        assert event.lease_token == lease.token
 
 
 def test_retry_backoff_and_dead_letter_are_finite(lease_store) -> None:
@@ -329,6 +619,9 @@ def test_retry_backoff_and_dead_letter_are_finite(lease_store) -> None:
     assert repository.claim("run-1", owner="worker-c") is None
     with lease_store() as session:
         run = session.get(EvaluationRun, "run-1")
+        dead_letter_event = session.scalar(
+            select(AuditEvent).where(AuditEvent.event_type == "run_dead_lettered")
+        )
         assert run is not None
         assert run.status == RunStatus.FAILED
         assert run.attempt_count == run.max_attempts == 2
@@ -341,22 +634,33 @@ def test_retry_backoff_and_dead_letter_are_finite(lease_store) -> None:
         assert run.lease_owner is None
         assert run.lease_expires_at is None
         assert run.heartbeat_at is None
+        assert dead_letter_event is not None
+        assert dead_letter_event.payload == {
+            "failed_attempt_count": 2,
+            "reason": "worker_error",
+        }
 
 
-def test_pending_and_running_cancellation_converge_deterministically(lease_store) -> None:
+def test_pending_cancellation_converges_deterministically(lease_store) -> None:
     clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
     repository = _repository(lease_store, clock)
 
     assert repository.request_cancel("run-1") == CancelDisposition.CANCELLED
     assert repository.claim("run-1", owner="worker-a") is None
     assert repository.request_cancel("run-1") == CancelDisposition.TERMINAL
+    with lease_store() as session:
+        cancel_events = list(
+            session.scalars(
+                select(AuditEvent).where(AuditEvent.event_type == "run_cancel_requested")
+            )
+        )
+        assert len(cancel_events) == 1
+        assert cancel_events[0].run_id == "run-1"
 
-    with lease_store() as session, session.begin():
-        run = session.get(EvaluationRun, "run-1")
-        assert run is not None
-        run.status = RunStatus.PENDING
-        run.cancellation_requested = False
-        run.finished_at = None
+
+def test_running_cancellation_converges_deterministically(lease_store) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
+    repository = _repository(lease_store, clock)
 
     lease = repository.claim("run-1", owner="worker-a")
     assert lease is not None
@@ -369,6 +673,49 @@ def test_pending_and_running_cancellation_converge_deterministically(lease_store
         assert run.status == RunStatus.CANCELLED
         assert run.completed_questions == 0
         assert run.lease_owner is None
+
+
+def test_finish_cancelled_preserves_terminal_state_and_audits_reconcile_integrity_failure(
+    lease_store,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 25, 4, 0, tzinfo=UTC))
+    repository = _repository(lease_store, clock)
+    lease = repository.claim("run-1", owner="worker-finish-integrity")
+    assert lease is not None
+    assert repository.request_cancel("run-1") == CancelDisposition.REQUESTED
+
+    def fail_reconcile(
+        _repository: GovernanceRepository,
+        *,
+        run_id: str,
+        lease_token: int,
+    ) -> tuple[int, int]:
+        assert (run_id, lease_token) == (lease.run_id, lease.token)
+        raise GovernanceIntegrityError("canary-finish-detail-must-not-persist")
+
+    monkeypatch.setattr(GovernanceRepository, "reconcile_run_lease", fail_reconcile)
+
+    with pytest.raises(GovernanceIntegrityError, match="canary-finish-detail"):
+        repository.finish_cancelled(lease)
+
+    with lease_store() as session:
+        run = session.get(EvaluationRun, "run-1")
+        integrity_event = session.scalar(
+            select(AuditEvent).where(AuditEvent.event_type == "governance_integrity_error")
+        )
+        terminal_event = session.scalar(
+            select(AuditEvent).where(AuditEvent.event_type == "run_terminal")
+        )
+        assert run is not None
+        assert run.status == RunStatus.CANCELLED
+        assert run.lease_owner is run.lease_expires_at is run.heartbeat_at is None
+        assert terminal_event is not None
+        assert integrity_event is not None
+        assert integrity_event.payload == {"reason": "governance_integrity_error"}
+        assert integrity_event.run_id == run.id
+        assert integrity_event.worker_id == lease.owner
+        assert "canary-finish-detail" not in str(integrity_event.payload)
 
 
 def test_pending_retry_cancellation_clears_backoff_and_aggregates_evidence(lease_store) -> None:
@@ -498,6 +845,14 @@ def test_reaper_settles_exhausted_or_cancelled_expired_lease(
             assert report.completed == 0
             assert run.status == RunStatus.FAILED
             assert run.dead_lettered_at == clock.current
+            dead_letter_event = session.scalar(
+                select(AuditEvent).where(AuditEvent.event_type == "run_dead_lettered")
+            )
+            assert dead_letter_event is not None
+            assert dead_letter_event.payload == {
+                "failed_attempt_count": 1,
+                "reason": "lease_expired",
+            }
         assert run.completed_questions == run.correct_questions == 1
         assert run.error_questions == 0
         assert run.score == run.completion_rate == 50.0

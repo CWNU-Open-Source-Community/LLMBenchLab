@@ -28,4 +28,31 @@ class RunStatus(StrEnum):
     CANCELLED = "cancelled"
 
 
+class GovernanceRunStatus(StrEnum):
+    LEGACY_UNMANAGED = "legacy_unmanaged"
+    MANAGED = "managed"
+    DELAYED = "delayed"
+    EXHAUSTED = "exhausted"
+
+
+class GovernanceScopeType(StrEnum):
+    GLOBAL = "global"
+    PROVIDER = "provider"
+    MODEL = "model"
+    RUN = "run"
+
+
+class ProviderCallReservationState(StrEnum):
+    RESERVED = "reserved"
+    SEND_STARTED = "send_started"
+    SETTLED_ACTUAL = "settled_actual"
+    SETTLED_CONSERVATIVE = "settled_conservative"
+    RELEASED_PRE_SEND = "released_pre_send"
+
+
+class AuditRetentionClass(StrEnum):
+    OPERATIONAL = "operational"
+    SECURITY = "security"
+
+
 TERMINAL_RUN_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
