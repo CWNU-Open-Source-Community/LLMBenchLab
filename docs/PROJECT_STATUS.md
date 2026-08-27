@@ -83,7 +83,7 @@
 | Web 凭据静态/迁移/Compose | 通过 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、更新后的 8/8 故障验收、diff check 与高置信 secret scan 均通过；evidence `llmbenchlab-p2-60f3ccdac113` 已确认无残留容器/卷/网络 |
 | 标准数据真实源验证 | 通过 | 固定源下载并转换完整 MMLU-Pro 两个 profile（各 12,032 题）与 GPQA-Diamond（198 题）；另以 CLI `prepare --limit 2` 验证普通入口和可复现归档 |
 | 真实 Provider | 未运行（有意） | 本任务没有 API Key；自动化只用 Mock/MockTransport，真实调用及费用必须由用户显式确认后发生 |
-| 远程精确 SHA CI | 待阶段 commit/push 后核验 | 本表只记录当前工作树本地事实；不得把本地通过替代为远程精确 SHA 结论 |
+| 远程精确 SHA CI | 未触发 | 实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push；该分支没有 PR，workflow 仅监听 PR/main，因此精确 SHA 查询无 run；未获授权创建 PR，本地通过不替代 CI |
 
 所有模型相关自动化路径均使用 Mock、MockTransport 或 stub fetch；基础设施用例只连接隔离的 PostgreSQL/Redis，没有调用真实 Provider，也不要求 Provider API Key。详细命令和结果见工作日志与 [TESTING.md](TESTING.md)。
 
