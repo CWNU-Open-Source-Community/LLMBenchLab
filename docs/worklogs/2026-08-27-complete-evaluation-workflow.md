@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2](../phases/PHASE-2-RELIABILITY.md)、[Phase 3](../phases/PHASE-3-BENCHMARKS.md)
 - 关联计划：[正式数据集与真实 API 完整评测流程执行计划](../plans/2026-08-27-complete-evaluation-workflow.md)
 - 关联 ADR：[ADR-0004](../decisions/ADR-0004-secret-management.md)、[ADR-0005](../decisions/ADR-0005-durable-task-execution.md)、[ADR-0006](../decisions/ADR-0006-local-real-provider-evaluation.md)
-- 最终状态：in_progress（实现、独立终审与完整本地门禁已通过；阶段 commit/push/精确 SHA CI 待完成）
+- 最终状态：in_progress（实现、独立终审、本地门禁与实现 commit/push 已完成；PR/精确 SHA CI 待用户授权）
 
 ## 初始仓库状态
 
@@ -49,7 +49,8 @@
 - [x] `summary.json`、`groups.csv`、`responses.jsonl` 行数和聚合一致，不包含 Key；指标从计划题目/Responses 派生，`metrics_provenance` 标记与 Run 聚合字段漂移。
 - [x] fail-attempt 与过期租约 reaper 在 dead-letter 前聚合已持久化 Response 证据。
 - [x] 当前最终工作树的后端/前端测试、lint/typecheck/build、Smoke、迁移、真实 integration 与 Compose 本地门禁均已通过并冻结计数。
-- [ ] 独立阶段 commit 已 push 到工作分支，精确 SHA 的必需 GitHub Actions 全绿后才标记完成。
+- [x] 实现 commit `0e62a371b9dd7bd819359a4a2b16ff8d5faa3a0d` 已 push 到工作分支且远端一致。
+- [ ] 该分支工作流只由 PR/`main` 触发；创建 PR 待用户明确授权，精确 SHA 的必需 GitHub Actions 全绿后才标记完成。
 
 ## 假设
 
@@ -73,7 +74,7 @@
 2. [completed] 实现与测试标准数据集插件、缓存和归档。
 3. [completed] 实现与测试 Provider preflight、一键评测 CLI。
 4. [completed] 实现有界执行、恢复和报告。
-5. [in_progress] 文档、终审和完整本地/真实基础设施最终验证已完成；阶段 commit/push/精确 SHA CI 待完成。
+5. [in_progress] 文档、终审、本地/真实基础设施门禁及实现 commit/push 已完成；PR/精确 SHA CI 待用户授权。
 
 ## 实际修改
 
@@ -129,6 +130,8 @@
 | 临时 PostgreSQL 16/Redis 7 + `pytest -m integration` | 独立真实基础设施 CI 等价回归 | 0 | `5 passed, 0 skipped`；精确测试容器由 trap 清理 |
 | `make phase2-acceptance` | 隔离 Compose 八场景故障验收 | 0 | 8/8 passed；evidence `llmbenchlab-p2-7cf8ce9e4428/evidence.json`；容器/卷/网络残留均为空 |
 | `git diff --check` + 47 个候选文件高置信 secret pattern scan | 空白、patch 完整性与秘密检查 | 0 | 无 diff 错误、无 Key/Bearer 模式匹配 |
+| `git commit` / `git push -u origin codex/complete-evaluation-workflow` | 形成并发布实现阶段 | 0 | commit `0e62a371b9dd7bd819359a4a2b16ff8d5faa3a0d`；远端 ref 与本地一致 |
+| `gh run list --commit 0e62a371...` | 核对精确 SHA 远程门禁 | 0 | `[]`；workflow 只对 PR/`main` push 触发，PR 创建待用户明确授权 |
 
 ## 测试结果
 
@@ -140,11 +143,11 @@
 ## 未运行验证
 
 - 真实 OpenAI-compatible Provider 调用未运行：本任务没有 Key，且自动化/CI 禁止真实或付费调用。真实兼容性、模型质量、吞吐和实际金额只能在用户显式提供 URL/Key 并确认后验证。
-- 精确阶段 SHA 的 GitHub Actions 尚未运行：必须先形成 commit 并 push；本地通过不替代远程门禁。
+- 精确阶段 SHA 的 GitHub Actions 尚未运行：实现 commit 已 push，但 workflow 只由 PR/`main` push 触发；创建 PR 需用户明确授权，本地通过不替代远程门禁。
 
 ## 未完成项
 
-- 阶段 commit、push 与精确 SHA 四个 GitHub Actions required job 仍待完成；完成前本任务保持 `in_progress`。
+- PR 创建与精确 SHA 四个 GitHub Actions required job 仍待完成；完成前本任务保持 `in_progress`。
 - Phase 2 全局配额/预算/审计/性能基线与 Phase 3 IFEval/通用插件 SDK/代码沙箱/UI 继续留在后续任务。
 
 ## 已知问题与限制
@@ -161,18 +164,18 @@
 - 真实 API 调用：否；本任务无 Key
 - 传输/脱敏边界：远程 HTTPS、HTTP 仅 loopback；发现/Chat identity-only，发现 2 MiB、Chat 成功/错误体 4 MiB/64 KiB；成功 content/raw usage/request ID/model/fingerprint/finish reason 持久化前精确移除当前 Key。目标与完整门禁均通过
 - 危险 Git 操作（force push/reset 等）：无
-- 阶段 push：待执行
-- 远程 CI：待执行
+- 阶段 push：实现 commit `0e62a371...` 已成功推送，远端一致
+- 远程 CI：该 SHA run 列表为空；PR 创建待用户明确授权
 - 遗留安全风险：见 [SECURITY.md](../SECURITY.md) 与 ADR-0006
 
 ## 结果与下一步
 
-实现已形成固定正式数据、真实 API 预检、持久 Run、恢复与完整报告闭环，且没有使用真实 Key；本地与真实基础设施门禁已通过。下一步只处理阶段 commit/push 和精确 SHA 远程 CI；远程门禁完成前不把本任务或 Phase 标记为完成。用户后续可先用 `--limit 20` 做显式付费兼容性测试，再决定是否全量。
+实现已形成固定正式数据、真实 API 预检、持久 Run、恢复与完整报告闭环，且没有使用真实 Key；本地与真实基础设施门禁及实现 commit/push 已完成。下一步需用户授权创建 PR，再等待精确 SHA 远程 CI；远程门禁完成前不把本任务或 Phase 标记为完成。用户后续可先用 `--limit 20` 做显式付费兼容性测试，再决定是否全量。
 
 ## 最终 Git 状态
 
 ```text
-pre-commit: 47 个 modified/untracked 候选文件；未发现第三方题目、Key、报告或下载缓存进入 Git。
+implementation commit: 0e62a371b9dd7bd819359a4a2b16ff8d5faa3a0d（已 push，远端一致）
 branch: codex/complete-evaluation-workflow
-remote gate: pending
+remote gate: pending PR authorization; no Actions run for implementation SHA
 ```

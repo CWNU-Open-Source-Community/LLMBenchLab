@@ -1,7 +1,7 @@
 # 正式数据集与真实 API 完整评测流程执行计划
 
 - Owner: Codex
-- Status: in_progress（实现、独立终审与完整本地门禁已通过；阶段 commit/push/精确 SHA CI 待完成）
+- Status: in_progress（实现、独立终审、本地门禁与实现 commit/push 已完成；PR/精确 SHA CI 待用户授权）
 - Created: 2026-08-27
 - Updated: 2026-08-27
 - Related phase: [Phase 2](../phases/PHASE-2-RELIABILITY.md)、[Phase 3](../phases/PHASE-3-BENCHMARKS.md)
@@ -95,7 +95,7 @@
 | 前端构建 | `cd frontend && npm run build` | production build 成功 | 通过；保留既有 647.22 kB chunk warning |
 | 迁移/Compose | `make phase2-acceptance`、`docker compose config --quiet` | 既有可靠性回归成功 | 真实 PG/Redis 5/5；Compose 8/8；Alembic/lock/config 通过且资源清理为空 |
 | 安全 | `git diff --check` + secret pattern scan | 无密钥/调试残留 | 通过；47 个候选文件无高置信 Key/Bearer 模式匹配 |
-| 远程门禁 | 工作分支 commit/push + 精确 SHA GitHub Actions | 四个 required job 全绿 | 待完成；本地结果不替代远程 CI |
+| 远程门禁 | 工作分支 commit/push + 精确 SHA GitHub Actions | 四个 required job 全绿 | 实现 commit `0e62a371...` 已 push；工作流仅 PR/`main` 触发，当前 run 列表为空；PR 创建待用户明确授权 |
 
 ## Rollback
 
@@ -114,7 +114,7 @@
 - Changed files: 47 个 tracked/untracked 候选文件；无 schema migration、无前端产品行为变更
 - Commands run: 完整本地门禁已执行；后端 310/5、真实基础设施 5/5、前端 13、Smoke 1、Compose 8/8，静态/构建/迁移/锁文件均通过
 - Acceptance evidence: 固定来源全量转换、Provider 安全边界、心跳、报告漂移、dead-letter 和过期租约恢复均有回归；Compose evidence 为 `llmbenchlab-p2-7cf8ce9e4428/evidence.json`
-- Not run: 真实 Provider 调用（无 Key 且自动化禁止）；远程精确 SHA CI（commit/push 前）
+- Not run: 真实 Provider 调用（无 Key 且自动化禁止）；远程精确 SHA CI（实现 commit 已 push，但 PR 创建待用户明确授权）
 - Known issues: Phase 2 全局治理与 IFEval/代码沙箱继续未完成；CLI 需独占数据库且没有金额硬预算；首次 canary 会固化，但 resume canary 无独立审计事件，每题 transport request ID/model/fingerprint 未持久化
 
 ## Decision and discovery log
