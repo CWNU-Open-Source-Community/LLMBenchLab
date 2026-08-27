@@ -29,7 +29,7 @@ llmbenchlab-protocol-v1
 | Benchmark | ID、name、version、schema、Dataset SHA-256、计划题数、dimension、language、license 与 source/转换说明 |
 | Evaluator | 每种题型的 Evaluator 名称与版本、逐题 `evaluator_config` |
 | Prompt | `prompt_template`、最终 system prompt；choices 的确定性渲染规则 |
-| 生成 | temperature、top_p、max_tokens、seed |
+| 生成 | temperature、top_p、max_tokens（可为 `null`）、seed |
 | 模型 | 展示名称、`remote_model_name`、adapter 类型、有效模型参数 |
 | 执行 | concurrency、连接/读取超时、最大尝试次数、退避策略 |
 | 成本 | 输入/输出每百万 Token 单价及币种假设 |
@@ -50,10 +50,22 @@ llmbenchlab-protocol-v1
 | `max_tokens` | `256` | 对 Demo 客观短答案足够，实际值写入快照 |
 | `seed` | `42` | 按请求发送；平台记录请求值，但无法证明 Provider 实际应用 |
 | `concurrency` | `1` | 默认串行，避免速率和调度差异 |
+| 读取超时 | `60s` | 每次 Provider 响应读取超时，实际值写入执行快照 |
 | 最大尝试次数 | `3` | 首次请求加最多 2 次重试 |
 | 指数退避 | `0.25s, 0.5s` | base 为 0.25 秒、cap 为 2 秒；当前 2 次重试不会到达 cap |
 
-Model 可为 `temperature`、`top_p`、`max_tokens`、`seed` 保存经过同等范围校验的默认值；这属于操作者配置的显式预设。Run 请求中出现的字段优先，省略字段才回退到 Model 默认，Model 也未配置时使用上表协议默认。最终有效值写入 `generation` 快照；直接比较仍要求这些值完全相同。
+Model 可为 `temperature`、`top_p`、`max_tokens`、`seed` 保存经过同等范围校验的默认值；这属于操作者配置的显式预设。Run 请求中出现的字段优先，省略字段才回退到 Model 默认，Model 也未配置时使用上表协议默认。显式数字 `max_tokens` 的允许范围为 `1..131072`；显式 `null` 表示 OpenAI-compatible 请求不发送该字段并由 Provider 选择默认输出预算，**不表示无限输出**。读取超时可显式设为 `1..1800` 秒。最终有效生成值写入 `generation`，读取超时写入 `execution.timeouts_seconds.read`；直接比较仍要求这些快照值完全相同。
+
+Web 为已知 Benchmark 提供以下可编辑建议；Model 已配置的对应默认仍优先作为未手动修改时的初值。它们由浏览器作为显式 Run 值提交，不改变上表中兼容 protocol-v1 的通用 API 默认值：
+
+| Web Benchmark | 建议 max_tokens | 建议读取超时 |
+| --- | ---: | ---: |
+| Demo | `256` | `60s` |
+| MMLU-Pro `direct` | `1024` | `180s` |
+| MMLU-Pro `official_cot` | `4000` | `300s` |
+| GPQA-Diamond | `8192` | `600s` |
+
+Web 允许操作者手动覆盖建议值，切换 Benchmark 时不会覆盖已经手动修改的输出预算或读取超时，也可重新应用当前 Benchmark 的建议。选择“由 Provider 决定”会冻结 `max_tokens:null`；该 Run 不能与冻结了某个数字输出预算的 Run 视为同配置。
 
 可信本地标准评测 CLI 为不同 Prompt 长度提供显式的运行预设，这些预设不改变上表的通用 API 默认值：
 
@@ -63,7 +75,7 @@ Model 可为 `temperature`、`top_p`、`max_tokens`、`seed` 保存经过同等�
 | MMLU-Pro `direct` | `0` | `1` | `1024` | `42` | `1` |
 | GPQA-Diamond | `0` | `1` | `1024` | `42` | `1` |
 
-操作者可通过 CLI 参数覆盖这些值或用 `--no-seed` 请求不发送 seed；最终值始终进入 Run 快照。由于生成参数是可比性条件，使用不同 max tokens、temperature、seed 或并发的结果不能直接比较。
+操作者可通过 CLI 参数覆盖这些值或用 `--no-seed` 请求不发送 seed；最终值始终进入 Run 快照。CLI 的 GPQA `1024` 与 Web 建议 `8192` 是两个不同入口的显式预设，不应被误写成同一默认。由于生成参数是可比性条件，使用不同 max tokens、temperature、seed、并发或读取超时的结果不能直接比较。
 
 重试仅适用于 429、部分 5xx、连接中断、连接超时和读取超时等暂时性错误。认证失败、无效模型名、参数错误等明确 4xx 不重试。`latency_ms` 以第一次尝试前到最终成功或失败后的墙钟时间计算，包含重试和退避；因此比较延迟时必须使用相同重试配置。
 
@@ -88,16 +100,16 @@ MMLU-Pro 的标准转换器把题目选项以及 profile 指令直接固化在�
 每道计划题恰好产生一条最终 EvaluationResponse。过程如下：
 
 1. 使用 Run 快照构造消息和 generation config。
-2. 调用选定 ModelAdapter；临时错误按快照策略有限重试。OpenAI-compatible 远端只允许 HTTPS，明文 HTTP 仅允许 loopback；Chat 请求声明且响应只接受 identity encoding，成功体最多 4 MiB、错误体最多 64 KiB。
+2. 调用选定 ModelAdapter；临时错误按快照策略有限重试。OpenAI-compatible 远端只允许 HTTPS，明文 HTTP 仅允许 loopback；Chat 请求声明且响应只接受 identity encoding，成功体最多 4 MiB、错误体最多 64 KiB。数字 `max_tokens` 原样发送，快照值为 `null` 时省略该请求字段；每次读取使用 Run 冻结的超时。
 3. 成功时保存未经答案规范化的 `raw_response`、input/output Token 和总延迟。若成功内容、raw usage 的对象键/字符串值、request ID、返回模型名或 system fingerprint 精确包含当前 Key，Adapter 会先替换为 `[REDACTED]`。Adapter 结果仍只在调用期携带 request ID/raw usage/返回模型/fingerprint；Phase 1 的 Response Schema 不持久化这些 transport 扩展字段。
 4. 根据 manifest 的题型映射选择版本化 Evaluator。
 5. 保存 `parsed_answer`、标准答案快照、0/1 分、Evaluator 名称和解析元数据。
-6. 失败时保存稳定的 `error_type` 和经脱敏、截断的 `error_message`；继续处理下一题。
+6. 失败时保存稳定的 `error_type` 和经脱敏、截断的 `error_message`；继续处理下一题。Provider 明确返回 `finish_reason="length"` 时，空输出或无法解析出有效最终答案的非空输出统一记为 `output_truncated`；后者仍保留原始文本、usage 和延迟证据。
 7. 无论成功或失败，提交本题 Response 后才增加 `completed_questions`。
 
 Runner 在取得租约并启动心跳后，把同步快照读取和大题集对象物化交给工作线程，使事件循环可继续续租；随后只创建至多 `concurrency` 个长期消费者协程，从题目迭代器有界取题，不按全量题数一次性创建 task。`concurrency` 仍限制为 1–4。恢复同一 Run 时先读取已持久化 Response，只处理缺失题；已完成题目的本地证据保持幂等。恢复不提供远端 exactly-once：Provider 已响应但本地提交前崩溃时，缺失题可能再次计费调用。
 
-不得因为解析器能够猜到“可能答案”而掩盖歧义。空回答、请求失败、解析失败和 Evaluator 内部错误均计 0 分。
+不得因为解析器能够猜到“可能答案”而掩盖歧义。空回答、输出截断、请求失败、解析失败和 Evaluator 内部错误均计 0 分。
 
 ## Evaluator 规则
 
@@ -205,8 +217,10 @@ P2-06 的审计链尚未闭合：`resume` 会重新执行 canary，但不会把�
 | --- | --- | ---: | ---: | ---: | --- |
 | 正确且可解析 | 保存完整结果 | 1 | 1 | 1 | 否 |
 | 错误但可解析 | 保存完整结果 | 1 | 1 | 0 | 否 |
-| 响应非空但解析失败 | 保存 raw 与 parse_error | 1 | 0 | 0 | 是 |
-| 空回答 | 保存 `empty_response` | 0 | 0 | 0 | 是 |
+| 响应非空但解析失败，且未因长度停止 | 保存 raw 与 `parse_error` | 1 | 0 | 0 | 是 |
+| 响应非空但 `finish_reason=length` 且未解析出最终答案 | 保存 raw 与 `output_truncated` | 1 | 0 | 0 | 是 |
+| 空回答，且未报告长度耗尽 | 保存 `empty_response` | 0 | 0 | 0 | 是 |
+| 空回答且 `finish_reason=length` | 保存 `output_truncated` | 0 | 0 | 0 | 是 |
 | 超时/网络/最终 429 | 保存脱敏后的最终错误类型与信息 | 0 | 0 | 0 | 是 |
 | Evaluator 异常 | 保存脱敏错误 | 1 | 0 | 0 | 是 |
 | 取消前未处理 | 无伪造 Response | 0 | 0 | 0 | 不计已处理错误；Run 为 cancelled |
@@ -245,7 +259,7 @@ v1 Hash 输入由经过 Schema 校验的 JSON 值生成，采用项目定义的 
 - `protocol_version` 完全相同；
 - Benchmark ID、version 和 Dataset SHA-256 完全相同；
 - Prompt template、system prompt、Evaluator 名称/版本/配置完全相同；
-- temperature、top_p、max_tokens、seed、并发、超时与重试策略相同；
+- temperature、top_p、max_tokens（包括数字与 `null` 的区别）、seed、并发、超时与重试策略相同；
 - 题目全集相同，没有抽样或过滤差异。
 
 模型名称和 Adapter 是被比较的变量，应显示而不是要求相同。若供应商不支持 seed、未返回 usage，或远端模型可能在同名下滚动更新，结果仍可展示，但必须显示相应限制。Git SHA 不同不自动判定不可比；若协议或执行代码变化却未升级版本，则属于实现缺陷，应通过审计 SHA 识别。

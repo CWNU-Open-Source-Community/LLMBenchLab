@@ -60,7 +60,7 @@ flowchart LR
 ```mermaid
 flowchart TB
     subgraph FE[React 单页应用]
-        Pages[Dashboard、Models、Benchmarks、Run、Leaderboard]
+        Pages[Dashboard、Models、Benchmarks、Runs、New Run、Run Detail、Leaderboard]
         Client[集中式 API Client]
         Poller[Run 状态轮询]
         Pages --> Client
@@ -301,14 +301,14 @@ classDiagram
 generate(messages, generation_config) -> ModelGenerationResult
 ```
 
-`messages` 是已经应用 Run 快照 Prompt 的消息数组；`generation_config` 至少承载 `temperature`、`top_p`、`max_tokens` 和 `seed`。Prompt 渲染只在 manifest `system` 含非空白内容时插入 system message；空 system 被省略。当前 GPQA-Diamond 固定 `zero-shot-cot-answer-line-v1`，要求模型推理后在末行输出 `Answer: X`；MMLU-Pro 与 GPQA 的标准 system 都为空。上述 profile/省略规则属于模型输入身份，必须随模板与 Dataset Hash 一起比较。
+`messages` 是已经应用 Run 快照 Prompt 的消息数组；`generation_config` 至少承载 `temperature`、`top_p`、`max_tokens` 和 `seed`。`max_tokens` 为 `1..131072` 的数字时由 Adapter 原样发送，为 `null` 时不发送该字段并由 Provider 选择默认预算；这不等于无限输出。Prompt 渲染只在 manifest `system` 含非空白内容时插入 system message；空 system 被省略。当前 GPQA-Diamond 固定 `zero-shot-cot-answer-line-v1`，要求模型推理后在末行输出 `Answer: X`；MMLU-Pro 与 GPQA 的标准 system 都为空。上述 profile/省略规则属于模型输入身份，必须随模板与 Dataset Hash 一起比较。
 
 Adapter Registry 根据 `provider_type` 选择实现：
 
 - `mock`：使用输入中稳定标识或 Demo 题目映射产生可预测回答，不读取密钥且不得发起网络请求。
 - `openai_compatible`：校验 `base_url` 和 `remote_model_name`，并要求恰好一种凭据输入：environment Run 在调用前按 `api_key_env` 读取，stored Run 由 Worker 传入已解密的 `SecretStr`。Adapter 不读取数据库或 keyring。远端 URL 必须为 HTTPS，HTTP 仅允许 loopback；请求声明 `Accept-Encoding: identity` 并拒绝压缩响应。成功体最多 4 MiB、错误体最多 64 KiB，均以流式有界读取提前终止超限内容。对 429、部分 5xx 和暂时性网络错误执行有上限的指数退避；明显的 4xx 配置错误不重试。
 
-Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error` 和 `empty_response`。日志和持久化错误不得包含 Authorization、密钥值或完整敏感响应头。Provider 返回证据会递归检查成功内容、raw usage 的对象键和 JSON 标量，以及 provider request ID、返回模型名、system fingerprint 和 finish reason；其中出现的当前 Key 会先做精确替换。这不是对任意敏感内容的通用 DLP，也不扫描与 Provider 响应无关的固定数据。
+Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error`、`empty_response` 和 `output_truncated`。Provider 以 `finish_reason="length"` 返回空内容时，Adapter 直接产生 `output_truncated`；返回非空内容但 Evaluator 无法解析有效最终答案时，Runner 根据同一 finish reason 把普通 parse error 提升为 `output_truncated`，并保留已有 raw response、usage、延迟与成本证据。日志和持久化错误不得包含 Authorization、密钥值或完整敏感响应头。Provider 返回证据会递归检查成功内容、raw usage 的对象键和 JSON 标量，以及 provider request ID、返回模型名、system fingerprint 和 finish reason；其中出现的当前 Key 会先做精确替换。这不是对任意敏感内容的通用 DLP，也不扫描与 Provider 响应无关的固定数据。
 
 ## Evaluator 架构
 
@@ -421,16 +421,18 @@ PostgreSQL 是共享部署目标，并提供真实多 Worker 条件领取、行�
 - Benchmark ID、版本、Dataset SHA-256；
 - Evaluator 名称、版本和数据集级配置；逐题配置属于按 Hash 锁定且无更新 API 的不可变 Question 记录；
 - Prompt template、system prompt；
-- temperature、top_p、max_tokens、seed；
+- temperature、top_p、max_tokens（数字或 `null`）、seed；
 - 展示模型名、远端模型名、adapter 类型、Base URL、`credential_source`、价格和有效模型参数；environment 模式另含密钥环境变量名，stored 模式不含 Key/envelope/reference；
 - Git commit SHA（无法读取时为 `null`）；
-- 并发度、超时和重试策略；
+- 并发度、连接/读取/写入/连接池超时和重试策略；其中读取超时由 Run 请求在 `1..1800` 秒内选择，省略时为 `60` 秒；
 - `protocol_version`、创建时间、开始时间和结束时间。
 - 可信本地正式 Run 的初次模型发现/canary 脱敏结果：是否发现、候选数/request ID，以及返回模型、system fingerprint、finish reason、usage、延迟和尝试次数；不含 Key/header。`resume` 的新 canary 当前不会追加为独立审计事件。
 
 Runner 从 Run 快照读取模型连接配置、凭据来源、价格、生成参数、Prompt、并发、超时和重试策略，不回读可编辑 Model 的这些值。environment 模式按快照变量名取值；stored 模式仅按 `run.model_id` 读取 envelope，并用快照 Base URL origin 认证解密。题目内容与逐题 Evaluator 配置通过不可变 Benchmark 记录和 `benchmark_hash_snapshot` 绑定；Phase 1 不提供 Benchmark/Question 更新或删除 API。
 
-Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `temperature`、`top_p`、`max_tokens`、`seed`。创建 Run 时显式字段覆盖 Model 默认，省略字段才使用 Model 默认；`generation` 块因此只包含实际执行值，不把未转发的 Provider 扩展伪装成有效参数。
+Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `temperature`、`top_p`、`max_tokens`、`seed`。创建 Run 时显式字段覆盖 Model 默认，省略字段才使用 Model 默认；显式 `max_tokens:null` 也是覆盖值，不会回退。`generation` 块因此只包含实际执行值，不把未转发的 Provider 扩展伪装成有效参数。通用 API 保留 protocol-v1 的 `max_tokens=256` 和读取超时 `60s` 默认；没有对应 Model 默认且用户尚未手动修改时，Web 根据已知 Benchmark 提交可编辑的显式建议：Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s`。
+
+React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 条为一页显示所有状态，支持状态筛选，并在当前页存在 active Run 时轮询；列表和 Run Detail 都以持久化 Run ID 建立链接。Run Detail 对 `GET /runs/{id}/responses` 使用每页 100 条的 offset 分页，而不是只加载大型正式 Benchmark 的前 100 条；active Run 继续轮询当前证据页，进入终态后停止。
 
 写入约束：
 

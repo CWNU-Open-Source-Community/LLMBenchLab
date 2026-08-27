@@ -153,6 +153,86 @@ async def test_openai_compatible_sends_chat_completion_fields(
 
 
 @pytest.mark.asyncio
+async def test_openai_compatible_omits_null_max_tokens_for_provider_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    seen_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payload.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "A"}, "finish_reason": "stop"}]},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await OpenAICompatibleAdapter(
+            "https://provider.example/v1", "model", "TEST_PROVIDER_KEY", client=client
+        ).generate(
+            [{"role": "user", "content": "question"}],
+            {"temperature": 0, "max_tokens": None},
+        )
+
+    assert result.text == "A"
+    assert seen_payload["temperature"] == 0
+    assert "max_tokens" not in seen_payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "expected_error"),
+    [("length", "output_truncated"), ("stop", "empty_response")],
+)
+async def test_openai_compatible_classifies_empty_output_budget_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+    finish_reason: str,
+    expected_error: str,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "   "}, "finish_reason": finish_reason}]},
+        )
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1", "model", "TEST_PROVIDER_KEY", client=client
+        )
+        with pytest.raises(AdapterError) as caught:
+            await adapter.generate([{"role": "user", "content": "question"}], {})
+
+    assert caught.value.error_type == expected_error
+    if finish_reason == "length":
+        assert "Increase max_tokens" in caught.value.error_message
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_classifies_missing_content_after_length_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={"choices": [{"message": {}, "finish_reason": "length"}]},
+        )
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1", "model", "TEST_PROVIDER_KEY", client=client
+        )
+        with pytest.raises(AdapterError) as caught:
+            await adapter.generate([{"role": "user", "content": "question"}], {})
+
+    assert caught.value.error_type == "output_truncated"
+    assert "Increase max_tokens" in caught.value.error_message
+
+
+@pytest.mark.asyncio
 async def test_openai_compatible_allows_missing_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
     transport = httpx.MockTransport(

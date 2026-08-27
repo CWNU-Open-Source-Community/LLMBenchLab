@@ -1,6 +1,6 @@
 # 下一任务：Phase 2 并发治理、审计与性能基线
 
-> 建议开始时间：正式数据/真实 API 本地评测切片的阶段 commit 与远程门禁通过后
+> 建议开始时间：正式数据/真实 API 与当前 Web Run UX 切片的阶段 commit、push 和远程门禁查询完成后
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 前置状态：Phase 0–1 `completed`；Phase 2 `in_progress`
 
@@ -14,6 +14,8 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 
 用户随后明确要求从 Web 直接输入 API Key；[ADR-0007](decisions/ADR-0007-web-provider-credentials.md) 已接受只写 `api_key`、AES-256-GCM `model_credentials`、API/Worker 共享部署 keyring、legacy environment 兼容以及 origin/active-Run 安全门禁。该能力仍只面向可信 loopback，不带认证或生产 KMS；它也没有实现 Provider 额度、历史审计或容量治理，不能作为 Phase 2 完成证据。
 
+当前工作树进一步补齐了 Web 的单次请求配置与 Run 可达性：数字 `max_tokens` 可到 131,072，或用 `null` 省略字段并采用 Provider 默认值；通用 API/protocol-v1 未显式设置时仍默认 256。Benchmark 会给出输出预算与 `read_timeout_seconds=1..1800` 起点，配置固化进 Run snapshot，长度截断使用 `output_truncated` 诊断。主导航新增全状态评测记录、筛选/分页/活动轮询，详情证据每页 100 条并能返回列表，移动端第五导航、Benchmark/快照裁剪和表单错位也已修复。该切片的完整本地门禁已通过，commit/push 与精确 SHA CI 查询仍待完成；它没有调用真实 Provider，也不是 P2-05 的 Token/费用预算治理。
+
 ## 当前仓库事实
 
 - 可靠性决策由 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 固定；数据库而非 Redis/进程内存裁决 Run、租约、attempt、取消和终态。
@@ -23,6 +25,8 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 - 应用日志已有请求/Run correlation 和脱敏 JSON，但只覆盖 LLMBenchLab 应用 logger；Worker probe 也只证明依赖能力，不证明主循环 liveness。
 - 可信本地真实评测由 CLI 直接领取指定 Run；操作者必须停止连接同一数据库的常规 API/Worker。模型发现、canary 和正式题目请求都使用内存中的 Key，自动化仅使用 MockTransport/Mock。
 - Web 模型表单对 `api_key` 只写：公开读取的凭据状态字段不含 Key 或加密材料，stored Key 以绑定 Model/origin 的 AES-GCM 密文持久化，API 与 Worker 从数据库之外读取同一 keyring；`api_key_env` 旧配置仍可运行。SQLite→PostgreSQL 导入已扩为包括 `model_credentials` 的六表，keyring 必须独立备份/转移。
+- Web Run 配置把每题输出上限/Provider 默认与 1–1,800 秒读取超时写入不可变快照，并按 Benchmark 提供建议；这些参数和 `output_truncated` 错误分类只改善单次请求可诊断性，不提供 RPM/TPM/金额硬预算。
+- Web 现有全状态评测记录入口、20 条列表分页和活动轮询；Run Detail 按 100 条分页展示完整 Response 总数。当前切片本地门禁已通过，阶段 commit/push 与精确 SHA CI 查询尚待完成。
 - Web 凭据当前切片的本地完整门禁已通过：后端 427（其中 keyring bootstrap 定向 24）、真实基础设施 6、前端 21、Smoke 与 Compose 8/8 均为零失败；stage commit/push 与精确 SHA CI 结论见对应工作日志。自动化只使用 marker Key、固定测试 keyring、MockTransport/stub fetch 和 Mock Adapter，没有调用真实 Provider。
 - 已提交的可靠性基础 commits 为 `2be2392`、`3c975c7`、`2006d3f`、`b3289b1`、`103ab79`；详见当前工作日志与 Project Status。
 
@@ -66,6 +70,7 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 
 - 不接入或调用真实 OpenAI-compatible Provider，不要求真实 API Key，不产生付费调用。
 - 不移除 Web write-only/stored credential 或 legacy environment 兼容，不把 keyring 放入数据库/队列/Run snapshot，也不把当前可信 loopback 边界扩展成公共部署。
+- 不移除当前 Web 的 nullable `max_tokens`、读取超时快照、`output_truncated` 证据、评测记录/逐题分页和响应式导航；也不得把这些单次请求控件描述为已经完成 P2-05。
 - 不继续扩展标准 Benchmark，不新增 IFEval、代码沙箱、LLM Judge、Arena、Agent、鉴权、多租户、计费系统或公共部署。
 - 不承诺 Kubernetes、多区域容灾、严格全局 exactly-once、无限水平扩展或生产 SLA。
 - 不改变逐题 evaluator、总分分母、完成率、回答准确率、排行榜隔离或历史快照语义；必要的不兼容变化必须另起协议/API 版本。
@@ -115,5 +120,5 @@ docker compose config --quiet
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-请在 LLMBenchLab 仓库执行 docs/NEXT_TASK.md 定义的“Phase 2 并发治理、审计与性能基线”。开始前阅读所有指定文档、ADR-0005、ADR-0007 和现有 Worker/lease/queue/metrics/credential 实现，检查 Git 状态并创建新工作日志。先写 ADR，明确数据库事实来源下的并发、速率、预算预留/结算/释放、背压、公平、审计、恢复与回滚语义，再按 P2-05、P2-06、P2-07 实施。必须保留 Web `api_key` 只写、AES-GCM `model_credentials`、数据库外共享 keyring、legacy environment 兼容及 origin/active-Run 门禁；Key、密文与 keyring 不得进入日志、审计、队列、Run 或报告。不得改变 llmbenchlab-protocol-v1，不得调用真实模型，不得覆盖用户未提交工作，不得 force push。每个阶段必须执行独立 commit，push 到 `origin`，并等待该精确 SHA 的 GitHub Actions 必需 job 全部成功；CI 失败时修复后重新 commit/push，绿色前不得宣称阶段完成。必须用真实 PostgreSQL/Redis、多 Worker 并发、故障与负载证据验收；任何关键项未通过时保持 Phase 2 in_progress，并如实同步全部状态、运维、测试和工作日志文档。
+请在 LLMBenchLab 仓库执行 docs/NEXT_TASK.md 定义的“Phase 2 并发治理、审计与性能基线”。开始前阅读所有指定文档、ADR-0005、ADR-0007 和现有 Worker/lease/queue/metrics/credential 实现，检查 Git 状态并创建新工作日志。先写 ADR，明确数据库事实来源下的并发、速率、预算预留/结算/释放、背压、公平、审计、恢复与回滚语义，再按 P2-05、P2-06、P2-07 实施。必须保留 Web `api_key` 只写、AES-GCM `model_credentials`、数据库外共享 keyring、legacy environment 兼容及 origin/active-Run 门禁；也必须保留 nullable `max_tokens`、读取超时快照、`output_truncated` 诊断、评测记录/证据分页和响应式导航，但不得把这些单次请求控件冒充 P2-05 全局预算治理。Key、密文与 keyring 不得进入日志、审计、队列、Run 或报告。不得改变 llmbenchlab-protocol-v1，不得调用真实模型，不得覆盖用户未提交工作，不得 force push。每个阶段必须执行独立 commit，push 到 `origin`，并等待该精确 SHA 的 GitHub Actions 必需 job 全部成功；CI 失败时修复后重新 commit/push，绿色前不得宣称阶段完成。必须用真实 PostgreSQL/Redis、多 Worker 并发、故障与负载证据验收；任何关键项未通过时保持 Phase 2 in_progress，并如实同步全部状态、运维、测试和工作日志文档。
 ```

@@ -700,6 +700,10 @@ class EvaluationRunner:
                 )
             else:
                 parse_error = evaluated.parse_error
+                error_type, error_message = self._parse_error_evidence(
+                    parse_error,
+                    dict(generated.metadata),
+                )
                 response = EvaluationResponse(
                     run_id=run_id,
                     question_id=question.id,
@@ -714,8 +718,8 @@ class EvaluationRunner:
                     estimated_cost=self._cost(
                         model, generated.input_tokens, generated.output_tokens
                     ),
-                    error_type="parse_error" if parse_error else None,
-                    error_message=parse_error,
+                    error_type=error_type,
+                    error_message=error_message,
                 )
 
         disposition = self._lease_repository.persist_response(lease, response)
@@ -768,6 +772,23 @@ class EvaluationRunner:
         return ((input_count * model.input_price) + (output_count * model.output_price)) / Decimal(
             1_000_000
         )
+
+    @staticmethod
+    def _parse_error_evidence(
+        parse_error: str | None,
+        generation_metadata: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        """Turn a parser failure plus Provider finish reason into actionable evidence."""
+
+        if parse_error is None:
+            return None, None
+        if generation_metadata.get("finish_reason") == "length":
+            return (
+                "output_truncated",
+                "Provider stopped at the output token limit before a valid final "
+                f"answer was parsed ({parse_error}).",
+            )
+        return "parse_error", parse_error
 
     def _cancellation_requested(self, run_id: str) -> bool:
         with self._session_factory() as session:

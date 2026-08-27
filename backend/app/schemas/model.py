@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 
+from app.core.constants import MAX_GENERATION_TOKENS
 from app.models.enums import CredentialSource, ProviderType
 from app.schemas.base import APIModel, ORMModel
 
@@ -113,7 +114,7 @@ def _validate_default_parameters(value: dict[str, Any] | None) -> dict[str, Any]
         )
 
     validated = dict(value)
-    for key in ("temperature", "top_p", "max_tokens"):
+    for key in ("temperature", "top_p"):
         if key in validated and validated[key] is None:
             raise ValueError(f"default_parameters.{key} must not be null")
     for key in ("temperature", "top_p"):
@@ -135,9 +136,12 @@ def _validate_default_parameters(value: dict[str, Any] | None) -> dict[str, Any]
     if max_tokens is not None and (
         isinstance(max_tokens, bool)
         or not isinstance(max_tokens, int)
-        or not 1 <= max_tokens <= 32768
+        or not 1 <= max_tokens <= MAX_GENERATION_TOKENS
     ):
-        raise ValueError("default_parameters.max_tokens must be an integer from 1 to 32768")
+        raise ValueError(
+            "default_parameters.max_tokens must be null or an integer from "
+            f"1 to {MAX_GENERATION_TOKENS}"
+        )
     seed = validated.get("seed")
     if seed is not None and (
         isinstance(seed, bool) or not isinstance(seed, int) or not -(2**31) <= seed <= 2**31 - 1

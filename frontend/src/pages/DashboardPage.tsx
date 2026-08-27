@@ -56,7 +56,7 @@ export function DashboardPage() {
       </article>
     </section>
     <section className="panel recent-panel">
-      <div className="panel-heading"><div><span className="section-index">03</span><h2>最近运行</h2></div><Link to="/leaderboard" className="text-link">查看排行榜 <ArrowRight size={14} /></Link></div>
+      <div className="panel-heading"><div><span className="section-index">03</span><h2>最近完成</h2></div><Link to="/runs" className="text-link">全部评测 <ArrowRight size={14} /></Link></div>
       {summary.recent_runs.length ? <div className="table-scroll"><table><thead><tr><th>模型 / Benchmark</th><th>状态</th><th>严格总分</th><th>完成率</th><th>延迟</th><th>完成时间</th></tr></thead><tbody>{summary.recent_runs.map((run) => <tr key={run.run_id}><td><Link className="row-title" to={`/runs/${run.run_id}`}>{run.model_name}</Link><small>{run.benchmark_name} · v{run.benchmark_version}{run.is_demo && <b className="demo-pill">Demo</b>}</small></td><td><StatusBadge status="completed" /></td><td className="score-cell">{formatPercent(run.score)}</td><td>{formatPercent(run.completion_rate)}</td><td>{formatLatency(run.average_latency_ms)}</td><td>{formatUtc8(run.finished_at)}</td></tr>)}</tbody></table></div> : <div className="inline-empty">暂无运行记录。注册 Mock 模型并载入 Demo 后开始评测。</div>}
     </section>
   </>;

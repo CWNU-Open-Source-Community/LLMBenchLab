@@ -142,6 +142,23 @@ def test_validated_model_defaults_apply_when_run_fields_are_omitted(client) -> N
     assert run["model_parameters_snapshot"]["generation"] == defaults
 
 
+def test_parse_error_evidence_identifies_nonempty_truncated_output() -> None:
+    assert EvaluationRunner._parse_error_evidence(
+        "choice_not_found", {"finish_reason": "length"}
+    ) == (
+        "output_truncated",
+        "Provider stopped at the output token limit before a valid final answer was parsed "
+        "(choice_not_found).",
+    )
+    assert EvaluationRunner._parse_error_evidence(
+        "choice_not_found", {"finish_reason": "stop"}
+    ) == ("parse_error", "choice_not_found")
+    assert EvaluationRunner._parse_error_evidence(None, {"finish_reason": "length"}) == (
+        None,
+        None,
+    )
+
+
 @pytest.mark.smoke
 def test_offline_mock_vertical_slice(client, db_session) -> None:
     model = _register_mock(client)

@@ -472,8 +472,26 @@ class OpenAICompatibleAdapter(ModelAdapter):
             ) from exc
         try:
             choice = body["choices"][0]
-            content = choice["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
+            raise AdapterError(
+                "invalid_provider_response",
+                "Upstream response did not contain choices[0].",
+                status_code=_safe_status_code(response.status_code, api_key),
+                attempts=attempts,
+            ) from exc
+        finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
+        output_budget_exhausted = finish_reason == "length"
+        try:
+            content = choice["message"]["content"]
+        except (KeyError, TypeError) as exc:
+            if output_budget_exhausted:
+                raise AdapterError(
+                    "output_truncated",
+                    "Upstream exhausted the output token budget before returning text. "
+                    "Increase max_tokens or let the Provider choose its default.",
+                    status_code=_safe_status_code(response.status_code, api_key),
+                    attempts=attempts,
+                ) from exc
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream response did not contain choices[0].message.content.",
@@ -481,6 +499,14 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 attempts=attempts,
             ) from exc
         if not isinstance(content, str):
+            if output_budget_exhausted:
+                raise AdapterError(
+                    "output_truncated",
+                    "Upstream exhausted the output token budget before returning text. "
+                    "Increase max_tokens or let the Provider choose its default.",
+                    status_code=_safe_status_code(response.status_code, api_key),
+                    attempts=attempts,
+                )
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream response content was not text.",
@@ -488,6 +514,14 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 attempts=attempts,
             )
         if not content.strip():
+            if output_budget_exhausted:
+                raise AdapterError(
+                    "output_truncated",
+                    "Upstream exhausted the output token budget before returning text. "
+                    "Increase max_tokens or let the Provider choose its default.",
+                    status_code=_safe_status_code(response.status_code, api_key),
+                    attempts=attempts,
+                )
             raise AdapterError(
                 "empty_response",
                 "Upstream returned an empty model response.",
@@ -509,7 +543,6 @@ class OpenAICompatibleAdapter(ModelAdapter):
             provider_request_id = response.headers.get("x-request-id") or response.headers.get(
                 "request-id"
             )
-        finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
         returned_model = body.get("model") if isinstance(body, Mapping) else None
         system_fingerprint = body.get("system_fingerprint") if isinstance(body, Mapping) else None
         return ModelGenerationResult(

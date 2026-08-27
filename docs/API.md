@@ -307,7 +307,7 @@ curl -sS http://127.0.0.1:8000/api/v1/info
 | `enabled` | boolean，默认 `true` | 禁用模型不能创建 Run |
 | `input_price_per_million` | number/null，默认 `null` | 有限非负数；Mock 未填时规范化为明确的 `0` |
 | `output_price_per_million` | number/null，默认 `null` | 有限非负数；Mock 未填时规范化为明确的 `0` |
-| `default_parameters` | object，默认 `{}` | 只允许 `temperature`、`top_p`、`max_tokens`、`seed`，并使用与 Run 相同的类型/范围约束 |
+| `default_parameters` | object，默认 `{}` | 只允许 `temperature`、`top_p`、`max_tokens`、`seed`；其中 `max_tokens` 可为 `null` 或 `1..131072`，其余字段使用与 Run 相同的类型/范围约束 |
 
 `openai_compatible` 必须同时提供 `base_url`、`remote_model_name`，并在 `api_key` 与 `api_key_env` 中恰好选择一个；`mock` 的四个远端连接/凭据字段必须为空。Model Schema、Provider preflight 和 Adapter 都拒绝远端明文 HTTP，只有 `localhost` 或字面量 loopback IP 可使用 HTTP；HTTPS 私网、云元数据、DNS rebinding 和其他出站目标仍没有 allowlist，详见 [SECURITY.md](SECURITY.md)。
 
@@ -315,7 +315,7 @@ curl -sS http://127.0.0.1:8000/api/v1/info
 
 本 API 的 `GET /models` 是 LLMBenchLab 本地模型注册表，不会代替操作者访问 Provider。可信本地 `llmbenchlab-evaluate` 才会调用上游 `/models` 与付费 canary：发现到的任一模型 ID 若包含当前 Key，预检立即失败；canary 成功体若明确返回不同于请求目标的模型名，也会失败。模型发现与正式 Chat 请求声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体上限为 2 MiB，Chat 成功体上限为 4 MiB、错误体上限为 64 KiB。成功内容、raw usage 的对象键/所有 JSON 标量、token/status 数值、request ID、返回模型名、system fingerprint 与 finish reason 中出现的当前 Key 会在进入持久化边界前按精确值替换为 `[REDACTED]`。
 
-Phase 1 的 Model 默认参数只覆盖上述四个实际由 Adapter 转发的生成字段。创建 Run 时，显式请求值优先；某字段未出现在请求 JSON 中时才使用 Model 默认值，否则使用协议默认值。Run 的 `generation` 快照保存最终有效值。
+Phase 1 的 Model 默认参数只覆盖上述四个实际由 Adapter 转发的生成字段。创建 Run 时，显式请求值优先；某字段未出现在请求 JSON 中时才使用 Model 默认值，否则使用协议默认值。`max_tokens:null` 是一个显式值：OpenAI-compatible Adapter 不发送 `max_tokens` 字段，由 Provider 决定其默认输出预算；这不表示无限输出，也不保证不同 Provider 使用相同上限。Run 的 `generation` 快照保存最终有效值，包括这个 `null`。
 
 Model 响应示例（后续接口引用为 `ModelRead`）：
 
@@ -654,10 +654,22 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/benchmarks/reload-demo
 | `benchmark_id` | 必填 | 非空，最长 36 |
 | `temperature` | `0.0` | `0..2` |
 | `top_p` | `1.0` | `>0` 且 `<=1` |
-| `max_tokens` | `256` | `1..32768` |
+| `max_tokens` | `256` | `null` 或整数 `1..131072`；`null` 表示不发送该字段，由 Provider 决定默认值，并非无限输出 |
 | `seed` | `42` | 32 位有符号整数或 `null` |
 | `system_prompt` | `null` | 最长 4000；提供时覆盖 Benchmark system prompt |
 | `concurrency` | `1` | `1..4`；快照值即实际执行并发度 |
+| `read_timeout_seconds` | `60` | 有限数字 `1..1800`；冻结为本 Run 每次 Provider 读取超时 |
+
+保留 `max_tokens=256` 作为通用 API/protocol-v1 默认值是兼容要求；当 Model 没有对应默认且用户尚未手动修改时，Web 的新建评测表单会根据已知 Benchmark 预填更适合长推理的显式建议值。它们是可编辑的客户端起点，不会改变省略字段时的 API 默认：
+
+| Web Benchmark | 建议 `max_tokens` | 建议 `read_timeout_seconds` |
+| --- | ---: | ---: |
+| Demo | `256` | `60` |
+| MMLU-Pro `direct` | `1024` | `180` |
+| MMLU-Pro `official_cot` | `4000` | `300` |
+| GPQA-Diamond | `8192` | `600` |
+
+Web 还允许显式选择“由 Provider 决定”，此时提交 `max_tokens:null`。更高数字、Provider 托管或更长读取超时都不是 Token/金额预算，也不证明模型支持对应输出长度。
 
 Run 响应示例（后续接口引用为 `RunRead`）：
 
@@ -731,6 +743,8 @@ Run 表没有 `credential_id`、ciphertext、nonce 或 keyring 列，Run API 也
 
 筛选参数：`model_id`、`benchmark_id`、`run_status`、`protocol_version`。注意参数名是
 `run_status`，不是 `status`。
+
+Web 的“评测记录”页面使用本接口按 20 条分页，可按状态筛选，并对当前页中的 `pending`/`running` Run 定时刷新；每一行都链接到持久化 Run ID 的详情页。因此离开正在执行的详情页后，可从主导航重新找到该 Run。
 
 ```bash
 curl -sS 'http://127.0.0.1:8000/api/v1/runs?run_status=completed&protocol_version=llmbenchlab-protocol-v1&limit=20'
@@ -807,7 +821,8 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/runs \
     "top_p":1,
     "max_tokens":64,
     "seed":42,
-    "concurrency":1
+    "concurrency":1,
+    "read_timeout_seconds":60
   }'
 ```
 
@@ -826,7 +841,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/runs \
 - `404 model_not_found`：模型不存在。
 - `404 benchmark_not_found`：Benchmark 不存在。
 - `409 model_disabled`：模型已禁用。
-- `422`：生成参数越界、ID 为空或出现额外字段。
+- `422`：生成参数或读取超时越界、ID 为空或出现额外字段。
 
 ### 6.4 `GET /runs/{run_id}`
 
@@ -899,7 +914,9 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444
 ```
 
 请求失败、空回答或解析失败的记录仍会出现，`score=0`，并填写 `error_type` 与
-`error_message`；上游 usage 缺失时 Token 和费用为 `null`。成功内容若精确反射当前 Key，会在写入 `raw_response` 前替换为 `[REDACTED]`。当前 EvaluationResponse/API Schema 不保存或返回逐题 Provider request ID、返回模型名、system fingerprint 或 raw usage；这些 transport 证据仍是 P2-06 审计缺口。Run 不存在返回 `404 run_not_found`；分页非法返回 `422`。
+`error_message`；上游 usage 缺失时 Token 和费用为 `null`。若 Provider 返回 `finish_reason="length"`，空输出以及未能解析出有效最终答案的非空输出都会归类为 `output_truncated`，而不是泛化成 `empty_response` 或 `parse_error`；非空输出仍保存在 `raw_response`。成功内容若精确反射当前 Key，会在写入 `raw_response` 前替换为 `[REDACTED]`。当前 EvaluationResponse/API Schema 不保存或返回逐题 Provider request ID、返回模型名、system fingerprint 或 raw usage；这些 transport 证据仍是 P2-06 审计缺口。
+
+Web Run Detail 固定以 `limit=100` 请求一页逐题证据，并用 `offset` 提供上一页/下一页导航；它不会把大型正式 Benchmark 截止在前 100 条。Run 不存在返回 `404 run_not_found`；分页非法返回 `422`。
 
 ## 7. Leaderboard 与 Metrics
 

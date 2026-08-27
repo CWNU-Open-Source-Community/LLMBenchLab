@@ -26,6 +26,8 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - A trusted-local `llmbenchlab-evaluate` CLI with `prepare`, `run`, `resume`, and `report`; OpenAI-compatible model discovery and canary preflight; hidden/environment-only API keys; explicit request-bound confirmation; direct database execution; and missing-question recovery. Remote Provider endpoints require HTTPS, while plain HTTP is accepted only for loopback hosts; discovery rejects a model ID that reflects the current Key, and canary rejects a returned model that differs from the requested target.
 - Atomic, non-overwriting terminal Run reports containing a protocol/source/model/execution summary, optional metadata groups, and every persisted per-question Response in paginated JSONL. Report metrics are derived from planned questions plus persisted Responses, and `metrics_provenance` identifies drift from persisted Run aggregate fields.
 - Web/API write-only Provider credentials: the Models password field accepts an 8–8192-byte visible-ASCII `api_key` directly, never reads it back, and distinguishes `stored`, legacy `environment`, and `none` sources without displaying the legacy environment-variable name. A one-row-per-model `model_credentials` table stores only AES-256-GCM ciphertext, nonce, algorithm and key ID; API and Worker share a deployment keyring while the existing environment-variable and trusted-local CLI paths remain compatible.
+- A first-class Evaluation Runs page in the main navigation with all-status history, status filtering, 20-item pagination, manual refresh, two-second polling only while the current page contains pending/running work, and stable links back to Run evidence.
+- Per-Run Web generation controls with Benchmark-aware output/read-timeout recommendations, numeric `max_tokens` up to 131,072 or `null` to omit the field and use the Provider default, and `read_timeout_seconds` from 1 to 1,800 seconds frozen into the execution snapshot. The API/protocol-v1 default remains 256 when `max_tokens` is omitted; `null` is not an unlimited-output promise.
 
 ### Changed
 
@@ -41,6 +43,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Reworked Runner question scheduling to at most `concurrency` consumer tasks, moved large snapshot loading off the event loop so the claimed lease continues heartbeating, reused and explicitly closed one OpenAI-compatible HTTP client per Run, and omitted blank system messages for provider compatibility.
 - Enriched immutable Run benchmark snapshots with schema version, source, license, dimension, and language while keeping `llmbenchlab-protocol-v1` scoring and API v1 paths unchanged.
 - Extended the Alembic chain to `20260827_0003` and the stopped SQLite→PostgreSQL importer from five to six core tables so encrypted `model_credentials` move atomically with their Models. The keyring is deliberately not stored in or copied with the database and must be backed up/transferred separately; downgrade refuses to discard nonempty encrypted credentials.
+- Made Run detail evidence truthful for large Benchmarks: the UI reports the API total, pages Responses 100 at a time with global question numbering, and links back to the all-status Run list.
 
 ### Fixed
 
@@ -53,6 +56,10 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Let the trusted-local CLI fenced-reclaim an expired, incomplete `running` lease after reaping terminal evidence, preventing `resume` from waiting forever for the deliberately stopped regular Worker.
 - Serialized Model credential/endpoint mutation with Run snapshot creation through one dialect-aware lock: PostgreSQL uses `SELECT ... FOR UPDATE`, while SQLite acquires `BEGIN IMMEDIATE` before reading the Model.
 - Fixed first-run keyring initialization when a macOS `PATH` resolves bare `python3` to PyPy, whose `os.link(..., dir_fd=..., follow_symlinks=False)` rejects the bootstrap's secure no-clobber install with `EINVAL`. Setup/dev/Make entry points now ask `uv` explicitly for a dependency-free CPython script run, retain the existing symlink/atomicity boundary, retry only transient atomic filesystem errors after confirmed cleanup, and report only a symbolic errno when installation still fails.
+- Classified Provider `finish_reason="length"` failures as `output_truncated` when content is missing, empty, or lacks a final parsed answer, instead of reporting only a generic empty/parse/provider-shape failure.
+- Rejected boolean and string coercion for Run output budgets and read timeouts so `true` cannot silently become one token or one second.
+- Prevented active-page polling from superseding a slower user-triggered page/filter request, and return a shrinking filtered Run list to its last valid page instead of leaving an unreachable empty page.
+- Corrected Web layout clipping and alignment for Benchmark details, immutable snapshots and form field groups; the fifth main-navigation item remains usable across desktop/tablet/mobile, and Runs use readable cards through 1100px without root-page horizontal overflow.
 
 ### Security
 
@@ -84,3 +91,4 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - The Web-credential base implementation `b19bdac9236f9b2f927166ebe30578ced3d9f53e` and bootstrap remediation `d26cdbe4f3f97057ce09d5d7a539ddbfe605d967` were pushed normally. The remediation SHA has no GitHub Actions run because the branch has no pull request and the workflow listens only to pull requests/main; local success is not being reported as a substitute.
 - Web credential automation uses only marker keys, fixed test keyrings, MockTransport/stub fetch and Mock evaluation. No real Provider was called. Local gates are complete; stage commit/push and exact-SHA CI remain separate remote gates and are not inferred from local success.
 - Trusted-loopback browser verification confirmed a password input, no `api_key_env` control, no post-save Key echo, and no fake browser Key in application logs.
+- The Web Run-UX/generation-budget slice passed its final local full-worktree gates (`442 passed, 6 skipped` backend; `36 passed` frontend) with Mock/stub regression coverage and 390–1280px breakpoint checks; stage commit/push and the exact-SHA GitHub Actions query remain pending. No real Provider was called for this slice.

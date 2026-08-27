@@ -94,10 +94,11 @@ export interface RunPayload {
   benchmark_id: string;
   temperature: number;
   top_p: number;
-  max_tokens: number;
+  max_tokens: number | null;
   seed: number | null;
   system_prompt?: string | null;
   concurrency: number;
+  read_timeout_seconds: number;
 }
 
 export interface EvaluationResponse {

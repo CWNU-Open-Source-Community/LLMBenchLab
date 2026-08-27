@@ -33,7 +33,7 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复；大快照加载移出事件循环，已领取 Run 在物化题目时仍可续租。
 - **幂等与恢复**：同一 Run/Question 只有一条计分证据；租约心跳、有限 attempt、退避、取消、过期接管和 dead-letter 都由数据库裁决，Redis 不是状态数据库。
 - **可复现记录**：持久化模型参数、Prompt、Benchmark Hash、协议版本、代码 commit（可用时）、raw response、parsed answer、参考答案快照和逐题评分。
-- **六个前端页面**：Dashboard、Models、Benchmarks、New Run、Run Detail 和 Leaderboard，含加载、空数据、错误状态与响应式布局。
+- **七个前端页面**：Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail 和 Leaderboard；评测记录页可找回全部状态的 Run，详情证据按 100 条分页，桌面与移动端均保留稳定入口。
 - **Web 只写凭据**：用户可在 Models 表单直接粘贴 API Key；API 不把凭据流中的原值复制到公开 Model/Run-model 字段，数据库只保存由独立 keyring 加密的 AES-GCM 密文。旧 `api_key_env` 模型仍兼容；Provider 返回证据会递归检查对象键/JSON 标量，当前 Key 的精确回显会在进入 Runner/持久化前替换为 `[REDACTED]`。这不是对无关 Benchmark/Question 内容的全局字面扫描。
 - **开发交付完整**：Alembic、Ruff、pytest、ESLint、TypeScript、Vitest、Vite production build、GitHub Actions、Makefile，以及 PostgreSQL、Redis、API、Worker、frontend 和一次性 migrate 组成的 Docker Compose。
 
@@ -102,7 +102,7 @@ LLMBenchLab/
 ├── frontend/
 │   ├── src/api/             # 集中式 API Client 与类型
 │   ├── src/components/      # 通用 UI 组件
-│   ├── src/pages/           # 六个产品页面
+│   ├── src/pages/           # 七个产品页面
 │   └── tests/               # Vitest / Testing Library
 ├── benchmarks/demo-general/ # 15 道原创 Demo 题
 ├── artifacts/               # 本地数据缓存、转换 ZIP 与报告；Git 忽略
@@ -159,9 +159,10 @@ API 为每个请求自行生成 `X-Request-ID` 并在响应中返回，不信任
 2. 进入 **模型** 页面，新建模型；名称可填 `Offline Mock`，Provider 选择 `mock`，保持启用。Mock 不需要 Base URL、远端模型名或 API Key。
 3. 进入 **评测集** 页面，点击重载/载入内置 Demo。确认它显示 `demo-general`、版本 `1.0.0`、15 道题，以及“Demo 数据，不代表正式模型能力”的提示。
 4. 点击 **新建评测**，选择刚注册的 Mock 和 Demo Benchmark。默认参数可直接使用；推荐可复现基线为 `temperature=0`、`top_p=1`、`max_tokens=256`、`seed=42`、`concurrency=1`。
-5. 提交后进入 Run Detail。页面会轮询 `pending/running` 状态，展示进度、配置快照和逐题结果，并在终态停止轮询。
+5. 提交后进入 Run Detail。页面会轮询 `pending/running` 状态，展示进度、配置快照和逐题结果，并在终态停止轮询；超过 100 条证据时使用页尾按钮翻页。
 6. 确定性 Mock Demo 正常应完成 15/15，严格总分、完成率和已回答准确率均为 100；逐题区域会分别显示 raw response、parsed answer、reference、score 和 error。
-7. 进入 **排行榜**，按模型或 Benchmark 筛选，核对协议版本、数据集 Hash、完成率和醒目的 Demo 标识。该成绩只证明本地垂直链路可工作。
+7. 离开详情后可从主导航 **评测记录** 找回等待中、运行中、已完成、失败或已取消的 Run；列表支持状态筛选、20 条分页、手动刷新，并在当前页存在活动 Run 时自动更新。
+8. 进入 **排行榜**，按模型或 Benchmark 筛选，核对协议版本、数据集 Hash、完成率和醒目的 Demo 标识。该成绩只证明本地垂直链路可工作。
 
 同一流程也可通过 API 完成：
 
@@ -262,6 +263,10 @@ uv run llmbenchlab-evaluate report <RUN_ID> \
 1. 运行 `make setup && make dev`，打开 `http://127.0.0.1:5173`，进入 **模型**，点击新建模型。
 2. Provider 选择 `openai_compatible`，填写 API Base URL、远端模型名，并把真实 Key 直接粘贴到 **API Key** 密码框；这里不再填写环境变量名称。
 3. 保存后密码框立即清空，卡片只显示“已安全保存”，GET/list/编辑表单都不会回填原 Key。进入 **新建评测** 选择模型和 Benchmark 后，独立 Worker 才解密并调用 Provider。
+4. 在 **新建评测** 检查页面给出的输出预算和单次读取超时建议。Demo 默认建议 `256 / 60s`，MMLU-Pro Direct 为 `1024 / 180s`，MMLU-Pro official CoT 为 `4000 / 300s`，GPQA-Diamond 为 `8192 / 600s`；未知正式集使用保守起点 `4096 / 300s`。建议值可调整，也不代表 Provider 一定支持相同上限。
+5. 创建后可离开详情页；主导航 **评测记录** 会列出全部状态并重新进入详情。逐题证据每页 100 条，上一页/下一页不会丢失全量计数。
+
+Web 的数字 `max_tokens` 允许 `1..131072`；选择“由 Provider 决定”会保存 `null` 并在 Chat Completions 请求中省略 `max_tokens`，含义是采用 Provider 自身默认值，**不是无限输出**。未显式提供该字段的通用 API 和 `llmbenchlab-protocol-v1` 兼容路径仍默认 `256`，Benchmark 建议只影响 Web 表单起点。`read_timeout_seconds` 允许 `1..1800` 秒并随 Run 的 `execution.timeouts_seconds.read` 快照保存；只提高 token 而不提高慢模型的读取超时仍可能失败。Provider 以 `finish_reason="length"` 截断空内容或在截断后无法解析最终答案时，逐题证据会标记 `output_truncated`，提示提高输出预算或改由 Provider 决定。
 
 `make setup` 会自动创建 Git 忽略且权限为 `0600` 的 `.secrets/credential-keys.json`；本机 API 与 Worker 默认读取同一文件，Compose 则把同一文件只读挂载给二者。请把它与数据库分开安全备份：丢失 keyring 后已有 Provider Key 无法恢复，只能重新输入。编辑模型时 Key 留空表示保留；改变 Provider origin 必须重新输入；存在 `pending`/`running` Run 时端点和凭据不能修改。旧 `api_key_env` API/CLI 配置仍可运行，但 Web 不再展示该入口。
 
@@ -279,7 +284,7 @@ uv run llmbenchlab-evaluate report <RUN_ID> \
 }
 ```
 
-真实 Key 会且只会在创建/替换模型时进入本机 API 请求体，随后以 AES-256-GCM 密文落库；它不应进入 Git、Issue、日志、截图、URL、命令行或 `VITE_*` 变量。浏览器不会直接调用 Provider。Model Schema 会拒绝 `base_url` query，拒绝远端明文 HTTP（仅 loopback 可用 HTTP），并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段。当前 MVP 尚无 SSRF allowlist，只可使用已审查的 Provider 地址，并在执行前确认题目外发许可、数据政策和费用。
+真实 Key 会且只会在创建/替换模型时进入本机 API 请求体，随后以 AES-256-GCM 密文落库；它不应进入 Git、Issue、日志、截图、URL、命令行或 `VITE_*` 变量。浏览器不会直接调用 Provider。Model Schema 会拒绝 `base_url` query，拒绝远端明文 HTTP（仅 loopback 可用 HTTP），并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段；其中 `max_tokens=null` 同样只表示请求时省略该字段。当前 MVP 尚无 SSRF allowlist，也没有 Provider RPM/TPM/金额硬预算，只可使用已审查的 Provider 地址，并在执行前确认题目外发许可、数据政策和费用。
 
 ## 测试与质量检查
 

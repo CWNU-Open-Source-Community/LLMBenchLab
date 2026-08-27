@@ -153,12 +153,12 @@ docker compose config --quiet
 
 - Mock 输出、Token、延迟、request ID 可预测且不进行 I/O。
 - Mock 可注入分类错误，用于验证单题故障隔离。
-- OpenAI-compatible 的 Chat Completions URL、messages 与 `temperature/top_p/max_tokens/seed`。
+- OpenAI-compatible 的 Chat Completions URL、messages 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
 - usage 缺失时 Token 字段为 `null`。
 - 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试。
 - 远端 HTTPS 强制、loopback HTTP 例外，以及在发送 Key 前拒绝远端明文 HTTP。
 - 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat 成功 4 MiB/错误 64 KiB 的流式上限。
-- legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换。
+- legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；`finish_reason="length"` 的空输出分类为 `output_truncated`，普通空输出仍为 `empty_response`；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换。
 
 OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
 
@@ -220,7 +220,8 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - stored credential 用 AES-GCM 随机 nonce 和 Model/origin AAD；Worker 的合法三态、错误 keyring、缺行、跨模型/跨 origin/篡改 snapshot 均在 Adapter 构造前 fail closed，legacy env 路径继续通过。
 - SQLite 并发测试断言 Model PATCH 与 Run create 在读取 Model 前以 `BEGIN IMMEDIATE` 串行化；PostgreSQL integration 断言两条路径共用 Model row `FOR UPDATE` 锁。SQLite 竞争期间允许请求短暂等待，这仍只是低并发本地模式；生产/并发评测门禁使用 PostgreSQL。
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
-- Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。
+- Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。生成边界测试覆盖兼容默认 `max_tokens=256`、显式 `null`、数字上限 `131072`、读取超时默认 `60s`/上限 `1800s`，并断言最终 generation 与 `execution.timeouts_seconds.read` 快照。
+- Runner 诊断测试覆盖非空但无法解析且 `finish_reason="length"` 时的 `output_truncated`，并确认普通解析失败仍保持 `parse_error`；两者都不改变严格计零语义。
 
 增加或修改路由时至少断言：成功状态码与 Schema、一项校验错误、404/409 等业务错误、分页/筛选（若适用），以及响应中不出现秘密值。API 行为改变必须同步更新 [API.md](API.md)。
 
@@ -318,15 +319,18 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 
 ## 9. 前端测试要求
 
-当前有 5 个 Vitest 文件、21 个用例，实际自动化覆盖：
+当前 Vitest 组件测试覆盖：
 
 - 分数、百分比、Token 合计/未知值、费用、UTC 时间、Hash 与答案的格式化。
 - `pending/running/completed/failed/cancelled` 五种状态标签。
 - Dashboard 主页面的 API 加载、严格总分、完成率、Run/模型/Benchmark 汇总与最近运行。
 - 后端不可达时的结构化、可重试错误状态。
 - Models password input、创建必填、编辑留空保留、origin 变化重输、请求 pending/成功/失败/关闭/切 Mock/unmount 清空、AbortSignal、恶意错误回显脱敏，以及不写 storage/console。
+- New Run 的 GPQA `8192/600s` 初始建议、MMLU-Pro official/direct 切换建议、手动预算不被覆盖、“应用建议”恢复、`max_tokens:null` Provider 托管提交，以及数字 `131072`/超时 `1800s` DOM 上限。
+- Runs 主导航、20 条 offset 分页、状态筛选、active Run 定时刷新、错误/空状态和详情链接。
+- Run Detail 返回 Runs 列表、终态停止轮询、逐题每页 100 条的 offset 导航，以及跨页序号/总数显示。
 
-所有 fetch 与 Recharts 均在进程内 stub，没有真实网络。Models 凭据生命周期已自动化；Benchmark Demo 标识、新建 Run 跳转、Run Detail 的 raw/parsed/reference/score/error 与终态停止轮询等交互仍由 production build、后端 Smoke 和手工验收覆盖，后续应继续补组件测试。不得把这份待补清单描述为已有自动化覆盖。
+所有 fetch 与 Recharts 均在进程内 stub，没有真实网络；这些组件测试不会调用真实 Provider，也不会验证 Provider 实际接受某个输出长度或读取超时。Benchmark Demo 导入与完整 raw/parsed/reference/score/error 证据仍以离线后端 Smoke 和手工验收补充，不能把 DOM/API stub 结果描述成真实模型兼容性验证。
 
 本轮还在可信 loopback 的真实浏览器中手工核对 Models 表单：Key 控件实际为 password input，页面没有 `api_key_env` 控件，保存成功后表单/卡片/网络响应均不回显测试 Key，应用日志也没有该测试 Key。该检查使用无效测试值且没有触发真实 Provider；它补充 DOM stub 自动化，但不增加 Vitest 或后端测试计数。
 
@@ -341,7 +345,7 @@ GitHub Actions 对 `main` push 和 Pull Request 触发四类 job：
 | `backend` | Ruff lint/format；临时 SQLite `upgrade -> 0001 -> head`/check；`pytest -m "not integration"` | 临时 SQLite；不启动 PostgreSQL/Redis；离线 Mock/MockTransport |
 | `backend-integration` | 真实 PostgreSQL migration 往返；PostgreSQL/Redis/importer 的 6 个 `integration` 用例 | Actions service 容器；JUnit 必须收集非零用例且零 skip，否则 job 失败 |
 | `full-stack-reliability` | `python3 scripts/phase2_acceptance.py` 的隔离 Compose 八场景 | 唯一项目/卷、随机 loopback 端口、Mock-only；总是上传已脱敏 evidence，脚本总是精确清理 |
-| `frontend` | ESLint、21 个 Vitest、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
+| `frontend` | ESLint、Vitest 组件测试、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
 
 CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
 
@@ -447,8 +451,8 @@ make dev
 - Dashboard 的模型、Benchmark、Run、得分/延迟/Token 汇总与最近运行来自 API，而非固定假数据。
 - Models 能新增、编辑、删除 Mock；选择 OpenAI-compatible 后出现 masked API Key 输入框，用户直接粘贴真实 Key，保存后输入框清空且卡片只显示“已安全保存”。编辑留空保留，改变 Provider origin 必须重输。
 - Benchmarks 能重载 Demo、显示版本/题数/Hash/许可证与醒目的 Demo 警告。
-- New Run 能选择 Mock 与 Demo，生成参数约束正确，提交后跳转详情。
-- Run Detail 轮询进度并在终态停止；配置快照和 15 条逐题证据可查看。
+- New Run 能选择 Model 与 Benchmark，区分 protocol-v1 API 默认和 Web 建议，允许数字预算或显式 Provider 托管，并把读取超时随创建请求提交。
+- Runs 列表能从主导航进入，按状态/20 条分页显示并链接回详情；Run Detail 轮询进度并在终态停止，配置快照和逐题证据以每页 100 条查看，不把大型 Run 截断在第一页。
 - Leaderboard 可按模型/Benchmark 筛选、按得分排序，协议、Hash、完成率和 Demo 标识可见。
 - 刷新页面、空数据库、API 关闭和常见移动宽度下都有明确可操作状态。
 

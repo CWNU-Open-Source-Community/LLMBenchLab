@@ -47,6 +47,7 @@ _SAFE_VALIDATION_LOCATIONS = frozenset(
         "seed",
         "system_prompt",
         "concurrency",
+        "read_timeout_seconds",
         "run_status",
         "protocol_version",
         "file",

@@ -45,12 +45,20 @@ def _create_stored_model(client, *, name: str = "Web Provider", api_key: str = C
     return response
 
 
-def _create_pending_run(client, model_id: str) -> dict[str, Any]:
+def _create_pending_run(
+    client,
+    model_id: str,
+    **run_overrides: object,
+) -> dict[str, Any]:
     benchmark = client.post("/api/v1/benchmarks/reload-demo")
     assert benchmark.status_code in {200, 201}, benchmark.text
     response = client.post(
         "/api/v1/runs",
-        json={"model_id": model_id, "benchmark_id": benchmark.json()["id"]},
+        json={
+            "model_id": model_id,
+            "benchmark_id": benchmark.json()["id"],
+            **run_overrides,
+        },
     )
     assert response.status_code == 202, response.text
     return response.json()
@@ -902,6 +910,55 @@ async def test_numeric_web_key_usage_never_reaches_persisted_run_evidence(
         candidate = Path(f"{database_path}{suffix}")
         if candidate.exists():
             assert NUMERIC_CANARY.encode() not in candidate.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_run_snapshot_timeout_and_provider_default_reach_provider_request(
+    client,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created = client.post(
+        "/api/v1/models",
+        json={**_stored_payload(), "default_parameters": {"max_tokens": None}},
+    )
+    assert created.status_code == 201, created.text
+    run_payload = _create_pending_run(
+        client,
+        created.json()["id"],
+        read_timeout_seconds=321.5,
+    )
+    seen_payloads: list[dict[str, object]] = []
+    seen_timeouts: list[dict[str, float]] = []
+    adapter_kwargs: dict[str, object] = {}
+
+    def provider(request: httpx.Request) -> httpx.Response:
+        seen_payloads.append(json.loads(request.content))
+        seen_timeouts.append(request.extensions["timeout"])
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "A"}, "finish_reason": "stop"}]},
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
+
+    def build_with_in_process_transport(provider_type: str, **kwargs: object):
+        assert provider_type == "openai_compatible"
+        adapter_kwargs.update(kwargs)
+        return OpenAICompatibleAdapter(
+            client=http_client,
+            **kwargs,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(runner_module, "build_adapter", build_with_in_process_transport)
+    try:
+        assert await EvaluationRunner(SessionLocal).execute(run_payload["id"]) is True
+    finally:
+        await http_client.aclose()
+
+    assert adapter_kwargs["read_timeout_seconds"] == 321.5
+    assert len(seen_payloads) == run_payload["total_questions"]
+    assert all("max_tokens" not in payload for payload in seen_payloads)
+    assert all(timeout["read"] == 321.5 for timeout in seen_timeouts)
 
 
 @pytest.mark.asyncio

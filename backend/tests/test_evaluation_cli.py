@@ -14,6 +14,7 @@ import pytest
 from pydantic import ValidationError
 
 import app.cli.evaluate as evaluation_cli
+from app.core.constants import MAX_GENERATION_TOKENS
 from app.core.time import utc_now
 from app.models import RunStatus
 from app.providers import CanaryResult, ModelDiscoveryResult
@@ -324,7 +325,7 @@ def test_provider_defaults_follow_profile_and_validate_overrides() -> None:
     [
         ("--temperature", "2.1"),
         ("--top-p", "0"),
-        ("--max-tokens", "32769"),
+        ("--max-tokens", str(MAX_GENERATION_TOKENS + 1)),
         ("--generation-seed", str(2**31)),
     ],
 )

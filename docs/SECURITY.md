@@ -46,7 +46,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 | 固定数据源/缓存漂移 | 下载被替换、缓存投毒或第三方题目误提交 | 固定 HTTPS revision、大小和 SHA-256；缓存拒绝 symlink；`artifacts/` Git 忽略 | Hash 不是发布者签名；HTTPS redirect 只有 scheme 检查，许可与来源仍需人工复核 |
 | XSS/内容注入 | 窃取页面数据或误导操作者 | React 默认文本转义；服务端不执行内容 | 未来引入 Markdown/HTML 时可能破坏边界；无 CSP |
 | 未授权访问 | 读写全部评测数据、启动付费 Run | 建议仅绑定本机；CORS 显式配置 | CORS 不是鉴权，非浏览器客户端不受其约束 |
-| 费用滥用 | 大量或重复上游请求造成费用 | Run 题内并发为 1–4、Run attempt 有限、本地 Response 幂等；真实评测 CLI 显示尝试上界、要求确认并先做小 canary | canary 可能计费；无 Provider 速率限制、预算、完整背压或熔断；Provider 调用不是 exactly-once |
+| 费用滥用 | 大量、长输出或重复上游请求造成费用 | Run 题内并发为 1–4、Run attempt 有限、本地 Response 幂等；数字 `max_tokens` 限为 `1..131072`、读取超时限为 `1..1800s`；Web 显示数据集建议与费用警告；真实评测 CLI 显示尝试上界、要求确认并先做小 canary | `max_tokens:null` 仅省略字段并采用 Provider 默认，不是无限或免费；数字/超时上限也不是 Token/金额预算；canary 可能计费；无 Provider 速率限制、预算、完整背压或熔断；Provider 调用不是 exactly-once |
 | 数据丢失/篡改 | 证据不可复现或 stored Key 不可用 | 数据库约束、Hash、Run 快照、租约 fencing；credential AAD 绑定 Model/origin；PostgreSQL 是任务事实来源 | 数据库/备份整体未加密；keyring 丢失不可恢复；无完整审计日志，访问与恢复仍由用户负责 |
 | 后台任务中断 | Run 不完整或重复执行 | 独立 Worker、数据库租约/心跳/fencing、有限重试、dead-letter、数据库对账 | 不构成生产 HA；外部 Provider 副作用不能由本地幂等约束去重 |
 | Redis 暴露或篡改 | 伪造/重放任务通知、拒绝服务、元数据泄漏 | Compose 不发布 Redis 宿主端口；消息不是事实来源且不含 Prompt/Key | 本地 Compose 未启用 Redis ACL/TLS；暴露到不可信网络会破坏可用性与保密性 |
@@ -128,6 +128,7 @@ Web stored 流程如下：
 - 把上游错误折叠为单行并截断到 500 字符。
 - 不保存请求头、完整上游请求或响应对象；Run 只持久化分类后的错误类型与可读消息。
 - 对 Chat 成功内容、raw usage 的对象键和全部 JSON 标量，以及 provider request ID、返回模型名、system fingerprint、finish reason 递归执行当前 Key 的精确替换，再允许其进入后续 Runner/preflight 边界。
+- 把 `finish_reason="length"` 的空输出或无法解析最终答案的输出归类为稳定的 `output_truncated`；这只是安全的诊断分类，不回显完整 Provider 响应对象或请求头。
 
 仍需遵守以下规则：
 
@@ -162,6 +163,7 @@ Web stored 流程如下：
 - 远端只使用 HTTPS 并验证证书；HTTP 只用于确认由本机操作者控制的 loopback 推理服务，不使用把凭据写进 URL 的反向代理。
 - 在主机防火墙、容器网络或出站代理层拒绝云元数据、loopback、link-local 与内网网段；若必须访问本地推理服务，应为它建立精确的目标例外。
 - 创建 Run 前确认 Benchmark 内容允许发送给目标 Provider。
+- 把 Web 的 Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s` 只当作可编辑建议。更高输出预算和更长读取超时可能增加费用；“由 Provider 决定”提交 `max_tokens:null`，只表示请求中省略该字段，并不取消 Provider 自身限制或平台费用风险。
 - 真实 CLI 先使用小额 `--limit` 验证；只有确认模型发现/canary、响应解析、失败率和账单后才考虑 `--full`。不要把 CLI 的请求尝试上界误当作 Token 或金额硬上限。
 
 ### 5.3 公开部署前必须实现
@@ -243,7 +245,7 @@ Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL
 
 - PostgreSQL/SQLite、Redis AOF、备份和容器 volume 整体都没有存储层加密；只有 `model_credentials` 的 Provider Key 字段在应用层形成 AES-GCM envelope。题目、回答、endpoint、环境变量名和其他元数据仍是明文，应使用专用系统账号和最小文件权限保护，不放在云盘公共共享目录。Compose 中的 `llmbenchlab-local-only` PostgreSQL 密码只是隔离本地开发占位，不是生产秘密。
 - 数据库备份可能比在线数据库保留更久，应应用同等或更严格的访问、加密、保留和销毁策略。部署 keyring 必须单独备份：不备份会失去恢复能力，与数据库备份放在一起则失去 envelope 的隔离价值。
-- Responses API 包含 raw response、Prompt、标准答案和错误；Questions API 包含参考答案和 metadata。不要把它们接入公开 Dashboard。
+- Responses API 包含 raw response、Prompt、标准答案和错误；Questions API 包含参考答案和 metadata。Web Run Detail 每次分页读取 100 条只限制单次展示量，不是授权、脱敏或数据隔离；Runs 列表中的详情链接也不会改变任何人的读取权限。不要把这些接口接入公开 Dashboard。
 - 正式评测报告同样包含题目、参考答案、raw response、解析和错误证据。Exporter 创建权限收紧的目录/文件、拒绝覆盖已有目标并脱敏常见秘密形态；报告指标从计划题与 Responses 重算，`metrics_provenance` 会显式标注 Run 汇总字段漂移。操作者仍须像保护数据库一样保护 `summary.json`、`groups.csv` 与 `responses.jsonl`；脱敏不是内容访问控制。
 - Run 快照用于复现，会保存模型/Benchmark 标识、`credential_source`、Model ID、endpoint，以及 environment 模式的变量名称；不会保存 credential row ID、ciphertext、nonce、key id 或 plaintext。设计环境变量名时避免包含机密业务信息。
 - 删除 Model 会在存在历史 Run 时被拒绝，以保护证据；MVP 尚无合规删除、匿名化或数据生命周期功能。

@@ -11,7 +11,6 @@ from app.core.constants import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
     DEFAULT_MAX_RETRIES,
     DEFAULT_POOL_TIMEOUT_SECONDS,
-    DEFAULT_READ_TIMEOUT_SECONDS,
     DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
     DEFAULT_RETRY_BACKOFF_CAP_SECONDS,
     DEFAULT_WRITE_TIMEOUT_SECONDS,
@@ -86,7 +85,7 @@ def build_evaluation_run(
             "concurrency": payload.concurrency,
             "timeouts_seconds": {
                 "connect": DEFAULT_CONNECT_TIMEOUT_SECONDS,
-                "read": DEFAULT_READ_TIMEOUT_SECONDS,
+                "read": payload.read_timeout_seconds,
                 "write": DEFAULT_WRITE_TIMEOUT_SECONDS,
                 "pool": DEFAULT_POOL_TIMEOUT_SECONDS,
             },
