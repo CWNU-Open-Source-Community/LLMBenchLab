@@ -99,7 +99,7 @@
 - 未调用修复后的真实 llama.cpp/Provider，未产生真实 API 请求或费用；用户报告的 126 秒问题是否在其完整 Cloudflare/Caddy 链路消失仍需用户显式 Run 验证。
 - 未检查或修改用户的 Cloudflare/Caddy 实际配置；文档只记录官方一般行为和需要核对的 flush/buffering/timeout 边界。
 - 未重复 `make phase2-acceptance` 或独立真实 PostgreSQL/Redis integration；本任务没有修改数据库 schema、lease、queue 或 Compose 拓扑，既有证据保持其原边界。
-- commit、push 与精确 SHA Actions/PR 查询将在文档收尾后执行；远程绿色前任务保持 `in_progress`。
+- 功能提交 `af345af1048eeddffd784fdca1da419df95da7e2` 已正常 push；其精确 SHA Actions 查询为 `[]`、分支 PR 查询为 `[]`。workflow 仅监听 PR/main，当前未触发，远程绿色前任务保持 `in_progress`。
 
 ## 安全与运行边界
 
@@ -111,16 +111,18 @@
 
 ## 当前待完成
 
-- staged diff/秘密终审，功能 commit 与普通 push。
-- 查询该精确 SHA 的 GitHub Actions 和分支 PR；若 workflow 未触发则明确记录为空，不冒充远程绿色。
+- 提交并 push 本次纯文档 evidence update，再查询其精确 SHA；不创建未获授权的 PR。
+- 要取得必需远程绿色，仍需用户授权创建 PR，或由维护者把工作合入 `main` 触发 workflow。
 
 ## 当前 Git 状态
 
 ```text
 branch: codex/complete-evaluation-workflow
 initial HEAD: 160c90a3b02e91fd62f1021f75464d0c0e15e09e
-feature commit: pending
-push: pending
-exact-SHA Actions/PR: pending
-working tree: 本任务代码、测试和文档尚未提交
+feature commit: af345af1048eeddffd784fdca1da419df95da7e2
+push: origin/codex/complete-evaluation-workflow succeeded
+feature exact-SHA Actions runs: []
+branch pull requests: []
+evidence update: pending separate documentation commit
+working tree: 仅本次远程证据文档更新尚未提交
 ```

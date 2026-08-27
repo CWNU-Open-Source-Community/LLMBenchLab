@@ -155,4 +155,4 @@ P2-05 的全局限流/预算/公平治理证据，也不改变本阶段 `in_prog
 裁剪/错位。该切片没有调用真实 Provider，完整本地门禁已通过且提交已 push，但分支无 PR、精确 SHA
 未触发 workflow，不能宣称远程绿色。
 
-同日 [ADR-0008](../decisions/ADR-0008-openai-compatible-sse-transport.md) 进一步把原来只流式下载最终 JSON 的 Chat 路径改为显式 `stream:true`：request-local parser 持续消费 token/comment、可选 usage 尾块直到 `[DONE]`，并保留普通 JSON fallback。`read_timeout_seconds` 明确为下一批字节的空闲窗口，SSE wire/单事件/聚合 content 限制为 64 MiB/1 MiB/4 MiB。完整本地 Mock 门禁通过；修复前约 126 秒 524/499 与 Cloudflare 当前默认 125 秒边界高度吻合，但修复后的用户真实 Provider/代理链路尚未运行，提交和精确 SHA 远程门禁仍按工作日志收尾。
+同日 [ADR-0008](../decisions/ADR-0008-openai-compatible-sse-transport.md) 进一步把原来只流式下载最终 JSON 的 Chat 路径改为显式 `stream:true`：request-local parser 持续消费 token/comment、可选 usage 尾块直到 `[DONE]`，并保留普通 JSON fallback。`read_timeout_seconds` 明确为下一批字节的空闲窗口，SSE wire/单事件/聚合 content 限制为 64 MiB/1 MiB/4 MiB。完整本地 Mock 门禁通过，功能提交 `af345af1048eeddffd784fdca1da419df95da7e2` 已 push；其精确 SHA Actions/PR 查询均为空，未取得远程绿色。修复前约 126 秒 524/499 与 Cloudflare 当前默认 125 秒边界高度吻合，但修复后的用户真实 Provider/代理链路尚未运行。

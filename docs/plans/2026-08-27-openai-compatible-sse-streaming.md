@@ -63,7 +63,7 @@ GPQA 的本地 Qwen Run 已显式使用 `max_tokens=8192` 和 `read_timeout_seco
    - Validation: 当前文档明确 Mock-only 证据、空闲 timeout、可选 usage、代理边界和资源上限。
 5. [in_progress] 完成 staged 审查、commit、普通 push 与精确 SHA Actions/PR 查询。
    - Files/modules: 全部本任务变更与远程工作分支。
-   - Validation: 本地门禁已通过；commit/push/精确 SHA 查询待执行，远程绿色前计划保持 active。
+   - Validation: 功能提交 `af345af1048eeddffd784fdca1da419df95da7e2` 已 push；该精确 SHA 的 Actions 与分支 PR 查询均为 `[]`，因 workflow 仅监听 PR/main 而未触发。证据文档提交/查询仍在收尾，远程绿色前计划保持 active。
 
 ## Risks
 
@@ -86,7 +86,7 @@ GPQA 的本地 Qwen Run 已显式使用 `max_tokens=8192` 和 `read_timeout_seco
 | 离线 Smoke | `make smoke` | Mock 纵向链路通过 | 1 passed / 6 deselected |
 | 前端 production build | `cd frontend && npm run build` | build 成功 | 通过；仅既有约 660 kB chunk warning |
 | 数据库/静态门禁 | Alembic upgrade/check、lock、Compose config、diff、secret scan | 全部通过 | 全部退出 0；无 migration drift/高置信秘密命中 |
-| 交付门禁 | commit、普通 push、精确 SHA Actions/PR 查询 | 状态如实记录，不把未触发当绿色 | 待执行 |
+| 交付门禁 | commit、普通 push、精确 SHA Actions/PR 查询 | 状态如实记录，不把未触发当绿色 | 功能 SHA `af345af1048eeddffd784fdca1da419df95da7e2` 已 push；Actions `[]`、PR `[]`，未触发，不是远程绿色 |
 
 ## Rollback
 
@@ -105,7 +105,7 @@ GPQA 的本地 Qwen Run 已显式使用 `max_tokens=8192` 和 `read_timeout_seco
 - Commands run: Adapter 50 passed；`make test` 后端 453 passed/6 skipped、前端 36 passed；`make lint`、`make smoke`、frontend build、Alembic、lock、Compose config、diff、秘密扫描均通过。
 - Acceptance evidence: R1–R7 的 Mock/静态/纵向本地证据均满足；未调用真实 Provider。
 - Not run: 修复后的用户 llama.cpp/Cloudflare/Caddy 链路；真实 Provider 调用由用户显式执行。未重复与本 transport 变更无关的 Phase 2 真实基础设施 8 场景验收。
-- Known issues: proxy buffering/绝对时限仍须用户链路配置；protocol-v1 transport 重试可能重复上游生成/费用；精确 SHA 远程 CI 尚待 commit/push 后查询。
+- Known issues: proxy buffering/绝对时限仍须用户链路配置；protocol-v1 transport 重试可能重复上游生成/费用；功能 SHA 的 workflow 因分支无 PR 未触发，精确 SHA 远程绿色尚未取得。
 
 ## Decision and discovery log
 

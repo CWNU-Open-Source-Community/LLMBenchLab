@@ -17,6 +17,7 @@ Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，R
 Web 的单次请求配置与 Run 可达性切片已交付：数字 `max_tokens` 可到 131,072，或用 `null` 省略字段并采用 Provider 默认值；通用 API/protocol-v1 未显式设置时仍默认 256。Benchmark 会给出输出预算与 `read_timeout_seconds=1..1800` 起点，配置固化进 Run snapshot，长度截断使用 `output_truncated` 诊断。主导航新增全状态评测记录、筛选/分页/活动轮询，详情证据每页 100 条并能返回列表，移动端第五导航、Benchmark/快照裁剪和表单错位也已修复。功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已正常 push；精确 SHA Actions 与分支 PR 查询均为空，因为 workflow 仅监听 PR/main 且本分支没有 PR。该切片没有调用真实 Provider，也不是 P2-05 的 Token/费用预算治理；“无 CI run”不等于远程绿色。
 
 [ADR-0008](decisions/ADR-0008-openai-compatible-sse-transport.md) 又把 Chat 的“流式下载最终 JSON”修正为显式 `stream:true` 和持续 SSE 消费：finish 后不提前返回，可选 usage 尾块之后必须收到 `[DONE]`；普通 JSON fallback、identity-only、严格错误和独立 wire/event/content 上限保留。`read_timeout_seconds` 是等待下一批 Provider 字节的空闲窗口，不是整题 wall-clock 上限。当前 Mock-only 本地门禁通过，修复前约 126 秒 524/499 与 Cloudflare 当前默认 125 秒边界高度吻合；修复后未调用用户真实 Provider，不能把实现与本地测试描述为真实代理链路已经成功。
+功能提交 `af345af1048eeddffd784fdca1da419df95da7e2` 已正常 push；该精确 SHA 的 Actions 和分支 PR 查询均为 `[]`，因为 workflow 只监听 PR/main 且当前无 PR。未触发不等于远程绿色。
 
 ## 当前仓库事实
 
@@ -29,6 +30,7 @@ Web 的单次请求配置与 Run 可达性切片已交付：数字 `max_tokens` 
 - Web 模型表单对 `api_key` 只写：公开读取的凭据状态字段不含 Key 或加密材料，stored Key 以绑定 Model/origin 的 AES-GCM 密文持久化，API 与 Worker 从数据库之外读取同一 keyring；`api_key_env` 旧配置仍可运行。SQLite→PostgreSQL 导入已扩为包括 `model_credentials` 的六表，keyring 必须独立备份/转移。
 - Web Run 配置把每题输出上限/Provider 默认与 1–1,800 秒读取超时写入不可变快照，并按 Benchmark 提供建议；这些参数和 `output_truncated` 错误分类只改善单次请求可诊断性，不提供 RPM/TPM/金额硬预算。
 - OpenAI-compatible Chat 显式请求真 SSE，持续消费 token/comment、可选 usage 尾块至 `[DONE]`；JSON success、SSE wire/event/content、error 上限分别为 4 MiB、64 MiB/1 MiB/4 MiB、64 KiB。transport 异常继续按 protocol-v1 有限重试，可能重复上游计算/费用；代理 buffering/绝对总时长仍是独立部署边界。
+- SSE 功能提交 `af345af1048eeddffd784fdca1da419df95da7e2` 已 push；本地后端 453 passed/6 skipped、前端 36 passed 及完整静态门禁通过，但精确 SHA Actions/PR 均为空，修复后真实 Provider 未运行。
 - Web 现有全状态评测记录入口、20 条列表分页和活动轮询；Run Detail 按 100 条分页展示完整 Response 总数。当前切片本地门禁通过，功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；精确 SHA 无 Actions run，远程绿色仍未取得。
 - Web 凭据当前切片的本地完整门禁已通过：后端 427（其中 keyring bootstrap 定向 24）、真实基础设施 6、前端 21、Smoke 与 Compose 8/8 均为零失败；stage commit/push 与精确 SHA CI 结论见对应工作日志。自动化只使用 marker Key、固定测试 keyring、MockTransport/stub fetch 和 Mock Adapter，没有调用真实 Provider。
 - 已提交的可靠性基础 commits 为 `2be2392`、`3c975c7`、`2006d3f`、`b3289b1`、`103ab79`；详见当前工作日志与 Project Status。
