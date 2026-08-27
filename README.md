@@ -266,7 +266,9 @@ uv run llmbenchlab-evaluate report <RUN_ID> \
 4. 在 **新建评测** 检查页面给出的输出预算和单次读取超时建议。Demo 默认建议 `256 / 60s`，MMLU-Pro Direct 为 `1024 / 180s`，MMLU-Pro official CoT 为 `4000 / 300s`，GPQA-Diamond 为 `8192 / 600s`；未知正式集使用保守起点 `4096 / 300s`。建议值可调整，也不代表 Provider 一定支持相同上限。
 5. 创建后可离开详情页；主导航 **评测记录** 会列出全部状态并重新进入详情。逐题证据每页 100 条，上一页/下一页不会丢失全量计数。
 
-Web 的数字 `max_tokens` 允许 `1..131072`；选择“由 Provider 决定”会保存 `null` 并在 Chat Completions 请求中省略 `max_tokens`，含义是采用 Provider 自身默认值，**不是无限输出**。未显式提供该字段的通用 API 和 `llmbenchlab-protocol-v1` 兼容路径仍默认 `256`，Benchmark 建议只影响 Web 表单起点。`read_timeout_seconds` 允许 `1..1800` 秒并随 Run 的 `execution.timeouts_seconds.read` 快照保存；只提高 token 而不提高慢模型的读取超时仍可能失败。Provider 以 `finish_reason="length"` 截断空内容或在截断后无法解析最终答案时，逐题证据会标记 `output_truncated`，提示提高输出预算或改由 Provider 决定。
+Web 的数字 `max_tokens` 允许 `1..131072`；选择“由 Provider 决定”会保存 `null` 并在 Chat Completions 请求中省略 `max_tokens`，含义是采用 Provider 自身默认值，**不是无限输出**。未显式提供该字段的通用 API 和 `llmbenchlab-protocol-v1` 兼容路径仍默认 `256`，Benchmark 建议只影响 Web 表单起点。OpenAI-compatible Chat 请求会发送 `stream:true` 与 `stream_options.include_usage:true`，持续消费 SSE token/心跳；看到 finish 后不会提前结束，若 Provider 发送 usage-only 尾块也会继续读取，直到 `[DONE]` 才完成本题。usage 缺失时 Token 统计保持未知；忽略流式参数而返回普通 JSON 的 Provider 仍兼容。
+
+`read_timeout_seconds` 允许 `1..1800` 秒并随 Run 的 `execution.timeouts_seconds.read` 快照保存。它是等待下一批响应字节的**空闲读取上限**，不是整个生成的总墙钟上限；只要 token 或 SSE comment 持续到达，总生成时间可以超过这个数值。Provider 以 `finish_reason="length"` 截断空内容或在截断后无法解析最终答案时，逐题证据会标记 `output_truncated`，提示提高输出预算或改由 Provider 决定。
 
 `make setup` 会自动创建 Git 忽略且权限为 `0600` 的 `.secrets/credential-keys.json`；本机 API 与 Worker 默认读取同一文件，Compose 则把同一文件只读挂载给二者。请把它与数据库分开安全备份：丢失 keyring 后已有 Provider Key 无法恢复，只能重新输入。编辑模型时 Key 留空表示保留；改变 Provider origin 必须重新输入；存在 `pending`/`running` Run 时端点和凭据不能修改。旧 `api_key_env` API/CLI 配置仍可运行，但 Web 不再展示该入口。
 
@@ -395,6 +397,7 @@ uv run python -m app.db.import_sqlite \
 - at-least-once 恢复不保证 Provider 调用或计费 exactly-once；数据库只保留一份幂等的 Response/费用证据。
 - 没有预算上限、Provider 级速率限制、队列背压或端到端费用保护。
 - OpenAI-compatible 只实现 Chat Completions 共同子集，不保证覆盖各供应商私有参数和响应扩展。
+- 真 SSE 可避免慢生成在完成前长时间没有响应字节，但 Worker 到 Provider 之间的 Cloudflare/Caddy/其他 Gateway 仍有独立的缓冲、空闲或绝对总时长配置；Run 的 `read_timeout_seconds` 不会改写这些代理限制。
 - 当前标准数据垂直切片只含 MMLU-Pro 和 GPQA-Diamond 客观选择题转换器；IFEval 专用规则 Evaluator、代码沙箱和完整标准 Benchmark 插件体系尚未交付，也不执行任何不可信代码。
 - 全量真实评测可能产生大量 Token、时间和费用；当前只有预检、显式确认、限题与 1–4 有界并发，没有 Provider 级 RPM/TPM 或全局费用硬上限。
 - `direct`/`official_cot`、任何 group/limit、GPQA shuffle seed、源 revision、转换器版本或 Dataset Hash 不同的结果都不能直接比较；公共题目污染和供应商同名模型滚动更新仍会限制结论。

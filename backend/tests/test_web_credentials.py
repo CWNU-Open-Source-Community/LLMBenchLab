@@ -958,6 +958,8 @@ async def test_run_snapshot_timeout_and_provider_default_reach_provider_request(
     assert adapter_kwargs["read_timeout_seconds"] == 321.5
     assert len(seen_payloads) == run_payload["total_questions"]
     assert all("max_tokens" not in payload for payload in seen_payloads)
+    assert all(payload["stream"] is True for payload in seen_payloads)
+    assert all(payload["stream_options"] == {"include_usage": True} for payload in seen_payloads)
     assert all(timeout["read"] == 321.5 for timeout in seen_timeouts)
 
 
@@ -975,24 +977,64 @@ async def test_stored_web_key_full_worker_and_report_path_never_persists_provide
 
     def provider(request: httpx.Request) -> httpx.Response:
         authorizations.append(request.headers.get("authorization"))
-        return httpx.Response(
-            200,
-            json={
+        secret_split = len(CANARY) // 2
+        events = [
+            {
                 "id": f"provider-request-{CANARY}",
                 "model": f"provider-model-{CANARY}",
                 "system_fingerprint": f"fingerprint-{CANARY}",
                 "choices": [
                     {
-                        "message": {"content": f"provider-echo:{CANARY}"},
+                        "index": 0,
+                        "delta": {"content": f"provider-echo:{CANARY[:secret_split]}"},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": f"provider-request-{CANARY}",
+                "model": f"provider-model-{CANARY}",
+                "system_fingerprint": f"fingerprint-{CANARY}",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": CANARY[secret_split:]},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                "id": f"provider-request-{CANARY}",
+                "model": f"provider-model-{CANARY}",
+                "system_fingerprint": f"fingerprint-{CANARY}",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
                         "finish_reason": f"stop-{CANARY}",
                     }
                 ],
+            },
+            {
+                "id": f"provider-request-{CANARY}",
+                "model": f"provider-model-{CANARY}",
+                "system_fingerprint": f"fingerprint-{CANARY}",
+                "choices": [],
                 "usage": {
                     "prompt_tokens": 1,
                     "completion_tokens": 1,
                     f"usage-{CANARY}": CANARY,
                 },
             },
+        ]
+        response_body = (
+            b"".join(f"data: {json.dumps(event)}\n\n".encode() for event in events)
+            + b"data: [DONE]\n\n"
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=response_body,
         )
 
     http_client = httpx.AsyncClient(transport=httpx.MockTransport(provider))
@@ -1022,7 +1064,11 @@ async def test_stored_web_key_full_worker_and_report_path_never_persists_provide
     leaderboard = client.get(f"/api/v1/leaderboard?model_id={created.json()['id']}&limit=100")
     assert run_response.status_code == responses.status_code == leaderboard.status_code == 200
     assert run_response.json()["status"] == "completed"
+    assert run_response.json()["input_tokens"] == run_payload["total_questions"]
+    assert run_response.json()["output_tokens"] == run_payload["total_questions"]
     assert responses.json()["total"] == run_payload["total_questions"]
+    assert all(item["input_tokens"] == 1 for item in responses.json()["items"])
+    assert all(item["output_tokens"] == 1 for item in responses.json()["items"])
     assert all(
         item["raw_response"] == "provider-echo:[REDACTED]" for item in responses.json()["items"]
     )

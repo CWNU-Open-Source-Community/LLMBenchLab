@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import ipaddress
 import json
 import math
@@ -10,6 +11,7 @@ import os
 import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import aclosing
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -39,6 +41,8 @@ _SECRET_FIELD_RE = re.compile(
 )
 MAX_CHAT_SUCCESS_RESPONSE_BYTES = 4 * 1024 * 1024
 MAX_CHAT_ERROR_RESPONSE_BYTES = 64 * 1024
+MAX_CHAT_STREAM_WIRE_BYTES = 64 * 1024 * 1024
+MAX_CHAT_STREAM_EVENT_BYTES = 1024 * 1024
 _RESPONSE_READ_CHUNK_BYTES = 64 * 1024
 
 
@@ -49,6 +53,142 @@ class _ResponseBodyTooLarge(RuntimeError):
         super().__init__("upstream response exceeded its byte limit")
         self.limit = limit
         self.status_code = status_code
+
+
+class _SSEAccumulator:
+    """Request-local normalized state for one Chat Completions SSE response."""
+
+    def __init__(self, *, status_code: int, attempts: int, api_key: str) -> None:
+        self.status_code = status_code
+        self.attempts = attempts
+        self.api_key = api_key
+        self._content = io.StringIO()
+        self.content_bytes = 0
+        self.finish_reason: str | None = None
+        self.usage: Mapping[str, Any] | None = None
+        self.provider_request_id: str | None = None
+        self.returned_model: str | None = None
+        self.system_fingerprint: str | None = None
+        self.done = False
+
+    @property
+    def content(self) -> str:
+        return self._content.getvalue()
+
+    def consume_event(self, raw_event: bytes) -> None:
+        """Consume one decoded SSE ``data`` event without retaining raw bytes."""
+
+        try:
+            event_text = raw_event.decode("utf-8")
+        except UnicodeError as exc:
+            raise self._invalid("Upstream SSE data was not valid UTF-8.") from exc
+        if event_text.strip() == "[DONE]":
+            self.done = True
+            return
+        try:
+            body = json.loads(event_text)
+        except ValueError as exc:
+            raise self._invalid("Upstream SSE data was not valid JSON.") from exc
+        if not isinstance(body, Mapping):
+            raise self._invalid("Upstream SSE data was not a JSON object.")
+
+        error = body.get("error")
+        if error is not None:
+            detail: object = "Provider reported an error while streaming."
+            if isinstance(error, Mapping):
+                detail = error.get("message") or error.get("type") or detail
+            else:
+                detail = error
+            raise AdapterError(
+                "provider_stream_error",
+                sanitize_error_message(f"Upstream SSE error: {detail}", self.api_key),
+                status_code=_safe_status_code(self.status_code, self.api_key),
+                attempts=self.attempts,
+            )
+
+        self._capture_stable_string(body, "id", "provider_request_id")
+        self._capture_stable_string(body, "model", "returned_model")
+        self._capture_stable_string(body, "system_fingerprint", "system_fingerprint")
+
+        if body.get("usage") is not None:
+            usage = body["usage"]
+            if not isinstance(usage, Mapping):
+                raise self._invalid("Upstream SSE usage was not an object.")
+            # Streaming usage is cumulative. Keep the latest complete object;
+            # summing events would double-count Providers that repeat it.
+            self.usage = dict(usage)
+
+        choices = body.get("choices")
+        if choices is None:
+            return
+        if not isinstance(choices, list):
+            raise self._invalid("Upstream SSE choices was not an array.")
+        if not choices:
+            return
+
+        choice = self._select_choice(choices)
+        finish_reason = choice.get("finish_reason")
+        if finish_reason is not None:
+            if not isinstance(finish_reason, str):
+                raise self._invalid("Upstream SSE finish_reason was not text.")
+            if self.finish_reason is not None and self.finish_reason != finish_reason:
+                raise self._invalid("Upstream SSE returned conflicting finish reasons.")
+            self.finish_reason = finish_reason
+
+        delta = choice.get("delta")
+        if delta is None:
+            return
+        if not isinstance(delta, Mapping):
+            raise self._invalid("Upstream SSE delta was not an object.")
+        content = delta.get("content")
+        if content is None:
+            return
+        if not isinstance(content, str):
+            raise self._invalid("Upstream SSE content delta was not text.")
+        try:
+            encoded_size = len(content.encode("utf-8"))
+        except UnicodeError as exc:
+            raise self._invalid("Upstream SSE content was not valid Unicode text.") from exc
+        if self.content_bytes + encoded_size > MAX_CHAT_SUCCESS_RESPONSE_BYTES:
+            raise _ResponseBodyTooLarge(
+                limit=MAX_CHAT_SUCCESS_RESPONSE_BYTES,
+                status_code=self.status_code,
+            )
+        self.content_bytes += encoded_size
+        self._content.write(content)
+
+    def _capture_stable_string(
+        self,
+        body: Mapping[str, Any],
+        response_key: str,
+        attribute: str,
+    ) -> None:
+        value = body.get(response_key)
+        if value is None:
+            return
+        if not isinstance(value, str):
+            raise self._invalid(f"Upstream SSE {response_key} was not text.")
+        existing = getattr(self, attribute)
+        if existing is not None and existing != value:
+            raise self._invalid(f"Upstream SSE returned conflicting {response_key} values.")
+        setattr(self, attribute, value)
+
+    def _select_choice(self, choices: list[Any]) -> Mapping[str, Any]:
+        for candidate in choices:
+            if isinstance(candidate, Mapping) and candidate.get("index") == 0:
+                return candidate
+        first = choices[0]
+        if not isinstance(first, Mapping):
+            raise self._invalid("Upstream SSE choices[0] was not an object.")
+        return first
+
+    def _invalid(self, message: str) -> AdapterError:
+        return AdapterError(
+            "invalid_provider_stream",
+            message,
+            status_code=_safe_status_code(self.status_code, self.api_key),
+            attempts=self.attempts,
+        )
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -234,6 +374,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         payload = self._build_payload(messages, generation_config)
         headers = {
             "Authorization": f"Bearer {api_key}",
+            "Accept": "text/event-stream",
             "Accept-Encoding": "identity",
             "Content-Type": "application/json",
         }
@@ -247,6 +388,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
             self._client = client
         for attempt in range(1, self.max_retries + 2):
+            stream_result: _SSEAccumulator | None = None
+            response_body: bytes | None = None
             try:
                 async with client.stream(
                     "POST",
@@ -264,15 +407,24 @@ class OpenAICompatibleAdapter(ModelAdapter):
                             status_code=_safe_status_code(response.status_code, api_key),
                             attempts=attempt,
                         )
-                    response_limit = (
-                        MAX_CHAT_SUCCESS_RESPONSE_BYTES
-                        if 200 <= response.status_code < 300
-                        else MAX_CHAT_ERROR_RESPONSE_BYTES
-                    )
-                    response_body = await self._read_response_body(
-                        response,
-                        limit=response_limit,
-                    )
+                    if not 200 <= response.status_code < 300:
+                        response_body = await self._read_response_body(
+                            response,
+                            limit=MAX_CHAT_ERROR_RESPONSE_BYTES,
+                        )
+                    elif self._is_event_stream(response):
+                        stream_result = await self._consume_sse_response(
+                            response,
+                            attempts=attempt,
+                            api_key=api_key,
+                        )
+                    else:
+                        # Some compatible Providers ignore ``stream=true`` and
+                        # return the traditional JSON success body.
+                        response_body = await self._read_response_body(
+                            response,
+                            limit=MAX_CHAT_SUCCESS_RESPONSE_BYTES,
+                        )
             except _ResponseBodyTooLarge as exc:
                 raise AdapterError(
                     "provider_response_too_large",
@@ -297,6 +449,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 ) from exc
 
             if not 200 <= response.status_code < 300:
+                assert response_body is not None
                 error_type, retryable = self._status_error_type(response.status_code)
                 safe_detail = self._safe_response_error(response, response_body, api_key)
                 if retryable and attempt <= self.max_retries:
@@ -313,10 +466,26 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     attempts=attempt,
                 )
 
+            latency_ms = (time.perf_counter() - started) * 1000
+            if stream_result is not None:
+                return self._build_generation_result(
+                    response,
+                    content=stream_result.content,
+                    finish_reason=stream_result.finish_reason,
+                    usage_obj=stream_result.usage,
+                    provider_request_id=stream_result.provider_request_id,
+                    returned_model=stream_result.returned_model,
+                    system_fingerprint=stream_result.system_fingerprint,
+                    latency_ms=latency_ms,
+                    attempts=attempt,
+                    api_key=api_key,
+                    response_mode="sse",
+                )
+            assert response_body is not None
             return self._parse_success_response(
                 response,
                 response_body,
-                latency_ms=(time.perf_counter() - started) * 1000,
+                latency_ms=latency_ms,
                 attempts=attempt,
                 api_key=api_key,
             )
@@ -359,6 +528,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
         payload: dict[str, Any] = {
             "model": self.remote_model_name,
             "messages": prepared_messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
         }
         for key in ("temperature", "top_p", "max_tokens", "seed"):
             value = generation_config.get(key)
@@ -397,6 +568,149 @@ class OpenAICompatibleAdapter(ModelAdapter):
         return "provider_http_error", False
 
     @staticmethod
+    def _is_event_stream(response: httpx.Response) -> bool:
+        content_type = response.headers.get("content-type", "")
+        media_type = content_type.split(";", 1)[0].strip().lower()
+        return media_type == "text/event-stream"
+
+    @staticmethod
+    async def _consume_sse_response(
+        response: httpx.Response,
+        *,
+        attempts: int,
+        api_key: str,
+    ) -> _SSEAccumulator:
+        """Incrementally consume one bounded Server-Sent Events response."""
+
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                declared_length = None
+            if declared_length is not None and declared_length > MAX_CHAT_STREAM_WIRE_BYTES:
+                raise _ResponseBodyTooLarge(
+                    limit=MAX_CHAT_STREAM_WIRE_BYTES,
+                    status_code=response.status_code,
+                )
+
+        accumulator = _SSEAccumulator(
+            status_code=response.status_code,
+            attempts=attempts,
+            api_key=api_key,
+        )
+        line_buffer = bytearray()
+        data_lines: list[bytes] = []
+        event_bytes = 0
+        wire_bytes = 0
+        first_line = True
+
+        def process_line(line: bytes) -> None:
+            nonlocal event_bytes, first_line
+            raw_line_size = len(line)
+            if first_line:
+                first_line = False
+                if line.startswith(b"\xef\xbb\xbf"):
+                    line = line[3:]
+            if not line:
+                if data_lines:
+                    accumulator.consume_event(b"\n".join(data_lines))
+                    data_lines.clear()
+                event_bytes = 0
+                return
+
+            event_bytes += raw_line_size + 1
+            if event_bytes > MAX_CHAT_STREAM_EVENT_BYTES:
+                raise _ResponseBodyTooLarge(
+                    limit=MAX_CHAT_STREAM_EVENT_BYTES,
+                    status_code=response.status_code,
+                )
+            if line.startswith(b":"):
+                return
+            field, separator, value = line.partition(b":")
+            if field != b"data":
+                return
+            if not separator:
+                value = b""
+            elif value.startswith(b" "):
+                value = value[1:]
+            data_lines.append(value)
+
+        def process_chunk(chunk: bytes) -> bool:
+            nonlocal wire_bytes
+            wire_bytes += len(chunk)
+            if wire_bytes > MAX_CHAT_STREAM_WIRE_BYTES:
+                raise _ResponseBodyTooLarge(
+                    limit=MAX_CHAT_STREAM_WIRE_BYTES,
+                    status_code=response.status_code,
+                )
+            line_buffer.extend(chunk)
+            while True:
+                line = OpenAICompatibleAdapter._pop_sse_line(line_buffer)
+                if line is None:
+                    break
+                process_line(line)
+                if accumulator.done:
+                    return True
+            if event_bytes + len(line_buffer) > MAX_CHAT_STREAM_EVENT_BYTES:
+                raise _ResponseBodyTooLarge(
+                    limit=MAX_CHAT_STREAM_EVENT_BYTES,
+                    status_code=response.status_code,
+                )
+            return False
+
+        if response.is_stream_consumed:
+            process_chunk(response.content)
+        else:
+            async with aclosing(response.aiter_raw()) as chunks:
+                async for chunk in chunks:
+                    if process_chunk(chunk):
+                        break
+        if accumulator.done:
+            return accumulator
+
+        while True:
+            line = OpenAICompatibleAdapter._pop_sse_line(line_buffer, at_eof=True)
+            if line is None:
+                break
+            process_line(line)
+            if accumulator.done:
+                return accumulator
+        if data_lines:
+            accumulator.consume_event(b"\n".join(data_lines))
+        if not accumulator.done:
+            raise AdapterError(
+                "incomplete_provider_stream",
+                "Upstream SSE response ended before the [DONE] marker.",
+                status_code=_safe_status_code(response.status_code, api_key),
+                attempts=attempts,
+            )
+        return accumulator
+
+    @staticmethod
+    def _pop_sse_line(buffer: bytearray, *, at_eof: bool = False) -> bytes | None:
+        """Pop one SSE line, accepting LF, CRLF, and standalone CR endings."""
+
+        for index, value in enumerate(buffer):
+            if value == 10:  # LF
+                line = bytes(buffer[:index])
+                del buffer[: index + 1]
+                return line
+            if value != 13:  # CR
+                continue
+            if index + 1 == len(buffer) and not at_eof:
+                return None
+            ending_size = 2 if index + 1 < len(buffer) and buffer[index + 1] == 10 else 1
+            line = bytes(buffer[:index])
+            del buffer[: index + ending_size]
+            return line
+        if at_eof and buffer:
+            line = bytes(buffer)
+            buffer.clear()
+            return line
+        return None
+
+    @staticmethod
     async def _read_response_body(response: httpx.Response, *, limit: int) -> bytes:
         content_length = response.headers.get("content-length")
         if content_length is not None:
@@ -422,13 +736,14 @@ class OpenAICompatibleAdapter(ModelAdapter):
             return buffered
 
         content = bytearray()
-        async for chunk in response.aiter_raw(chunk_size=_RESPONSE_READ_CHUNK_BYTES):
-            if len(content) + len(chunk) > limit:
-                raise _ResponseBodyTooLarge(
-                    limit=limit,
-                    status_code=response.status_code,
-                )
-            content.extend(chunk)
+        async with aclosing(response.aiter_raw(chunk_size=_RESPONSE_READ_CHUNK_BYTES)) as chunks:
+            async for chunk in chunks:
+                if len(content) + len(chunk) > limit:
+                    raise _ResponseBodyTooLarge(
+                        limit=limit,
+                        status_code=response.status_code,
+                    )
+                content.extend(chunk)
         return bytes(content)
 
     @staticmethod
@@ -480,11 +795,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 attempts=attempts,
             ) from exc
         finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
-        output_budget_exhausted = finish_reason == "length"
         try:
             content = choice["message"]["content"]
         except (KeyError, TypeError) as exc:
-            if output_budget_exhausted:
+            if finish_reason == "length":
                 raise AdapterError(
                     "output_truncated",
                     "Upstream exhausted the output token budget before returning text. "
@@ -498,6 +812,40 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
             ) from exc
+        usage_obj = body.get("usage") if isinstance(body, Mapping) else None
+        provider_request_id = body.get("id") if isinstance(body, Mapping) else None
+        returned_model = body.get("model") if isinstance(body, Mapping) else None
+        system_fingerprint = body.get("system_fingerprint") if isinstance(body, Mapping) else None
+        return OpenAICompatibleAdapter._build_generation_result(
+            response,
+            content=content,
+            finish_reason=finish_reason,
+            usage_obj=usage_obj,
+            provider_request_id=provider_request_id,
+            returned_model=returned_model,
+            system_fingerprint=system_fingerprint,
+            latency_ms=latency_ms,
+            attempts=attempts,
+            api_key=api_key,
+            response_mode="json",
+        )
+
+    @staticmethod
+    def _build_generation_result(
+        response: httpx.Response,
+        *,
+        content: object,
+        finish_reason: object,
+        usage_obj: object,
+        provider_request_id: object,
+        returned_model: object,
+        system_fingerprint: object,
+        latency_ms: float,
+        attempts: int,
+        api_key: str,
+        response_mode: str,
+    ) -> ModelGenerationResult:
+        output_budget_exhausted = finish_reason == "length"
         if not isinstance(content, str):
             if output_budget_exhausted:
                 raise AdapterError(
@@ -530,7 +878,6 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
         content = content.replace(api_key, "[REDACTED]")
 
-        usage_obj = body.get("usage") if isinstance(body, Mapping) else None
         raw_usage = (
             _redact_json_secret(dict(usage_obj), api_key)
             if isinstance(usage_obj, Mapping)
@@ -538,13 +885,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
         )
         input_tokens = OpenAICompatibleAdapter._usage_int(raw_usage, "prompt_tokens")
         output_tokens = OpenAICompatibleAdapter._usage_int(raw_usage, "completion_tokens")
-        provider_request_id = body.get("id") if isinstance(body, Mapping) else None
         if provider_request_id is None:
             provider_request_id = response.headers.get("x-request-id") or response.headers.get(
                 "request-id"
             )
-        returned_model = body.get("model") if isinstance(body, Mapping) else None
-        system_fingerprint = body.get("system_fingerprint") if isinstance(body, Mapping) else None
         return ModelGenerationResult(
             text=content,
             input_tokens=input_tokens,
@@ -562,6 +906,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             metadata={
                 "adapter": "openai_compatible",
                 "attempts": attempts,
+                "response_mode": response_mode,
                 "finish_reason": (
                     sanitize_error_message(finish_reason, api_key)
                     if isinstance(finish_reason, str)

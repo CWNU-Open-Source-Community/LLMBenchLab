@@ -153,12 +153,14 @@ docker compose config --quiet
 
 - Mock 输出、Token、延迟、request ID 可预测且不进行 I/O。
 - Mock 可注入分类错误，用于验证单题故障隔离。
-- OpenAI-compatible 的 Chat Completions URL、messages 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
+- OpenAI-compatible 的 Chat Completions URL、messages、`Accept: text/event-stream`、`stream:true`、`stream_options.include_usage:true` 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
 - usage 缺失时 Token 字段为 `null`。
 - 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试。
 - 远端 HTTPS 强制、loopback HTTP 例外，以及在发送 Key 前拒绝远端明文 HTTP。
-- 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat 成功 4 MiB/错误 64 KiB 的流式上限。
-- legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；`finish_reason="length"` 的空输出分类为 `output_truncated`，普通空输出仍为 `empty_response`；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换。
+- 真 SSE 的任意网络/UTF-8 拆包与合包、LF/CRLF/独立 CR、BOM、comment ping、多 `data` 行、role/null delta、reasoning/timings 扩展忽略、finish 后继续读取可选 usage-only 块至 `[DONE]`，以及普通 JSON fallback。
+- 非法 UTF-8/JSON/字段、SSE 内 Provider error、缺失 `[DONE]`、transport 中断的有限重试，以及同一 Adapter 并发请求的 request-local 状态隔离。
+- 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat JSON 4 MiB/错误 64 KiB、SSE wire 64 MiB/单事件 1 MiB/聚合 content 4 MiB 的上限。
+- legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；`finish_reason="length"` 的空输出分类为 `output_truncated`，普通空输出仍为 `empty_response`；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换，包括 Key 横跨 SSE delta 的聚合后替换。
 
 OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
 
@@ -182,7 +184,7 @@ OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把
 - GPQA-Diamond 内层 CSV Hash、198 行约束、逐 Record ID 确定性选项重排、seed/domain 筛选，以及不携带作者/解释字段；
 - 输出 ZIP 再由普通 dataset-v1 Loader round-trip 校验。
 
-`test_provider_preflight.py` 只使用 `httpx.MockTransport`，覆盖 `/v1` 与完整 `/chat/completions` 的 `/models` 推导、远端 HTTP 拒绝、identity-only/2 MiB 发现响应、压缩体读取前拒绝、认证错误脱敏、发现模型 ID 反射当前 Key 时失败、唯一/多模型选择、可解析的最小 Chat canary、finish reason 脱敏，以及 canary 明确返回不同模型时失败。它不能证明任何真实 Provider 兼容，也不应改为读取开发者环境 Key。
+`test_provider_preflight.py` 只使用 `httpx.MockTransport`，覆盖 `/v1` 与完整 `/chat/completions` 的 `/models` 推导、远端 HTTP 拒绝、identity-only/2 MiB 发现响应、压缩体读取前拒绝、认证错误脱敏、发现模型 ID 反射当前 Key 时失败、唯一/多模型选择、最小 Chat canary 使用同一流式 payload/响应 Adapter、finish reason 脱敏，以及 canary 明确返回不同模型时失败。它不能证明任何真实 Provider 兼容，也不应改为读取开发者环境 Key。
 
 `test_evaluation_cli.py` 只做离线编排，覆盖无 `--api-key`、环境/隐藏输入生命周期、确认口令、含 HTTP retries 与剩余 Run attempts 的请求上界、profile 默认值、active Run 早拒绝、Run 创建/恢复/报告顺序、过期 incomplete lease 的 fenced reclaim 和 Key 值不持久化。它验证的是本地控制流，不证明真实 Provider 或操作系统级独占；人工 runbook 仍必须先停常规 API/Worker。
 
@@ -221,6 +223,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - SQLite 并发测试断言 Model PATCH 与 Run create 在读取 Model 前以 `BEGIN IMMEDIATE` 串行化；PostgreSQL integration 断言两条路径共用 Model row `FOR UPDATE` 锁。SQLite 竞争期间允许请求短暂等待，这仍只是低并发本地模式；生产/并发评测门禁使用 PostgreSQL。
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
 - Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。生成边界测试覆盖兼容默认 `max_tokens=256`、显式 `null`、数字上限 `131072`、读取超时默认 `60s`/上限 `1800s`，并断言最终 generation 与 `execution.timeouts_seconds.read` 快照。
+- Web stored Key 纵向用例通过模拟 SSE 验证 API 写入→Worker 解密→Adapter 聚合→逐题/Run Token 持久化→报告脱敏；另一用例保留 JSON fallback，并断言 Run 的空闲读取超时和 stream payload 到达 Provider request。
 - Runner 诊断测试覆盖非空但无法解析且 `finish_reason="length"` 时的 `output_truncated`，并确认普通解析失败仍保持 `parse_error`；两者都不改变严格计零语义。
 
 增加或修改路由时至少断言：成功状态码与 Schema、一项校验错误、404/409 等业务错误、分页/筛选（若适用），以及响应中不出现秘密值。API 行为改变必须同步更新 [API.md](API.md)。

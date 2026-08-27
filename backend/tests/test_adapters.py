@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import httpx
@@ -17,16 +18,53 @@ from app.adapters import (
 class _TrackedAsyncByteStream(httpx.AsyncByteStream):
     def __init__(self, chunks: list[bytes]) -> None:
         self.chunks = chunks
+        self.index = 0
         self.yielded = 0
         self.closed = False
 
-    async def __aiter__(self):
-        for chunk in self.chunks:
-            self.yielded += 1
-            yield chunk
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self.index >= len(self.chunks):
+            raise StopAsyncIteration
+        chunk = self.chunks[self.index]
+        self.index += 1
+        self.yielded += 1
+        return chunk
 
     async def aclose(self) -> None:
         self.closed = True
+
+
+class _FailingAsyncByteStream(_TrackedAsyncByteStream):
+    def __init__(self, chunks: list[bytes], error: httpx.TransportError) -> None:
+        super().__init__(chunks)
+        self.error = error
+
+    async def __anext__(self) -> bytes:
+        try:
+            return await super().__anext__()
+        except StopAsyncIteration:
+            raise self.error from None
+
+
+class _YieldingAsyncByteStream(_TrackedAsyncByteStream):
+    def __init__(self, chunks: list[bytes]) -> None:
+        super().__init__(chunks)
+
+    async def __anext__(self) -> bytes:
+        if self.index >= len(self.chunks):
+            raise StopAsyncIteration
+        await asyncio.sleep(0)
+        chunk = self.chunks[self.index]
+        self.index += 1
+        self.yielded += 1
+        return chunk
+
+
+def _sse_event(body: object, *, ending: bytes = b"\n\n") -> bytes:
+    return b"data: " + json.dumps(body, ensure_ascii=False).encode() + ending
 
 
 @pytest.mark.asyncio
@@ -94,6 +132,7 @@ async def test_openai_compatible_sends_chat_completion_fields(
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
         seen["authorization"] = request.headers.get("authorization")
+        seen["accept"] = request.headers.get("accept")
         seen["accept_encoding"] = request.headers.get("accept-encoding")
         seen["payload"] = json.loads(request.content)
         seen["timeouts"] = request.extensions.get("timeout")
@@ -129,6 +168,7 @@ async def test_openai_compatible_sends_chat_completion_fields(
 
     assert seen["url"] == "https://provider.example/v1/chat/completions"
     assert seen["authorization"] == "Bearer top-secret-key"
+    assert seen["accept"] == "text/event-stream"
     assert seen["accept_encoding"] == "identity"
     assert seen["payload"] == {
         "model": "remote-model",
@@ -136,6 +176,8 @@ async def test_openai_compatible_sends_chat_completion_fields(
             {"role": "system", "content": "Be concise."},
             {"role": "user", "content": "Hi"},
         ],
+        "stream": True,
+        "stream_options": {"include_usage": True},
         "temperature": 0.2,
         "top_p": 0.9,
         "max_tokens": 50,
@@ -150,6 +192,434 @@ async def test_openai_compatible_sends_chat_completion_fields(
     assert result.metadata["returned_model"] == "resolved-model-version"
     assert result.metadata["system_fingerprint"] == "fp_123"
     assert result.metadata["finish_reason"] == "stop"
+    assert result.metadata["response_mode"] == "json"
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_consumes_llamacpp_sse_through_usage_and_done(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "sse-secret-token"
+    monkeypatch.setenv("TEST_PROVIDER_KEY", secret)
+    first_event = (
+        b'\xef\xbb\xbfdata: {"id":"stream-123",\r\n'
+        b'data: "model":"model","system_fingerprint":"fp-sse",'
+        b'"choices":[{"index":0,"delta":{"role":"assistant",'
+        b'"content":null},"finish_reason":null}]}\r\n\r\n'
+    )
+    payload = b"".join(
+        [
+            first_event,
+            b": llama.cpp keepalive\n\n",
+            _sse_event(
+                {
+                    "id": "stream-123",
+                    "model": "model",
+                    "system_fingerprint": "fp-sse",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"reasoning_content": "ignored reasoning"},
+                            "finish_reason": None,
+                        }
+                    ],
+                    "timings": {"predicted_per_second": 8.7},
+                }
+            ),
+            _sse_event(
+                {
+                    "id": "stream-123",
+                    "model": "model",
+                    "system_fingerprint": "fp-sse",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "答案:sse-secret-"},
+                            "finish_reason": None,
+                        }
+                    ],
+                },
+                ending=b"\r\n\r\n",
+            ),
+            _sse_event(
+                {
+                    "id": "stream-123",
+                    "model": "model",
+                    "system_fingerprint": "fp-sse",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "token\nAnswer: A"},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
+            ),
+            _sse_event(
+                {
+                    "id": "stream-123",
+                    "model": "model",
+                    "system_fingerprint": "fp-sse",
+                    "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                },
+                ending=b"\r\r",
+            ),
+            _sse_event(
+                {
+                    "id": "stream-123",
+                    "model": "model",
+                    "system_fingerprint": "fp-sse",
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 17,
+                        "completion_tokens": 23,
+                        "total_tokens": 40,
+                    },
+                    "timings": {"predicted_per_second": 8.7},
+                }
+            ),
+            b"data: [DONE]\n\n",
+        ]
+    )
+    chinese_split = payload.index("答".encode()) + 1
+    stream = _TrackedAsyncByteStream(
+        [
+            payload[:1],
+            payload[1:chinese_split],
+            payload[chinese_split : chinese_split + 2],
+            payload[chinese_split + 2 : -5],
+            payload[-5:],
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content)["stream"] is True
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream; charset=utf-8"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+        ).generate([{"role": "user", "content": "question"}], {})
+
+    assert result.text == "答案:[REDACTED]\nAnswer: A"
+    assert result.input_tokens == 17
+    assert result.output_tokens == 23
+    assert result.raw_usage == {
+        "prompt_tokens": 17,
+        "completion_tokens": 23,
+        "total_tokens": 40,
+    }
+    assert result.provider_request_id == "stream-123"
+    assert result.metadata == {
+        "adapter": "openai_compatible",
+        "attempts": 1,
+        "response_mode": "sse",
+        "finish_reason": "stop",
+        "returned_model": "model",
+        "system_fingerprint": "fp-sse",
+    }
+    assert secret not in repr(result)
+    assert stream.yielded == len(stream.chunks)
+    assert stream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_retries_transport_failure_during_sse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    calls = 0
+    streams: list[_TrackedAsyncByteStream] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            stream: _TrackedAsyncByteStream = _FailingAsyncByteStream(
+                [
+                    _sse_event(
+                        {
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": "discarded partial"},
+                                    "finish_reason": None,
+                                }
+                            ]
+                        }
+                    )
+                ],
+                httpx.ReadError("stream disconnected"),
+            )
+        else:
+            stream = _TrackedAsyncByteStream(
+                [
+                    _sse_event(
+                        {
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {"content": "complete"},
+                                    "finish_reason": "stop",
+                                }
+                            ]
+                        }
+                    ),
+                    b"data: [DONE]\n\n",
+                ]
+            )
+        streams.append(stream)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            max_retries=1,
+            retry_backoff_base_seconds=0,
+            client=client,
+        ).generate([{"role": "user", "content": "question"}], {})
+
+    assert calls == 2
+    assert result.text == "complete"
+    assert result.metadata["attempts"] == 2
+    assert all(stream.closed for stream in streams)
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_rejects_sse_without_done_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "partial-secret"
+    monkeypatch.setenv("TEST_PROVIDER_KEY", secret)
+    calls = 0
+    stream = _TrackedAsyncByteStream(
+        [
+            _sse_event(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": f"partial {secret}"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            max_retries=2,
+            retry_backoff_base_seconds=0,
+            client=client,
+        )
+        with pytest.raises(AdapterError) as caught:
+            await adapter.generate([{"role": "user", "content": "question"}], {})
+
+    assert calls == 1
+    assert caught.value.error_type == "incomplete_provider_stream"
+    assert caught.value.attempts == 1
+    assert secret not in repr(caught.value)
+    assert stream.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "expected_error"),
+    [
+        (b"data: {not-json}\n\n", "invalid_provider_stream"),
+        (
+            b'data: {"choices":[{"index":0,"delta":{"content":"\\ud800"},'
+            b'"finish_reason":null}]}\n\n',
+            "invalid_provider_stream",
+        ),
+        (
+            _sse_event({"error": {"message": "Authorization: Bearer stream-error-secret"}}),
+            "provider_stream_error",
+        ),
+    ],
+)
+async def test_openai_compatible_rejects_invalid_or_error_sse_events(
+    monkeypatch: pytest.MonkeyPatch,
+    event: bytes,
+    expected_error: str,
+) -> None:
+    secret = "stream-error-secret"
+    monkeypatch.setenv("TEST_PROVIDER_KEY", secret)
+    stream = _TrackedAsyncByteStream([event])
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+        )
+        with pytest.raises(AdapterError) as caught:
+            await adapter.generate([{"role": "user", "content": "question"}], {})
+
+    assert caught.value.error_type == expected_error
+    assert caught.value.attempts == 1
+    assert secret not in repr(caught.value)
+    assert stream.closed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit_kind", ["wire", "event", "content"])
+async def test_openai_compatible_enforces_sse_size_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    limit_kind: str,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    monkeypatch.setattr(openai_compatible_module, "MAX_CHAT_STREAM_WIRE_BYTES", 1024)
+    monkeypatch.setattr(openai_compatible_module, "MAX_CHAT_STREAM_EVENT_BYTES", 1024)
+    monkeypatch.setattr(openai_compatible_module, "MAX_CHAT_SUCCESS_RESPONSE_BYTES", 1024)
+    if limit_kind == "wire":
+        monkeypatch.setattr(openai_compatible_module, "MAX_CHAT_STREAM_WIRE_BYTES", 16)
+        chunks = [b": keepalive data that exceeds the wire cap\n\n"]
+        expected_limit = 16
+    elif limit_kind == "event":
+        monkeypatch.setattr(openai_compatible_module, "MAX_CHAT_STREAM_EVENT_BYTES", 8)
+        chunks = [b"data: {}\n\n"]
+        expected_limit = 8
+    else:
+        monkeypatch.setattr(openai_compatible_module, "MAX_CHAT_SUCCESS_RESPONSE_BYTES", 4)
+        chunks = [
+            _sse_event(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"content": "12345"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            ),
+            b"data: [DONE]\n\n",
+        ]
+        expected_limit = 4
+    stream = _TrackedAsyncByteStream(chunks)
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            max_retries=2,
+            retry_backoff_base_seconds=0,
+            client=client,
+        )
+        with pytest.raises(AdapterError) as caught:
+            await adapter.generate([{"role": "user", "content": "question"}], {})
+
+    assert caught.value.error_type == "provider_response_too_large"
+    assert caught.value.attempts == 1
+    assert f"{expected_limit}-byte safety limit" in caught.value.error_message
+    assert stream.closed is True
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_keeps_concurrent_sse_state_request_local(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    streams: list[_TrackedAsyncByteStream] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        label = payload["messages"][-1]["content"]
+        complete = b"".join(
+            [
+                _sse_event(
+                    {
+                        "id": f"request-{label}",
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"content": f"answer-{label}"},
+                                "finish_reason": "stop",
+                            }
+                        ],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": len(label)},
+                    }
+                ),
+                b"data: [DONE]\n\n",
+            ]
+        )
+        midpoint = len(complete) // 2
+        stream = _YieldingAsyncByteStream([complete[:midpoint], complete[midpoint:]])
+        streams.append(stream)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+        )
+        first, second = await asyncio.gather(
+            adapter.generate([{"role": "user", "content": "first"}], {}),
+            adapter.generate([{"role": "user", "content": "second"}], {}),
+        )
+
+    assert (first.text, first.provider_request_id, first.output_tokens) == (
+        "answer-first",
+        "request-first",
+        5,
+    )
+    assert (second.text, second.provider_request_id, second.output_tokens) == (
+        "answer-second",
+        "request-second",
+        6,
+    )
+    assert len(streams) == 2
+    assert all(stream.closed for stream in streams)
 
 
 @pytest.mark.asyncio
@@ -207,6 +677,50 @@ async def test_openai_compatible_classifies_empty_output_budget_exhaustion(
     assert caught.value.error_type == expected_error
     if finish_reason == "length":
         assert "Increase max_tokens" in caught.value.error_message
+
+
+@pytest.mark.asyncio
+async def test_openai_compatible_classifies_empty_sse_after_length_finish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TEST_PROVIDER_KEY", "secret")
+    stream = _TrackedAsyncByteStream(
+        [
+            _sse_event(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "length",
+                        }
+                    ]
+                }
+            ),
+            b"data: [DONE]\n\n",
+        ]
+    )
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=stream,
+        )
+    )
+
+    async with httpx.AsyncClient(transport=transport) as client:
+        adapter = OpenAICompatibleAdapter(
+            "https://provider.example/v1",
+            "model",
+            "TEST_PROVIDER_KEY",
+            client=client,
+        )
+        with pytest.raises(AdapterError) as caught:
+            await adapter.generate([{"role": "user", "content": "question"}], {})
+
+    assert caught.value.error_type == "output_truncated"
+    assert "Increase max_tokens" in caught.value.error_message
+    assert stream.closed is True
 
 
 @pytest.mark.asyncio

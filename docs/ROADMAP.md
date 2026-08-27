@@ -261,8 +261,8 @@
 用户在 2026-08-27 明确要求先形成可真实模型测试的完整客观评测流程；
 [ADR-0006](decisions/ADR-0006-local-real-provider-evaluation.md) 因此批准一个仅限可信本地、
 无全局预算承诺的提前切片。该偏差不把 Phase 2 或 Phase 3 标为完成，也不放宽沙箱前置依赖。
-该切片只允许远程 HTTPS（HTTP 仅 loopback），限制 Chat 成功/错误响应为 4 MiB/64 KiB 且只接受
-identity 编码；模型发现拒绝反射当前 Key 的模型 ID，canary 拒绝不同返回模型，成功证据在持久化前
+该切片只允许远程 HTTPS（HTTP 仅 loopback），只接受 identity 编码；按
+[ADR-0008](decisions/ADR-0008-openai-compatible-sse-transport.md)，Chat JSON 成功体、SSE wire/单事件/聚合 content、错误体分别限制为 4 MiB、64 MiB/1 MiB/4 MiB、64 KiB。模型发现拒绝反射当前 Key 的模型 ID，canary 拒绝不同返回模型，成功证据在持久化前
 精确移除当前 Key。报告指标从计划题目与 Responses 派生，并用 `metrics_provenance` 标出 Run 字段漂移。
 
 ### 任务拆分

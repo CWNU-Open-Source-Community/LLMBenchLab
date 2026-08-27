@@ -21,7 +21,7 @@
 - 完整的 Charter、Requirements、Architecture、Benchmark Protocol、Dataset Format、Roadmap、Phase 0–6、ADR、治理规则和开源协作文件。
 - FastAPI、SQLAlchemy 2.x 与 Alembic 后端；PostgreSQL 是 Compose/共享部署目标和任务事实来源，SQLite 保留单 Worker 本地兼容；六个核心实体、UTC 时间、约束、索引，以及 `0000 -> 0001 -> 0002 -> 0003` 线性迁移链。
 - Alembic 是唯一 schema owner；Compose 只允许一次性 `migrate` 服务执行迁移，API/Worker 只检查 head。setup/migrate 仍可安全收养已知未版本化 SQLite，未知漂移在 stamp 前被拒绝。
-- Model CRUD 与 Mock/OpenAI-compatible Adapter；Web/API 可通过只写 `api_key` 直接接收 Provider Key，并在一模型一行的 `model_credentials` 中以 AES-256-GCM 保存认证密文。API 不把凭据流中的 Key 复制到公开 `ModelRead`/Run-model snapshot，也不返回 nonce、ciphertext 或 key ID；凭据状态由 `credential_source` 与仅表示 stored ciphertext 的 `has_api_key` 表达，既有 `api_key_env` 名称保持 API 兼容但 Web 不展示。可信本地 CLI 环境/隐藏输入路径继续兼容，API 与 Worker 必须共享独立于数据库的部署 keyring。远程 Provider 只允许 HTTPS，HTTP 只允许 loopback；模型发现与 Chat 都只接受 identity 编码，发现体上限 2 MiB，Chat 成功体上限 4 MiB、错误体上限 64 KiB，并在持久化前递归检查 Provider 返回证据的对象键/JSON 标量，将当前 Key 的精确回显替换为 `[REDACTED]`。该保证不扫描无关 Benchmark/Question 的独立字面巧合。
+- Model CRUD 与 Mock/OpenAI-compatible Adapter；Web/API 可通过只写 `api_key` 直接接收 Provider Key，并在一模型一行的 `model_credentials` 中以 AES-256-GCM 保存认证密文。API 不把凭据流中的 Key 复制到公开 `ModelRead`/Run-model snapshot，也不返回 nonce、ciphertext 或 key ID；凭据状态由 `credential_source` 与仅表示 stored ciphertext 的 `has_api_key` 表达，既有 `api_key_env` 名称保持 API 兼容但 Web 不展示。可信本地 CLI 环境/隐藏输入路径继续兼容，API 与 Worker 必须共享独立于数据库的部署 keyring。远程 Provider 只允许 HTTPS，HTTP 只允许 loopback；模型发现与 Chat 都只接受 identity 编码，发现体上限 2 MiB，Chat 普通 JSON 成功体上限 4 MiB、SSE wire/单事件/聚合 content 上限 64 MiB/1 MiB/4 MiB、错误体上限 64 KiB，并在持久化前递归检查 Provider 返回证据的对象键/JSON 标量，将当前 Key 的精确回显替换为 `[REDACTED]`。SSE content 先聚合再脱敏，可覆盖跨 delta 拆分的 Key；该保证不扫描无关 Benchmark/Question 的独立字面巧合。
 - 受限 ZIP/目录 Dataset Loader、严格 Schema/JSONL 校验、路径与压缩炸弹防护、稳定 SHA-256，以及 15 道原创 `demo-general`；资源上限现为 20,000 题、128 MiB `questions.jsonl` 和 130 MiB ZIP。
 - MMLU-Pro test 与 GPQA-Diamond 的固定 revision/SHA 下载、验证缓存、确定性转换和可复现 ZIP；不在仓库提交第三方题目。MMLU-Pro 支持 `direct` 与 category 5-shot `official_cot`，GPQA 使用固定 seed 逐题重排和 `zero-shot-cot-answer-line-v1`。
 - 可信本地 `llmbenchlab-evaluate` CLI：`prepare/run/resume/report`，支持 `/models` 发现、最小 canary、隐藏输入/环境变量 Key、题数与 HTTP attempts 上界确认、缺题恢复和终态报告。发现结果若把当前 Key 反射为模型 ID 会失败；canary 若返回不同于请求目标的模型也会失败；首次 Run 的 discovery/canary 证据会固化进 Run 快照。
@@ -31,7 +31,7 @@
 - 数据库裁决取消、重试/退避、租约过期接管、终态聚合和 dead-letter；fail-attempt 与过期租约两条 dead-letter 路径都先从持久化 Response 聚合证据。Redis 是 at-least-once 通知层，不是状态数据库，通知丢失时可由数据库对账恢复。
 - 22 个版本化 `/api/v1` 操作：liveness、health、readiness、任务 gauges、服务信息、模型、Benchmark、Run、逐题 Response、Leaderboard 与 Dashboard Metrics；OpenAPI 可用。
 - React 中文界面现有 Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail、Leaderboard 七页。评测记录位于主导航，覆盖全部 Run 状态、筛选、20 条分页、手动刷新和活动页轮询；Run Detail 按 100 条分页读取逐题证据、显示 API 总数并可返回列表。第五个导航项及 Benchmark 详情、配置快照和表单字段已适配桌面/平板/移动裁剪与对齐。Models 对 OpenAI-compatible 提供 password 类型 Key 输入：创建时必填，编辑留空保留同 origin 的 stored/legacy environment 凭据，页面从不回填或展示原文；提交开始、关闭、切换 Mock 与 unmount 都会清空浏览器状态。
-- Web/API Run 配置已支持 `max_tokens=1..131072` 或 `null`；`null` 会省略 Provider 请求字段而不是承诺无限输出，未显式给值的通用 API/protocol-v1 默认仍为 256。Web 按 Demo、MMLU-Pro Direct/official CoT、GPQA-Diamond 给出不同输出预算与读取超时起点，`read_timeout_seconds=1..1800` 固化进 Run execution snapshot；Provider 长度截断导致空内容或最终答案解析失败时记录 `output_truncated`。
+- Web/API Run 配置已支持 `max_tokens=1..131072` 或 `null`；`null` 会省略 Provider 请求字段而不是承诺无限输出，未显式给值的通用 API/protocol-v1 默认仍为 256。Web 按 Demo、MMLU-Pro Direct/official CoT、GPQA-Diamond 给出不同输出预算与读取超时起点，`read_timeout_seconds=1..1800` 固化进 Run execution snapshot，并表示等待下一批 Provider 字节的空闲上限，不是整题总生成时限；Provider 长度截断导致空内容或最终答案解析失败时记录 `output_truncated`。OpenAI-compatible Chat 现请求真 SSE，消费 token/comment、可选 usage 尾块直到 `[DONE]`，普通 JSON fallback 保持兼容。
 - LLMBenchLab 应用 JSON 日志、请求/Run/Question correlation ID、`/live`、`/health`、`/ready`、数据库派生任务 gauges，以及数据库/队列依赖能力 Worker probe。
 - PostgreSQL/SQLite migration 已扩展到 `0003`；显式 SQLite→PostgreSQL 单向导入器以只读源、空目标、单目标事务和六表 count/PK/content digest 对账（包括 `model_credentials`），并区分提交前回滚、COMMIT 结果未知与提交后验证失败。数据库迁移不会复制部署 keyring，含 stored credential 的目标必须另行获得匹配 keyring 才能解密。
 - 统一 Make 命令、setup/dev/smoke/故障验收脚本、锁文件和 GitHub Actions；六服务本地 Compose 由 `postgres`、`redis`、一次性 `migrate`、`api`、`worker`、`frontend` 组成，API/frontend 只绑定 loopback，PostgreSQL/Redis 不发布宿主端口。
@@ -45,6 +45,7 @@
 - [ADR-0006](decisions/ADR-0006-local-real-provider-evaluation.md) 按用户优先级批准可信本地正式数据/真实 Provider 提前切片；本地代码、固定数据源下载和 Mock-only 回归已通过，真实 Provider 调用留给持有 Key 的用户显式执行。该切片没有补齐 P2-05，也不代表 Phase 3 完成。
 - [ADR-0007](decisions/ADR-0007-web-provider-credentials.md) 已按用户明确要求接受 Web 直接输入 Key：write-only API/UI、AES-GCM `model_credentials`、API/Worker 共享 keyring、legacy environment 兼容、origin 变更重输 Key 和 active-Run 变更禁令均已通过完整本地门禁。用户随后暴露的 PyPy keyring 首次初始化问题也已修复、通过本地回归并正常 push；没有调用真实 Provider。它不改变 Phase 2 的 `in_progress` 状态。
 - Web 长推理预算/读取超时、`output_truncated` 诊断、全状态评测记录、逐题证据分页和响应式修复已在功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 中正常 push；完整本地门禁通过。该切片不改变 Phase 2/3 状态，自动化没有调用真实 Provider。
+- [ADR-0008](decisions/ADR-0008-openai-compatible-sse-transport.md) 已接受 OpenAI-compatible 真 SSE、空闲 read timeout、严格 `[DONE]`、独立资源上限和 protocol-v1 transport 重试边界。当前工作树的本地门禁已通过：后端 453 passed/6 skipped、前端 36 passed、lint/type/build/Smoke/Alembic/lock/Compose/diff/秘密扫描全部通过；修复后尚未调用用户真实 Provider，提交/push/精确 SHA 查询仍在本任务收尾中。
 - 当前分支 `codex/complete-evaluation-workflow` 的 Web 凭据基础实现 `b19bdac9236f9b2f927166ebe30578ced3d9f53e`、前一文档证据 `d41517a0cc385da6931f83de672f24f841192a31`、bootstrap remediation `d26cdbe4f3f97057ce09d5d7a539ddbfe605d967` 与 Web Run UX 功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 均已推送。工作流只由 PR 或 `main` push 触发；当前分支没有 PR，最新功能 SHA 的 Actions 查询与 PR 查询均为空。创建 PR 需用户明确授权，远程绿色前保持任务 `in_progress`。
 
 ## 尚未完成的功能
@@ -65,6 +66,7 @@
 - Web 的每题 `max_tokens` 与读取超时是请求配置和诊断能力，不是 P2-05 的全局 Token/费用预算。选择 Provider 默认也可能被上游自身限制或收费，不能解读为无限输出或成本可控。
 - 任务投递为 at-least-once，本地 Response 和聚合幂等，但 Provider 调用不是 exactly-once；Worker 在上游响应后、本地提交前崩溃可能造成重复请求或费用。
 - 取消和失租会阻止后续题目与陈旧 Worker 写入，但已经发出的 Provider 请求可能继续至响应或超时。
+- 真 SSE 只有在 Provider 与 Worker 之间每一层都保留 `text/event-stream` 并实际 flush 时才能刷新空闲窗口；Cloudflare/Caddy/其他 Gateway 的 buffering、首字节、空闲与绝对总时长仍须独立配置。修复前约 126 秒 524/499 与 Cloudflare 当前 125 秒默认边界高度吻合，但修复后用户真实链路尚未验证。
 - Redis 故障会让 API readiness 降级并增加调度延迟；数据库可继续提交/对账，但这不是 Redis 高可用保证。当前本地 Redis 无 ACL/TLS，只能位于隔离网络。
 - Worker probe 只检查数据库/head/队列能力，不证明 Worker 主循环仍在领取、心跳或推进任务。API readiness 的 `asyncio.to_thread` 超时也不会取消底层同步数据库调用，最终上界取决于驱动/连接池 timeout。
 - SQLite→PostgreSQL importer 会复制完整敏感评测内容和 `model_credentials` 认证密文，且只支持空目标的单向导入；退出码 3/4 禁止盲目重试，工具不提供 PostgreSQL→SQLite 自动回迁。keyring 不随数据库导入，必须作为独立部署秘密安全转移。
@@ -86,6 +88,7 @@
 | Web 凭据静态/迁移/Compose | 通过 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、更新后的 8/8 故障验收、diff check 与高置信 secret scan 均通过；evidence `llmbenchlab-p2-60f3ccdac113` 已确认无残留容器/卷/网络 |
 | 标准数据真实源验证 | 通过 | 固定源下载并转换完整 MMLU-Pro 两个 profile（各 12,032 题）与 GPQA-Diamond（198 题）；另以 CLI `prepare --limit 2` 验证普通入口和可复现归档 |
 | Web Run UX / 长推理配置切片 | 已 push，远程未触发 | 功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；后端 `442 passed, 6 skipped`、前端 9 files / `36 passed`、lint/typecheck/build、Smoke `1 passed, 6 deselected`、lock/Compose config/diff 与 390–1280px 关键断点通过；精确 SHA 无 Actions run |
+| OpenAI-compatible 真 SSE / 空闲超时切片 | 本地通过，待 commit/push | Adapter 50 passed；最终 `make test` 后端 `453 passed, 6 skipped`、前端 9 files / `36 passed`；lint/typecheck/build、Smoke `1 passed, 6 deselected`、Alembic、lock、Compose config、diff 和高置信秘密扫描通过；只使用 MockTransport/stub，修复后未调用真实 Provider |
 | 真实 Provider | 未运行（有意） | 本任务没有 API Key；自动化只用 Mock/MockTransport，真实调用及费用必须由用户显式确认后发生 |
 | 远程精确 SHA CI | 未触发 | 最新功能 SHA `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已正常 push；Actions 与 PR 查询均为空，workflow 仅监听 PR/main；未获授权创建 PR，本地通过不替代 CI |
 
@@ -102,6 +105,8 @@
 [2026-08-27-web-provider-credentials.md](worklogs/2026-08-27-web-provider-credentials.md)（Web 只写 Key、AES-GCM 凭据、共享 keyring、兼容迁移与安全门禁）
 
 [2026-08-27-web-run-ux-and-generation-budgets.md](worklogs/2026-08-27-web-run-ux-and-generation-budgets.md)（Web 长推理配置、评测记录/证据分页与响应式修复；功能提交已 push，精确 SHA 未触发 workflow）
+
+[2026-08-27-openai-compatible-sse-streaming.md](worklogs/2026-08-27-openai-compatible-sse-streaming.md)（OpenAI-compatible 真 SSE、空闲 read timeout、严格终止、资源/脱敏边界与 126 秒 524/499 诊断）
 
 ## 当前任务入口
 

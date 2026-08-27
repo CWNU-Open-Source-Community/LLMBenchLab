@@ -50,11 +50,11 @@ llmbenchlab-protocol-v1
 | `max_tokens` | `256` | 对 Demo 客观短答案足够，实际值写入快照 |
 | `seed` | `42` | 按请求发送；平台记录请求值，但无法证明 Provider 实际应用 |
 | `concurrency` | `1` | 默认串行，避免速率和调度差异 |
-| 读取超时 | `60s` | 每次 Provider 响应读取超时，实际值写入执行快照 |
+| 读取超时 | `60s` | 等待 Provider 下一批响应字节的空闲读取上限，不是请求总墙钟时限；实际值写入执行快照 |
 | 最大尝试次数 | `3` | 首次请求加最多 2 次重试 |
 | 指数退避 | `0.25s, 0.5s` | base 为 0.25 秒、cap 为 2 秒；当前 2 次重试不会到达 cap |
 
-Model 可为 `temperature`、`top_p`、`max_tokens`、`seed` 保存经过同等范围校验的默认值；这属于操作者配置的显式预设。Run 请求中出现的字段优先，省略字段才回退到 Model 默认，Model 也未配置时使用上表协议默认。显式数字 `max_tokens` 的允许范围为 `1..131072`；显式 `null` 表示 OpenAI-compatible 请求不发送该字段并由 Provider 选择默认输出预算，**不表示无限输出**。读取超时可显式设为 `1..1800` 秒。最终有效生成值写入 `generation`，读取超时写入 `execution.timeouts_seconds.read`；直接比较仍要求这些快照值完全相同。
+Model 可为 `temperature`、`top_p`、`max_tokens`、`seed` 保存经过同等范围校验的默认值；这属于操作者配置的显式预设。Run 请求中出现的字段优先，省略字段才回退到 Model 默认，Model 也未配置时使用上表协议默认。显式数字 `max_tokens` 的允许范围为 `1..131072`；显式 `null` 表示 OpenAI-compatible 请求不发送该字段并由 Provider 选择默认输出预算，**不表示无限输出**。空闲读取超时可显式设为 `1..1800` 秒。最终有效生成值写入 `generation`，读取超时写入 `execution.timeouts_seconds.read`；直接比较仍要求这些快照值完全相同。
 
 Web 为已知 Benchmark 提供以下可编辑建议；Model 已配置的对应默认仍优先作为未手动修改时的初值。它们由浏览器作为显式 Run 值提交，不改变上表中兼容 protocol-v1 的通用 API 默认值：
 
@@ -77,7 +77,7 @@ Web 允许操作者手动覆盖建议值，切换 Benchmark 时不会覆盖已�
 
 操作者可通过 CLI 参数覆盖这些值或用 `--no-seed` 请求不发送 seed；最终值始终进入 Run 快照。CLI 的 GPQA `1024` 与 Web 建议 `8192` 是两个不同入口的显式预设，不应被误写成同一默认。由于生成参数是可比性条件，使用不同 max tokens、temperature、seed、并发或读取超时的结果不能直接比较。
 
-重试仅适用于 429、部分 5xx、连接中断、连接超时和读取超时等暂时性错误。认证失败、无效模型名、参数错误等明确 4xx 不重试。`latency_ms` 以第一次尝试前到最终成功或失败后的墙钟时间计算，包含重试和退避；因此比较延迟时必须使用相同重试配置。
+重试仅适用于 429、部分 5xx、连接中断、连接超时和读取超时等暂时性错误。认证失败、无效模型名、参数错误等明确 4xx 不重试。SSE transport 异常仍沿用这一有限策略；未完整流的部分内容不计分、不保存为成功答案，而重试可能重复上游计算或计费。`latency_ms` 以第一次尝试前到最终成功或失败后的墙钟时间计算，包含重试和退避；因此比较延迟时必须使用相同重试配置。
 
 即使 temperature 为 0 且 seed 相同，上游实现、模型权重或基础设施仍可能变化。LLMBenchLab 记录“请求了什么”，不能证明供应商实际应用 seed，也不能保证逐 token 确定性。
 
@@ -100,7 +100,7 @@ MMLU-Pro 的标准转换器把题目选项以及 profile 指令直接固化在�
 每道计划题恰好产生一条最终 EvaluationResponse。过程如下：
 
 1. 使用 Run 快照构造消息和 generation config。
-2. 调用选定 ModelAdapter；临时错误按快照策略有限重试。OpenAI-compatible 远端只允许 HTTPS，明文 HTTP 仅允许 loopback；Chat 请求声明且响应只接受 identity encoding，成功体最多 4 MiB、错误体最多 64 KiB。数字 `max_tokens` 原样发送，快照值为 `null` 时省略该请求字段；每次读取使用 Run 冻结的超时。
+2. 调用选定 ModelAdapter；临时错误按快照策略有限重试。OpenAI-compatible 远端只允许 HTTPS，明文 HTTP 仅允许 loopback；Chat 请求声明且响应只接受 identity encoding，显式发送 `stream:true` 与流式 usage 选项，持续聚合 `delta.content`。看到 finish 后不提前返回；若有 usage-only 尾块则继续读取，并验证 `[DONE]`，usage 缺失时保持未知。返回普通 JSON 的 Provider 使用 fallback。普通 JSON 成功体最多 4 MiB，SSE wire/单事件/聚合 content 最多 64 MiB/1 MiB/4 MiB，错误体最多 64 KiB。数字 `max_tokens` 原样发送，快照值为 `null` 时省略该请求字段；每次等待下一批字节使用 Run 冻结的空闲读取超时。
 3. 成功时保存未经答案规范化的 `raw_response`、input/output Token 和总延迟。若成功内容、raw usage 的对象键/字符串值、request ID、返回模型名或 system fingerprint 精确包含当前 Key，Adapter 会先替换为 `[REDACTED]`。Adapter 结果仍只在调用期携带 request ID/raw usage/返回模型/fingerprint；Phase 1 的 Response Schema 不持久化这些 transport 扩展字段。
 4. 根据 manifest 的题型映射选择版本化 Evaluator。
 5. 保存 `parsed_answer`、标准答案快照、0/1 分、Evaluator 名称和解析元数据。
@@ -221,6 +221,7 @@ P2-06 的审计链尚未闭合：`resume` 会重新执行 canary，但不会把�
 | 响应非空但 `finish_reason=length` 且未解析出最终答案 | 保存 raw 与 `output_truncated` | 1 | 0 | 0 | 是 |
 | 空回答，且未报告长度耗尽 | 保存 `empty_response` | 0 | 0 | 0 | 是 |
 | 空回答且 `finish_reason=length` | 保存 `output_truncated` | 0 | 0 | 0 | 是 |
+| 非法、流内错误或缺少终止标记的 SSE | 保存脱敏后的稳定 stream 错误，不保存部分文本 | 0 | 0 | 0 | 是 |
 | 超时/网络/最终 429 | 保存脱敏后的最终错误类型与信息 | 0 | 0 | 0 | 是 |
 | Evaluator 异常 | 保存脱敏错误 | 1 | 0 | 0 | 是 |
 | 取消前未处理 | 无伪造 Response | 0 | 0 | 0 | 不计已处理错误；Run 为 cancelled |

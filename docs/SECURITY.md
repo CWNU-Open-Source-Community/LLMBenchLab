@@ -46,7 +46,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 | 固定数据源/缓存漂移 | 下载被替换、缓存投毒或第三方题目误提交 | 固定 HTTPS revision、大小和 SHA-256；缓存拒绝 symlink；`artifacts/` Git 忽略 | Hash 不是发布者签名；HTTPS redirect 只有 scheme 检查，许可与来源仍需人工复核 |
 | XSS/内容注入 | 窃取页面数据或误导操作者 | React 默认文本转义；服务端不执行内容 | 未来引入 Markdown/HTML 时可能破坏边界；无 CSP |
 | 未授权访问 | 读写全部评测数据、启动付费 Run | 建议仅绑定本机；CORS 显式配置 | CORS 不是鉴权，非浏览器客户端不受其约束 |
-| 费用滥用 | 大量、长输出或重复上游请求造成费用 | Run 题内并发为 1–4、Run attempt 有限、本地 Response 幂等；数字 `max_tokens` 限为 `1..131072`、读取超时限为 `1..1800s`；Web 显示数据集建议与费用警告；真实评测 CLI 显示尝试上界、要求确认并先做小 canary | `max_tokens:null` 仅省略字段并采用 Provider 默认，不是无限或免费；数字/超时上限也不是 Token/金额预算；canary 可能计费；无 Provider 速率限制、预算、完整背压或熔断；Provider 调用不是 exactly-once |
+| 费用滥用 | 大量、长输出或重复上游请求造成费用 | Run 题内并发为 1–4、Run attempt 有限、本地 Response 幂等；数字 `max_tokens` 限为 `1..131072`、空闲读取超时限为 `1..1800s`；Web 显示数据集建议与费用警告；真实评测 CLI 显示尝试上界、要求确认并先做小 canary | `max_tokens:null` 仅省略字段并采用 Provider 默认，不是无限或免费；数字/超时上限也不是 Token/金额预算；canary 可能计费；SSE transport 断线仍按 protocol-v1 有限重试，可能重复上游计算/计费；无 Provider 速率限制、预算、完整背压或熔断；Provider 调用不是 exactly-once |
 | 数据丢失/篡改 | 证据不可复现或 stored Key 不可用 | 数据库约束、Hash、Run 快照、租约 fencing；credential AAD 绑定 Model/origin；PostgreSQL 是任务事实来源 | 数据库/备份整体未加密；keyring 丢失不可恢复；无完整审计日志，访问与恢复仍由用户负责 |
 | 后台任务中断 | Run 不完整或重复执行 | 独立 Worker、数据库租约/心跳/fencing、有限重试、dead-letter、数据库对账 | 不构成生产 HA；外部 Provider 副作用不能由本地幂等约束去重 |
 | Redis 暴露或篡改 | 伪造/重放任务通知、拒绝服务、元数据泄漏 | Compose 不发布 Redis 宿主端口；消息不是事实来源且不含 Prompt/Key | 本地 Compose 未启用 Redis ACL/TLS；暴露到不可信网络会破坏可用性与保密性 |
@@ -127,7 +127,9 @@ Web stored 流程如下：
 - 识别常见 Bearer、Authorization、API key、token 和 secret 表达形式。
 - 把上游错误折叠为单行并截断到 500 字符。
 - 不保存请求头、完整上游请求或响应对象；Run 只持久化分类后的错误类型与可读消息。
+- 不记录原始 SSE 行、事件或单个 delta；只在收到完整终止信号后使用聚合结果。
 - 对 Chat 成功内容、raw usage 的对象键和全部 JSON 标量，以及 provider request ID、返回模型名、system fingerprint、finish reason 递归执行当前 Key 的精确替换，再允许其进入后续 Runner/preflight 边界。
+- SSE `delta.content` 先完整聚合、再执行当前 Key 的精确替换，覆盖 Key 被分到多个 delta 的情况；这仍不是通用 DLP。
 - 把 `finish_reason="length"` 的空输出或无法解析最终答案的输出归类为稳定的 `output_truncated`；这只是安全的诊断分类，不回显完整 Provider 响应对象或请求头。
 
 仍需遵守以下规则：
@@ -151,10 +153,10 @@ Web stored 流程如下：
 - 禁止内嵌 username/password、query 与 fragment，并去除末尾 `/`。
 - Adapter 使用有限连接/读取超时及有限重试；普通配置型 4xx 不会无限重试。
 - Provider 请求禁用 HTTP redirect。CLI 从兼容根地址推导同路径的 `/models` 和 `/chat/completions`；若传入完整 `/chat/completions`，模型发现回到其同级 `/models`。
-- 模型发现与 Chat 请求都发送 `Accept-Encoding: identity`，并在读取正文前拒绝压缩响应；发现体流式限制为 2 MiB，Chat 2xx 成功体限制为 4 MiB，非 2xx 错误体限制为 64 KiB，超限即中止而不保留整段正文。
+- 模型发现与 Chat 请求都发送 `Accept-Encoding: identity`，并在读取正文前拒绝压缩响应；发现体流式限制为 2 MiB，Chat 普通 JSON 成功体限制为 4 MiB，SSE 累计 wire/单事件/最终 content 分别限制为 64 MiB/1 MiB/4 MiB，非 2xx 错误体限制为 64 KiB，超限即中止而不保留整段正文。
 - stored credential 的 AES-GCM AAD 绑定规范化 origin；改变 scheme/host/非默认 port 时必须重输 Key，active Run 期间禁止 endpoint/credential 更新，Worker 解密只接受 Run snapshot origin。这阻止 Key 被静默换绑到另一 origin，但不判断首次配置的 HTTPS 目标是否可信。
 
-这些校验降低凭据经远端明文 HTTP 外泄和大/压缩响应耗尽内存的风险，但不保证目标安全。loopback HTTP 是明确支持的本地推理路径；RFC 1918 私网、IPv6 link-local、云元数据和其他敏感目标仍可能通过 HTTPS 被访问，DNS rebinding 也未防御。CORS 对服务端 SSRF 没有帮助。模型发现另有 10,000 个模型 ID 上限；2 MiB 与 4 MiB/64 KiB 分别适用于发现和 Chat 响应。
+这些校验降低凭据经远端明文 HTTP 外泄和大/压缩响应耗尽内存的风险，但不保证目标安全。loopback HTTP 是明确支持的本地推理路径；RFC 1918 私网、IPv6 link-local、云元数据和其他敏感目标仍可能通过 HTTPS 被访问，DNS rebinding 也未防御。CORS 对服务端 SSRF 没有帮助。模型发现另有 10,000 个模型 ID 上限和 2 MiB 正文上限；Chat 普通 JSON 成功体为 4 MiB，SSE wire/单事件/聚合 content 为 64 MiB/1 MiB/4 MiB，错误体为 64 KiB。
 
 ### 5.2 MVP 使用要求
 
@@ -164,6 +166,7 @@ Web stored 流程如下：
 - 在主机防火墙、容器网络或出站代理层拒绝云元数据、loopback、link-local 与内网网段；若必须访问本地推理服务，应为它建立精确的目标例外。
 - 创建 Run 前确认 Benchmark 内容允许发送给目标 Provider。
 - 把 Web 的 Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s` 只当作可编辑建议。更高输出预算和更长读取超时可能增加费用；“由 Provider 决定”提交 `max_tokens:null`，只表示请求中省略该字段，并不取消 Provider 自身限制或平台费用风险。
+- 把 `read_timeout_seconds` 理解为 LLMBenchLab 等待下一批 Provider 字节的空闲窗口，不是模型生成总时限；它不会配置 Worker→Provider 链路上的 Cloudflare、Caddy 或其他 Gateway。真实评测前必须另行核对代理的 SSE flush、buffering、空闲与绝对总时长。
 - 真实 CLI 先使用小额 `--limit` 验证；只有确认模型发现/canary、响应解析、失败率和账单后才考虑 `--full`。不要把 CLI 的请求尝试上界误当作 Token 或金额硬上限。
 
 ### 5.3 公开部署前必须实现

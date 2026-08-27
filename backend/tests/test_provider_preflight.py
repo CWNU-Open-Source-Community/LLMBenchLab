@@ -260,6 +260,7 @@ async def test_chat_canary_uses_run_fields_and_requires_parseable_a(
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
+        seen["accept"] = request.headers.get("accept")
         seen["payload"] = json.loads(request.content)
         return httpx.Response(
             200,
@@ -287,6 +288,7 @@ async def test_chat_canary_uses_run_fields_and_requires_parseable_a(
         )
 
     assert seen["url"] == "https://provider.example/v1/chat/completions"
+    assert seen["accept"] == "text/event-stream"
     payload = seen["payload"]
     assert isinstance(payload, dict)
     assert payload["model"] == "remote-model"
@@ -294,6 +296,8 @@ async def test_chat_canary_uses_run_fields_and_requires_parseable_a(
     assert payload["temperature"] == 0
     assert payload["top_p"] == 1
     assert payload["seed"] == 42
+    assert payload["stream"] is True
+    assert payload["stream_options"] == {"include_usage": True}
     assert payload["messages"] == [
         {"role": "user", "content": "Compatibility check: reply with exactly A."}
     ]

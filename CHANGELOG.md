@@ -31,6 +31,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Changed
 
+- OpenAI-compatible Chat Completions now explicitly requests `stream:true` plus streamed usage, consumes token/heartbeat/usage SSE events through `[DONE]`, and retains a normal-JSON success fallback. `read_timeout_seconds` is documented as the idle wait for the next response bytes rather than a total generation wall-clock limit.
 - Standardized `score`, `completion_rate`, and `answered_accuracy` as 0–100 values across implementation, API documentation, protocol, and ADR.
 - Configured local CORS for both `localhost:5173` and `127.0.0.1:5173`, while continuing to reject wildcard origins.
 - Made Run snapshots authoritative for historical model/provider/pricing/execution display, isolated leaderboard ranking by Benchmark protocol/version/Hash, and kept unknown usage or pricing as `null` instead of silently treating it as zero.
@@ -47,6 +48,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Fixed
 
+- Fixed long generations remaining silent until one final JSON body even though the client used HTTP streaming APIs. Incremental Provider SSE now consumes token/heartbeat bytes as they are actually flushed by the Provider/proxy, while malformed, in-stream-error, oversized, or unterminated streams produce stable per-question errors instead of partial successful answers.
 - Fixed `make setup` failing with `table models already exists` after an earlier development startup had created unversioned tables. Supported SQLite layouts are now integrity-checked, consistently backed up, stamped only to their verified revision, and upgraded without dropping existing models, Benchmarks, questions, runs, or responses; unknown/partial schemas are rejected before stamping.
 - Prevented duplicate delivery, stale lease owners, cancellation races, and ACK-result uncertainty from duplicating Responses or changing terminal protocol-v1 aggregates.
 - Distinguished SQLite-import failures before commit (exit 2), an unconfirmed PostgreSQL `COMMIT` outcome (exit 4), and failures after a confirmed commit (exit 3), so operators are not told to retry data that may already exist.
@@ -63,6 +65,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Security
 
+- Bounded streaming Chat responses independently at 64 MiB of SSE wire data, 1 MiB per event, and 4 MiB of aggregated content while preserving the 4 MiB JSON/64 KiB error limits. Raw SSE lines are not logged, and content is aggregated before exact current-Key replacement so a Key split across deltas is still removed.
 - Restricted Benchmark ZIP import by size, entry name/type, compression ratio, schema, and fixed root filenames; dataset contents are never executed.
 - Kept Provider plaintext out of persistence and all read schemas; `api_key` exists only as a write-only `SecretStr` request field, while Provider/network errors are bounded and redacted.
 - Rejected Mock remote fields, URL credentials/query/fragment, all unsupported Model default-parameter keys, reflected validation inputs, and non-finite numeric values.
@@ -70,7 +73,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Kept credentialed importer DSNs out of argv via `--target-env`, rejected passwords in `--target`, and emitted only row counts and SHA-256 reconciliation digests rather than imported row contents.
 - Limited published Compose ports to loopback and kept PostgreSQL/Redis off the host network by default. This does not add authentication, TLS, tenant isolation, or production hardening.
 - Documented the at-least-once boundary: local database evidence is idempotent, but a Worker crash after a Provider response and before local commit can repeat an upstream call or charge.
-- Kept real API keys out of argv, plaintext persistence, read API responses, reports, and automated tests. Model discovery is identity-only and capped at 2 MiB; Chat success bodies are capped at 4 MiB and error bodies at 64 KiB. The exact current Key is removed from successful content, raw usage, Provider request IDs, returned model IDs, system fingerprints, and finish reasons before persistence; model discovery/canary errors remain bounded and sanitized.
+- Kept real API keys out of argv, plaintext persistence, read API responses, reports, and automated tests. Model discovery is identity-only and capped at 2 MiB; Chat JSON success, SSE wire/event/aggregated content, and error bodies are capped at 4 MiB, 64 MiB/1 MiB/4 MiB, and 64 KiB respectively. The exact current Key is removed from successful content, raw usage, Provider request IDs, returned model IDs, system fingerprints, and finish reasons before persistence; model discovery/canary errors remain bounded and sanitized.
 - Required a typed confirmation before any canary or formal request, showed a conservative HTTP-attempt upper bound, rejected active Runs/disabled or conflicting Models before paid preflight, and documented that this is not a Token or monetary budget.
 - Documented the trusted-local exclusivity and SSRF/data-egress boundary: regular API/Worker processes must be stopped before direct CLI execution, and arbitrary compatible-provider URLs remain unsuitable for untrusted/public use.
 - Made Web/API keys write-only and short-lived in browser state: the password field is cleared when submission starts, on close/provider switch, and on unmount; pending writes are aborted on close/unmount, exact reflected error text is redacted, and no Key is written to browser storage or console. Credential status is exposed through `credential_source`/`has_api_key` while the legacy environment-variable-name field remains compatible; reads never expose plaintext or encryption material.
@@ -92,3 +95,4 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 - Web credential automation uses only marker keys, fixed test keyrings, MockTransport/stub fetch and Mock evaluation. No real Provider was called. Local gates are complete; stage commit/push and exact-SHA CI remain separate remote gates and are not inferred from local success.
 - Trusted-loopback browser verification confirmed a password input, no `api_key_env` control, no post-save Key echo, and no fake browser Key in application logs.
 - The Web Run-UX/generation-budget slice passed its final local full-worktree gates (`442 passed, 6 skipped` backend; `36 passed` frontend) with Mock/stub regression coverage and 390–1280px breakpoint checks. Feature commit `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` was pushed normally; its exact-SHA Actions query and branch PR query both returned empty because the workflow listens only to pull requests/main and this branch has no PR. No real Provider was called, and local success is not reported as remote CI success.
+- The OpenAI-compatible SSE slice passed its final local full-worktree gates: `50` focused Adapter tests; `453 passed, 6 skipped` backend and `36 passed` frontend through `make test`; lint/format/typecheck, production build, offline Smoke, Alembic, lock, Compose config, diff and high-confidence secret checks. All Provider behavior used MockTransport/stubs; the post-fix llama.cpp/Cloudflare/Caddy path was not called, so local success is not reported as proof that the user's real proxy chain is fixed.

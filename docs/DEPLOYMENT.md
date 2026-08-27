@@ -158,7 +158,7 @@ Base URL 支持以下两种形式：
 
 CLI 在发出 canary 前显示 Provider host、模型、计分题数、剩余 Run attempts 和最多 Chat Completion HTTP 尝试数，交互要求精确输入 `RUN`。canary 必须可解析为预期答案；若成功体明确返回不同于目标的模型名也会失败。上界包含每个逻辑调用最多 3 次 HTTP attempts，以及新 Run 的全部或恢复 Run 的剩余 execution attempts：`(缺失计分题数 × 剩余 Run attempts + 1 个 canary) × 3`。`--yes` 仅用于操作者明确批准的非交互环境。MMLU `official_cot` 默认 `temperature=0/max_tokens=4000`；其他配置默认 `temperature=0/max_tokens=1024`，共同默认 `top_p=1/seed=42/concurrency=1`，都可由命令参数覆盖并冻结到 Run。
 
-模型发现与 Chat 请求固定声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体最多读取 2 MiB，Chat 成功体最多读取 4 MiB、错误体最多读取 64 KiB。Provider 返回证据会递归检查成功内容、raw usage 的对象键/全部 JSON 标量、request ID、返回模型名、system fingerprint 和 finish reason；当前 Key 的精确回显会在进入 Runner/快照/Response 边界前替换为 `[REDACTED]`。这些控制不扫描无关 Benchmark/Question 内容，也不替代 Provider 账单检查、内容访问控制或通用 DLP。
+模型发现与 Chat 请求固定声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体最多读取 2 MiB。Chat 显式请求 SSE 与流式 usage，持续消费到 `[DONE]`；普通 JSON 成功体上限 4 MiB，SSE wire/单事件/聚合 content 上限分别为 64 MiB/1 MiB/4 MiB，非 2xx 错误体上限 64 KiB。Provider 返回证据会递归检查成功内容、raw usage 的对象键/全部 JSON 标量、request ID、返回模型名、system fingerprint 和 finish reason；SSE content 先完整聚合，当前 Key 的精确回显再于进入 Runner/快照/Response 边界前替换为 `[REDACTED]`。这些控制不扫描无关 Benchmark/Question 内容，也不替代 Provider 账单检查、内容访问控制或通用 DLP。
 
 API URL 与 Key 已足以在 `/models` 只返回一个可用 ID 时选择模型；若返回多个模型，仍需提供 `--model`，避免猜测付费目标。`--input-price-per-million`/`--output-price-per-million` 是可选成本估算输入；不提供价格或 Provider usage 时报告成本为 unknown，而不是虚假 `0`。
 
@@ -198,6 +198,14 @@ uv run llmbenchlab-evaluate report <RUN_ID> \
 ```
 
 报告目录不得已存在，防止静默覆盖证据。`summary.json` 保存协议/数据/模型/生成/执行/preflight 快照，并从计划题与实际 Responses 派生唯一主指标；`metrics_provenance` 标出持久化 Run 字段是否一致及漂移字段。`groups.csv` 使用同一证据口径按一个白名单 metadata 字段形成完整分区，`responses.jsonl` 分页导出所有已持久化逐题证据。文件不含 Key，但含题目、参考答案、raw response 和错误，必须按数据库敏感级别保护。
+
+### 3.5 上游 SSE 与反向代理
+
+`read_timeout_seconds` 是 HTTPX 等待下一批响应字节的空闲读取上限，不是整个生成的总墙钟时限。正常 SSE token 或 comment ping 可以持续刷新这个窗口；但 Worker 到 Provider 之间每一层 CDN/Gateway 的响应头超时、读取空闲、绝对总时长和 buffering 都需要独立核对。
+
+- Provider 必须尽早返回 `Content-Type: text/event-stream`，并在 token/心跳后实际 flush。[Caddy 官方文档](https://caddyserver.com/docs/caddyfile/directives/reverse_proxy#streaming) 说明识别到该 Content-Type 时会立即 flush；应避免覆盖 Content-Type 或引入 `response_buffers`。不必为此无条件设置 `flush_interval -1`，因为它还会改变客户端断开后的上游取消行为。
+- [Cloudflare 524 官方说明](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-524/) 当前把 proxied 请求的默认 Proxy Read Timeout 记为 125 秒，并说明实际 524 可出现约 1 秒偏差。近 126 秒的 524 与这一已知边界吻合，但不能只凭状态码断定所有 524 都是同一原因。
+- 无法在当前 Cloudflare 套餐上放宽必要限制时，可考虑为模型 API 使用 DNS-only/直连子域。这会暴露 origin，必须同时补齐有效 TLS、访问控制、防火墙/源站限制和日志审计，不得当作无风险开关。
 
 ## 4. 环境变量
 
@@ -549,7 +557,7 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 | 领域 | 当前可靠执行基础 | 生产前仍需 |
 | --- | --- | --- |
 | 身份与权限 | 无鉴权，所有端点可读写 | 登录/API Token、RBAC、对象授权、管理员导入/Model 权限、审计 |
-| 网络 | API/frontend loopback；PG/Redis 内部 Compose 网络 | TLS 反向代理、可信 Host/代理、网络策略、认证与安全 headers |
+| 网络 | API/frontend loopback；PG/Redis 内部 Compose 网络；Provider Chat 真 SSE 客户端 | TLS 反向代理、可信 Host/代理、Worker→Provider 全链路 SSE flush/buffering/timeout 核对、网络策略、认证与安全 headers |
 | PostgreSQL | 单实例、named volume、迁移/故障测试 | 托管/HA、TLS、最小权限角色、加密、备份/PITR、RPO/RTO 与真实恢复演练 |
 | Redis | 单实例 AOF、非权威通知层 | 认证/TLS、HA/容量/保留策略、监控；继续保持 DB 事实来源 |
 | Worker | 租约/心跳/fencing/重试/取消，默认单 Worker | 全局/Provider 限流、预算、完整背压、公平调度、滚动排空与容量规划 |

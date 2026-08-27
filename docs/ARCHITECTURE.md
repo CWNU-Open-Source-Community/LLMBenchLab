@@ -198,6 +198,7 @@ sequenceDiagram
     loop 每道计划题目
         R->>D: 读取 Question/取消意图，跳过已有 Response
         R->>M: generate(messages, generation_config)
+        M->>M: 打开 Provider SSE，持续消费 token/心跳/usage 至 [DONE]
         alt 生成成功且非空
             M-->>R: ModelGenerationResult
             R->>E: evaluate(raw_response, reference, config)
@@ -306,9 +307,9 @@ generate(messages, generation_config) -> ModelGenerationResult
 Adapter Registry 根据 `provider_type` 选择实现：
 
 - `mock`：使用输入中稳定标识或 Demo 题目映射产生可预测回答，不读取密钥且不得发起网络请求。
-- `openai_compatible`：校验 `base_url` 和 `remote_model_name`，并要求恰好一种凭据输入：environment Run 在调用前按 `api_key_env` 读取，stored Run 由 Worker 传入已解密的 `SecretStr`。Adapter 不读取数据库或 keyring。远端 URL 必须为 HTTPS，HTTP 仅允许 loopback；请求声明 `Accept-Encoding: identity` 并拒绝压缩响应。成功体最多 4 MiB、错误体最多 64 KiB，均以流式有界读取提前终止超限内容。对 429、部分 5xx 和暂时性网络错误执行有上限的指数退避；明显的 4xx 配置错误不重试。
+- `openai_compatible`：校验 `base_url` 和 `remote_model_name`，并要求恰好一种凭据输入：environment Run 在调用前按 `api_key_env` 读取，stored Run 由 Worker 传入已解密的 `SecretStr`。Adapter 不读取数据库或 keyring。远端 URL 必须为 HTTPS，HTTP 仅允许 loopback；请求声明 `Accept-Encoding: identity` 并拒绝压缩响应。Chat payload 显式发送 `stream:true` 与 `stream_options.include_usage:true`，request-local parser 支持任意字节/UTF-8 分块、SSE comment 心跳、多 `data` 行、role/null delta、usage-only 尾块和 `[DONE]`，并只聚合 `delta.content`；推理扩展字段不混入评测答案。看到 finish reason 不会提前返回，HTTP 干净 EOF 却缺少 `[DONE]` 不作成功；忽略 stream 请求而返回普通 JSON 的 Provider 继续兼容。普通 JSON 成功体上限 4 MiB，SSE wire/单事件/聚合 content 上限分别为 64 MiB/1 MiB/4 MiB，非 2xx 错误体上限 64 KiB。对 429、部分 5xx 和暂时性 transport 错误仍执行快照内有上限的指数退避；明显的 4xx 配置错误不重试。
 
-Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error`、`empty_response` 和 `output_truncated`。Provider 以 `finish_reason="length"` 返回空内容时，Adapter 直接产生 `output_truncated`；返回非空内容但 Evaluator 无法解析有效最终答案时，Runner 根据同一 finish reason 把普通 parse error 提升为 `output_truncated`，并保留已有 raw response、usage、延迟与成本证据。日志和持久化错误不得包含 Authorization、密钥值或完整敏感响应头。Provider 返回证据会递归检查成功内容、raw usage 的对象键和 JSON 标量，以及 provider request ID、返回模型名、system fingerprint 和 finish reason；其中出现的当前 Key 会先做精确替换。这不是对任意敏感内容的通用 DLP，也不扫描与 Provider 响应无关的固定数据。
+Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error`、`invalid_provider_stream`、`provider_stream_error`、`incomplete_provider_stream`、`empty_response` 和 `output_truncated`。Provider 以 `finish_reason="length"` 返回空内容时，Adapter 直接产生 `output_truncated`；返回非空内容但 Evaluator 无法解析有效最终答案时，Runner 根据同一 finish reason 把普通 parse error 提升为 `output_truncated`，并保留已有 raw response、usage、延迟与成本证据。日志和持久化错误不得包含 Authorization、密钥值、原始 SSE 行/事件或完整敏感响应头。SSE content 先聚合再执行当前 Key 的精确替换，避免 Key 横跨 delta 时泄漏。Provider 返回证据会递归检查成功内容、raw usage 的对象键和 JSON 标量，以及 provider request ID、返回模型名、system fingerprint 和 finish reason；其中出现的当前 Key 会先做精确替换。这不是对任意敏感内容的通用 DLP，也不扫描与 Provider 响应无关的固定数据。
 
 ## Evaluator 架构
 
@@ -460,7 +461,7 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 | --- | --- | --- |
 | 请求校验 | 非法 provider 参数、未知 ID | 返回 4xx 与字段级可读错误，不创建副作用 |
 | 数据集校验 | JSONL 第 8 行无效、重复题号 | 返回文件、行号、JSON Pointer、错误码与原因；事务回滚 |
-| 单题生成 | 超时、429、空回答 | 有限重试后保存错误 Response，计 0 分，继续下一题 |
+| 单题生成 | 超时、429、空回答、非法/不完整 SSE | 暂时性 transport 有限重试；最终失败或协议错误保存错误 Response，计 0 分，继续下一题 |
 | 单题解析 | 多选冲突、非法数值 | 保存原始回答和 `parse_error`，计 0 分，继续下一题 |
 | Run 级故障 | Runner 未捕获异常 | 有效 owner 以有限退避重新 pending；attempt 耗尽则 failed/dead-letter |
 | 通知故障 | XADD/read/ACK 超时或 Redis 停机 | 保留 DB 事实，记录脱敏状态，数据库 reconciliation 恢复 |
@@ -481,7 +482,7 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 
 本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。`make setup` 与其他相关启动入口通过 `uv run --script` 显式选择满足 `>=3.11` 的独立 CPython，再由 bootstrap 为 Web credential 生成 Git 忽略、权限为 `0600` 的 `.secrets/credential-keys.json`，API 与 Worker 读取同一文件；这避免 `PATH` 中其他 Python 实现破坏安全原子安装语义，也不会为 Docker-only 入口同步宿主后端依赖。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate；同一只读 Compose secret 只挂载到 API/Worker。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
 
-当前 Compose 只是本地开发/故障验收拓扑，示例数据库密码不是生产秘密管理。虽然远端 Provider 已强制 HTTPS、明文 HTTP 只允许 loopback，`base_url` 的允许范围仍未达到公网多租户要求；有效的 HTTPS URL 仍可能指向私网/云元数据或发生 DNS rebinding。本版本仅供受信任的本地操作者使用，不应直接暴露公网。后续公开部署必须增加鉴权、TLS、URL allowlist、DNS/IP 重绑定防护、出站网络策略、上传隔离、权限拆分、备份/PITR 和资源配额。当前不声称生产、HA 或灾备 SLA。
+当前 Compose 只是本地开发/故障验收拓扑，示例数据库密码不是生产秘密管理。前端 Nginx 位于浏览器→API 路径，不代表 Worker→Provider 路径上的 Cloudflare、Caddy 或其他 Gateway；真 SSE 必须在这条上游链路上保留正确 Content-Type 并持续 flush，且仍受每层独立的缓冲/超时限制。虽然远端 Provider 已强制 HTTPS、明文 HTTP 只允许 loopback，`base_url` 的允许范围仍未达到公网多租户要求；有效的 HTTPS URL 仍可能指向私网/云元数据或发生 DNS rebinding。本版本仅供受信任的本地操作者使用，不应直接暴露公网。后续公开部署必须增加鉴权、TLS、URL allowlist、DNS/IP 重绑定防护、出站网络策略、上传隔离、权限拆分、备份/PITR 和资源配额。当前不声称生产、HA 或灾备 SLA。
 
 ## 当前限制
 
