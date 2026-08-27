@@ -137,8 +137,11 @@ describe("RunsPage", () => {
     const view = render(<MemoryRouter><RunsPage /></MemoryRouter>);
     await screen.findByRole("table");
 
-    expect(intervalSpy).toHaveBeenCalledWith(expect.any(Function), 2000);
-    const timer = intervalSpy.mock.results.at(-1)?.value;
+    await waitFor(() => {
+      expect(intervalSpy.mock.calls.some(([, delay]) => delay === 2000)).toBe(true);
+    });
+    const pollingCallIndex = intervalSpy.mock.calls.findIndex(([, delay]) => delay === 2000);
+    const timer = intervalSpy.mock.results[pollingCallIndex]?.value;
     view.unmount();
     expect(clearSpy).toHaveBeenCalledWith(timer);
   });
@@ -154,7 +157,10 @@ describe("RunsPage", () => {
 
     render(<MemoryRouter><RunsPage /></MemoryRouter>);
     await screen.findByRole("table");
-    const poll = intervalSpy.mock.calls.at(-1)?.[0] as TimerHandler;
+    await waitFor(() => {
+      expect(intervalSpy.mock.calls.some(([, delay]) => delay === 2000)).toBe(true);
+    });
+    const poll = intervalSpy.mock.calls.find(([, delay]) => delay === 2000)?.[0] as TimerHandler;
 
     await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));

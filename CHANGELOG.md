@@ -49,6 +49,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Fixed
 
+- Removed a CI-only race from the Runs-page polling tests by waiting for and selecting the page's 2-second interval instead of assuming the most recent global timer belongs to the component; Testing Library may concurrently own a 50-millisecond wait timer.
 - Fixed long generations remaining silent until one final JSON body even though the client used HTTP streaming APIs. Incremental Provider SSE now consumes token/heartbeat bytes as they are actually flushed by the Provider/proxy, while malformed, in-stream-error, oversized, or unterminated streams produce stable per-question errors instead of partial successful answers.
 - Fixed `make setup` failing with `table models already exists` after an earlier development startup had created unversioned tables. Supported SQLite layouts are now integrity-checked, consistently backed up, stamped only to their verified revision, and upgraded without dropping existing models, Benchmarks, questions, runs, or responses; unknown/partial schemas are rejected before stamping.
 - Prevented duplicate delivery, stale lease owners, cancellation races, and ACK-result uncertainty from duplicating Responses or changing terminal protocol-v1 aggregates.

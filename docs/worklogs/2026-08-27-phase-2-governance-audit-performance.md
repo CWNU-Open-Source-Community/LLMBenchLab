@@ -106,6 +106,15 @@ Phase 2 的 PostgreSQL/Redis/租约可靠执行基础已经交付，但 P2-05 �
 | `gh pr create ...` | PR #1 创建成功；首次正文受 shell 反引号解释影响后立即用安全正文修正 |
 | `gh pr checks 1 --watch --interval 10` | 精确 SHA `ab15862…` 的 4/4 必需 job 通过；CI run `33078921254` |
 | README/AGENTS/PROJECT_STATUS/ROADMAP/Phase 2/NEXT_TASK/PLANS/ADR-0005/0007/0008 与相关代码只读勘察 | 已完成；未修改用户数据 |
+| ADR 设计 SHA `8df122b` 的 PR CI | 后端、真实 PostgreSQL/Redis、Compose 3/4 通过；前端 35/36，通过日志定位为 timer 断言竞态，不是产品代码失败 |
+
+## CI 修复记录
+
+- GitHub run `33081133916` 的 Runs-page 轮询用例只观察到 Testing Library `waitFor` 的 50ms interval，尚未来得及观察组件的 2000ms interval；本地此前因调度更快而通过。
+- 测试现等待并按 delay 精确选择 2000ms 页面 timer；同文件另一处依赖“最后一个全局 timer”的用例同步修复。
+- 修复后 `npm test -- --run tests/runs-page.test.tsx`：1 个文件、6 个测试通过。
+- 修复后 `npm test`：9 个文件、36 个测试通过；`npm run lint`、`npm run typecheck`、`npm run build` 均通过。构建仍只有既有的单 chunk 超过 500kB 警告。
+- 新 SHA CI 在提交和推送后补充；`8df122b` 保持失败证据，不改写为通过。
 
 ## 实际修改、验证、已知问题与下一步
 
