@@ -5,10 +5,11 @@
 - **Scope**: 标准数据集供应链、真实 OpenAI-compatible 接入、评测编排与报告
 - **Related requirements**: FR-MOD-05–10、FR-BEN-01–08、FR-REP-01–04、NFR-SEC-01–05
 - **Supersedes**: 无；补充 [ADR-0004](ADR-0004-secret-management.md) 与 [ADR-0005](ADR-0005-durable-task-execution.md)
+- **Partially superseded by**: [ADR-0007](ADR-0007-web-provider-credentials.md) 已取代本文关于“REST/前端不得接收 Key”和“数据库不得保存加密凭据”的限制；本文的数据集供应链、可信本地 CLI、预检与报告决定继续有效
 
 ## Status
 
-Accepted
+Accepted；Web/REST 凭据边界由 ADR-0007 部分取代。
 
 ## Context
 

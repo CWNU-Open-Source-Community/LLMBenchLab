@@ -80,9 +80,14 @@ export const api = {
   summary: () => request<DashboardSummary>("/metrics/summary"),
   models: (params: { limit?: number; enabled?: boolean } = {}) =>
     request<ListResponse<ModelConfig>>(`/models${query({ limit: params.limit ?? 100, enabled: params.enabled })}`),
-  createModel: (payload: ModelPayload) => request<ModelConfig>("/models", { method: "POST", body: JSON.stringify(payload) }),
-  updateModel: (id: string, payload: Partial<ModelPayload>) =>
-    request<ModelConfig>(`/models/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  createModel: (payload: ModelPayload, signal?: AbortSignal) =>
+    request<ModelConfig>("/models", { method: "POST", body: JSON.stringify(payload), signal }),
+  updateModel: (id: string, payload: Partial<ModelPayload>, signal?: AbortSignal) =>
+    request<ModelConfig>(`/models/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      signal,
+    }),
   deleteModel: (id: string) => request<void>(`/models/${id}`, { method: "DELETE" }),
   benchmarks: () => request<ListResponse<Benchmark>>("/benchmarks?limit=100"),
   benchmark: (id: string) => request<Benchmark>(`/benchmarks/${id}`),

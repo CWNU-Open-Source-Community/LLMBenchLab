@@ -30,6 +30,8 @@ else
   echo "Created .env from .env.example. Review it before configuring a real provider."
 fi
 
+python3 scripts/ensure_credential_keys.py
+
 mkdir -p backend/data
 
 echo "Installing locked backend dependencies..."

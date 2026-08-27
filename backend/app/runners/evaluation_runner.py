@@ -6,12 +6,13 @@ import asyncio
 import logging
 import os
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from pydantic import SecretStr
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -23,6 +24,7 @@ from app.models import (
     Benchmark,
     EvaluationResponse,
     EvaluationRun,
+    ModelCredential,
     Question,
     RunStatus,
 )
@@ -32,6 +34,7 @@ from app.runners.run_leases import (
     RunLeaseRepository,
     aggregate_run_evidence,
 )
+from app.security import CredentialKeyring, EncryptedCredential
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,8 @@ class _ModelSnapshot:
     api_key_env: str | None
     input_price: Decimal | None
     output_price: Decimal | None
+    credential_source: str = "none"
+    api_key: SecretStr | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +82,7 @@ class EvaluationRunner:
         lease_repository: RunLeaseRepository | None = None,
     ) -> None:
         settings = get_settings()
+        self._settings = settings
         self._session_factory = session_factory
         self._worker_id = worker_id or f"runner:{os.getpid()}:{uuid4()}"
         self._lease_repository = lease_repository or RunLeaseRepository(
@@ -146,6 +152,7 @@ class EvaluationRunner:
                 base_url=model.base_url,
                 remote_model_name=model.remote_model_name,
                 api_key_env=model.api_key_env,
+                api_key=model.api_key,
                 connect_timeout_seconds=timeouts.get("connect"),
                 read_timeout_seconds=timeouts.get("read"),
                 write_timeout_seconds=timeouts.get("write"),
@@ -485,11 +492,16 @@ class EvaluationRunner:
                     if model_values.get("remote_model_name") is not None
                     else None
                 ),
+                credential_source=str(
+                    model_values.get("credential_source")
+                    or ("environment" if model_values.get("api_key_env") is not None else "none")
+                ),
                 api_key_env=(
                     str(model_values["api_key_env"])
                     if model_values.get("api_key_env") is not None
                     else None
                 ),
+                api_key=None,
                 input_price=(
                     Decimal(str(model_values["input_price_per_million"]))
                     if model_values["input_price_per_million"] is not None
@@ -501,6 +513,65 @@ class EvaluationRunner:
                     else None
                 ),
             )
+            credential_source = model_snapshot.credential_source
+            if credential_source not in {"none", "environment", "stored"}:
+                raise ValueError("run_credential_snapshot_invalid")
+            if model_snapshot.provider_type == "mock":
+                if (
+                    credential_source != "none"
+                    or model_snapshot.base_url is not None
+                    or model_snapshot.remote_model_name is not None
+                    or model_snapshot.api_key_env is not None
+                ):
+                    raise ValueError("run_credential_snapshot_invalid")
+            elif model_snapshot.provider_type == "openai_compatible":
+                if model_snapshot.base_url is None or model_snapshot.remote_model_name is None:
+                    raise ValueError("run_model_snapshot_incomplete")
+                if credential_source == "environment":
+                    if not model_snapshot.api_key_env:
+                        raise ValueError("run_credential_snapshot_invalid")
+                elif credential_source == "stored":
+                    if model_snapshot.api_key_env is not None:
+                        raise ValueError("run_credential_snapshot_invalid")
+                else:
+                    raise ValueError("run_credential_snapshot_invalid")
+            else:
+                raise ValueError("run_model_snapshot_invalid")
+
+            if credential_source == "stored":
+                snapshot_model_id = model_values.get("id")
+                if (
+                    snapshot_model_id != run.model_id
+                    or not run.model_id
+                    or model_snapshot.base_url is None
+                ):
+                    raise ValueError("run_model_snapshot_incomplete")
+                credential = session.get(ModelCredential, run.model_id)
+                if credential is None:
+                    raise ValueError("run_stored_credential_missing")
+                encrypted = EncryptedCredential(
+                    key_id=credential.key_id,
+                    algorithm=credential.algorithm,
+                    nonce=credential.nonce,
+                    ciphertext=credential.ciphertext,
+                )
+                api_key = CredentialKeyring.from_file(self._settings.credential_keys_file).decrypt(
+                    encrypted,
+                    model_id=run.model_id,
+                    # Security invariant: bind to the immutable Run target, never
+                    # the Model's current Base URL.
+                    provider_base_url=model_snapshot.base_url,
+                )
+                model_snapshot = _ModelSnapshot(
+                    provider_type=model_snapshot.provider_type,
+                    base_url=model_snapshot.base_url,
+                    remote_model_name=model_snapshot.remote_model_name,
+                    credential_source=model_snapshot.credential_source,
+                    api_key_env=None,
+                    api_key=api_key,
+                    input_price=model_snapshot.input_price,
+                    output_price=model_snapshot.output_price,
+                )
             question_snapshots = [
                 _QuestionSnapshot(
                     id=row.id,

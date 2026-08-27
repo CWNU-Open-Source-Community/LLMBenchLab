@@ -2,6 +2,7 @@
 
 import json
 from functools import lru_cache
+from pathlib import Path
 from typing import Annotated, Any, Self
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
@@ -24,6 +25,10 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     environment: str = "development"
     debug: bool = False
+    credential_keys_file: Path | None = Field(
+        default=Path(__file__).resolve().parents[3] / ".secrets" / "credential-keys.json",
+        validation_alias=AliasChoices("LLMBENCHLAB_CREDENTIAL_KEYS_FILE"),
+    )
     database_url: str = Field(
         default="sqlite:///./data/llmbenchlab.db",
         validation_alias=AliasChoices("LLMBENCHLAB_DATABASE_URL", "DATABASE_URL"),
@@ -57,6 +62,10 @@ class Settings(BaseSettings):
             "LLMBENCHLAB_CORS_ORIGINS", "CORS_ORIGINS", "FRONTEND_ORIGIN"
         ),
     )
+    trusted_hosts: Annotated[list[str], NoDecode] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1"],
+        validation_alias=AliasChoices("LLMBENCHLAB_TRUSTED_HOSTS", "TRUSTED_HOSTS"),
+    )
     log_level: str = Field(
         default="INFO",
         validation_alias=AliasChoices("LLMBENCHLAB_LOG_LEVEL", "LOG_LEVEL"),
@@ -81,6 +90,22 @@ class Settings(BaseSettings):
             raise ValueError("CORS origins must be explicit; wildcard origins are not allowed")
         return list(dict.fromkeys(normalized))
 
+    @field_validator("trusted_hosts", mode="before")
+    @classmethod
+    def parse_trusted_hosts(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            if value.lstrip().startswith("["):
+                return json.loads(value)
+            return [host.strip() for host in value.split(",") if host.strip()]
+        return value
+
+    @field_validator("trusted_hosts")
+    @classmethod
+    def reject_wildcard_trusted_hosts(cls, hosts: list[str]) -> list[str]:
+        if not hosts or "*" in hosts:
+            raise ValueError("trusted_hosts must be a nonempty explicit allowlist")
+        return list(dict.fromkeys(hosts))
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, value: str) -> str:
@@ -92,6 +117,13 @@ class Settings(BaseSettings):
     @field_validator("redis_url", mode="before")
     @classmethod
     def normalize_optional_redis_url(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @field_validator("credential_keys_file", mode="before")
+    @classmethod
+    def normalize_optional_credential_keys_file(cls, value: Any) -> Any:
         if isinstance(value, str) and not value.strip():
             return None
         return value

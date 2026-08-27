@@ -142,6 +142,7 @@ async def discover_models(
     active_client = client or httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5, read=30, write=10, pool=5),
         follow_redirects=False,
+        trust_env=False,
     )
     try:
         try:

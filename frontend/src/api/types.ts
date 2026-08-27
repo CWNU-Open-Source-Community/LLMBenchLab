@@ -1,4 +1,5 @@
 export type ProviderType = "mock" | "openai_compatible";
+export type CredentialSource = "none" | "environment" | "stored";
 export type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type QuestionType = "exact_match" | "multiple_choice" | "numeric";
 
@@ -15,6 +16,9 @@ export interface ModelConfig {
   provider_type: ProviderType;
   base_url: string | null;
   remote_model_name: string | null;
+  credential_source: CredentialSource;
+  has_api_key: boolean;
+  /** @deprecated Legacy environment-variable reference; never render it as a secret input. */
   api_key_env: string | null;
   enabled: boolean;
   input_price_per_million: number | null;
@@ -24,7 +28,18 @@ export interface ModelConfig {
   updated_at: string;
 }
 
-export type ModelPayload = Omit<ModelConfig, "id" | "created_at" | "updated_at">;
+export interface ModelPayload {
+  name: string;
+  provider_type: ProviderType;
+  base_url: string | null;
+  remote_model_name: string | null;
+  /** Write-only. Model reads expose only `has_api_key`. */
+  api_key?: string;
+  enabled: boolean;
+  input_price_per_million: number | null;
+  output_price_per_million: number | null;
+  default_parameters: Record<string, unknown>;
+}
 
 export interface Benchmark {
   id: string;

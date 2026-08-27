@@ -4,7 +4,7 @@
 
 LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用的本地评测工具，不是可直接暴露公网的服务。Phase 2 已交付 PostgreSQL、Redis 通知和独立 Worker 组成的可靠执行基础，但当前仍没有登录、授权、租户隔离、请求限流、TLS 终止或生产级秘密管理。任何能够访问 API 的人都能读取题目与参考答案、注册模型、导入数据集、启动可能产生费用的 Run，并读取原始模型输出。
 
-安全默认姿势是：只监听本机或可信开发网络、优先使用 Mock、只导入自己审查过的数据集、只配置可信的 Provider 地址，并为数据库、`artifacts/` 与备份应用操作系统权限保护。可信本地正式评测 CLI 会进行模型发现、费用确认和最小 canary，但它不是公网安全层或预算控制器。
+安全默认姿势是：只监听本机或可信开发网络、优先使用 Mock、只导入自己审查过的数据集、只配置可信的 Provider 地址，并分别保护数据库、部署 credential keyring、`artifacts/` 与备份。Web 可以在 Model 表单提交真实 Key，但当前 loopback HTTP、无鉴权边界不适合远程或不受信网络；可信本地正式评测 CLI 的发现、费用确认和最小 canary 也不是公网安全层或预算控制器。
 
 本文描述已实现控制、仍存在的风险和公开部署前的硬性改造。它不构成第三方 Provider 或 Benchmark 的安全保证。
 
@@ -12,7 +12,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 
 ### 2.1 需要保护的资产
 
-- Provider API Key、访问令牌及其所在环境变量。
+- Provider API Key、访问令牌、兼容模式环境变量、AES-GCM credential envelope 与部署 keyring。
 - Benchmark 题目、参考答案、metadata、许可证与来源信息；未来可能包含私有数据。
 - 原始模型回答、解析结果、错误信息、运行配置快照和排行榜证据。
 - PostgreSQL/SQLite 中的数据库事实、SQLite 源库与备份、Redis AOF/队列元数据、宿主机文件和本地网络访问能力。
@@ -23,22 +23,23 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 
 | 参与者/边界 | MVP 假设 | 若假设失效的后果 |
 | --- | --- | --- |
-| 本机操作者 | 受信任，能管理环境变量和导入文件 | 可读取全部本地数据并发起付费请求 |
-| API 客户端/浏览器 | 仅来自显式配置的本地前端 | 无鉴权接口被滥用、数据被读取或篡改 |
+| 本机操作者 | 受信任，能管理 keyring、环境变量和导入文件 | 可读取全部本地数据并发起付费请求 |
+| API 客户端/浏览器 | 仅来自显式配置的本地前端；Web 表单会短暂持有待提交 Key | 无鉴权接口被滥用、Key/数据被读取或篡改、付费 Run 被启动 |
+| FastAPI API | 受信任的写入边界；接收 write-only Key 并持有部署 keyring | 可在加密前读取 Key，或替换 endpoint/envelope、泄漏 keyring |
 | Benchmark 作者 | 文件内容不可信，来源需人工判断 | 资源消耗、提示注入、答案污染、敏感数据外发 |
 | OpenAI-compatible Provider | 地址和服务由用户信任 | 收集提示、伪造响应、消耗预算、返回恶意文本 |
-| 独立 Worker | 受信任的执行边界，持有数据库/Redis 凭据并按需读取 Provider Key | 凭据泄漏、越权读写全部评测事实、重复外部调用 |
+| 独立 Worker | 受信任的执行边界，持有数据库/Redis 凭据与部署 keyring，并按 source 解密或读取 Provider Key | 凭据/keyring 泄漏、越权读写全部评测事实、重复外部调用 |
 | PostgreSQL / Redis | 只在受控内部网络可达，数据卷由受信操作者保护 | 数据事实被篡改、任务被干扰、运行元数据泄漏或服务不可用 |
 | GitHub/CI/依赖源 | 外部供应链 | 依赖投毒、Actions 权限滥用、秘密泄漏 |
 | 宿主机上的其他进程/用户 | 不在应用隔离范围内 | 读取进程环境、数据库卷、SQLite、日志或备份 |
 
-主要入口是 Model CRUD 中的 `base_url`、Benchmark ZIP 上传、Run 创建、题目/响应读取、前端渲染、API/Worker 日志、PostgreSQL/Redis、SQLite→PostgreSQL 导入、数据库/备份以及依赖安装与 CI。当前系统不执行 Benchmark 中的代码，这一点显著缩小了攻击面。
+主要入口是 Model CRUD 中的 write-only `api_key` 与 `base_url`、Benchmark ZIP 上传、Run 创建、题目/响应读取、前端渲染、API/Worker 日志、部署 keyring、PostgreSQL/Redis、SQLite→PostgreSQL 导入、数据库/备份以及依赖安装与 CI。当前系统不执行 Benchmark 中的代码，这一点显著缩小了攻击面。
 
 ### 2.3 重点风险与当前状态
 
 | 风险 | 影响 | 当前控制 | 剩余风险 |
 | --- | --- | --- | --- |
-| 明文密钥泄漏 | Provider 账号被盗用 | 只持久化 `api_key_env` 名称；运行时读取；错误与成功体当前 Key 反射脱敏 | 同机用户、错误配置、调试器、其他秘密和外部秘密存储不在保护范围 |
+| 明文密钥泄漏 | Provider 账号被盗用 | Web Key 只在请求/进程内短暂出现并以 AES-256-GCM envelope 持久化；公开 Schema 不含 Key/envelope；环境兼容模式只存变量名；422/日志/上游反射脱敏 | 浏览器扩展、同机用户、API/Worker 内存、调试器、access proxy、数据库与 keyring 同时失陷仍不在保护范围 |
 | 恶意 `base_url` / SSRF | 访问 localhost、内网、云元数据或敏感服务 | 远端只允许 HTTPS、HTTP 仅 loopback；拒绝 URL 内嵌凭据、query 和 fragment；禁用重定向 | **高风险：HTTPS 目标仍没有地址 allowlist、DNS/IP 分类或出站网络隔离** |
 | 恶意 Benchmark ZIP | 路径穿越、压缩炸弹、内存/磁盘消耗 | 固定两文件、路径与类型检查、压缩比/大小/条数限制、严格 JSON | 仍可能消耗允许范围内资源或携带敏感/误导内容 |
 | Prompt/数据外发 | 私有题目被发送给 Provider | 只有用户创建 Run 时才发送 | 无数据分级、DLP、Provider 策略或告知确认 |
@@ -46,7 +47,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 | XSS/内容注入 | 窃取页面数据或误导操作者 | React 默认文本转义；服务端不执行内容 | 未来引入 Markdown/HTML 时可能破坏边界；无 CSP |
 | 未授权访问 | 读写全部评测数据、启动付费 Run | 建议仅绑定本机；CORS 显式配置 | CORS 不是鉴权，非浏览器客户端不受其约束 |
 | 费用滥用 | 大量或重复上游请求造成费用 | Run 题内并发为 1–4、Run attempt 有限、本地 Response 幂等；真实评测 CLI 显示尝试上界、要求确认并先做小 canary | canary 可能计费；无 Provider 速率限制、预算、完整背压或熔断；Provider 调用不是 exactly-once |
-| 数据丢失/篡改 | 证据不可复现 | 数据库约束、Hash、Run 快照、租约 fencing；PostgreSQL 是任务事实来源 | 数据库/备份未加密、无完整审计日志，访问与恢复仍由用户负责 |
+| 数据丢失/篡改 | 证据不可复现或 stored Key 不可用 | 数据库约束、Hash、Run 快照、租约 fencing；credential AAD 绑定 Model/origin；PostgreSQL 是任务事实来源 | 数据库/备份整体未加密；keyring 丢失不可恢复；无完整审计日志，访问与恢复仍由用户负责 |
 | 后台任务中断 | Run 不完整或重复执行 | 独立 Worker、数据库租约/心跳/fencing、有限重试、dead-letter、数据库对账 | 不构成生产 HA；外部 Provider 副作用不能由本地幂等约束去重 |
 | Redis 暴露或篡改 | 伪造/重放任务通知、拒绝服务、元数据泄漏 | Compose 不发布 Redis 宿主端口；消息不是事实来源且不含 Prompt/Key | 本地 Compose 未启用 Redis ACL/TLS；暴露到不可信网络会破坏可用性与保密性 |
 | 供应链攻击 | 执行恶意依赖/Action | Python/Node lockfile、CI 检查 | 尚无强制 SBOM、签名验证或持续漏洞门禁 |
@@ -61,32 +62,49 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 
 ## 3. API Key 与秘密管理
 
-### 3.1 数据流
+### 3.1 凭据来源与数据流
 
-1. Model 记录保存 `api_key_env`，例如 `LOCAL_COMPAT_API_KEY`，而不是密钥值。
-2. 创建 Run 时快照保存的仍是环境变量名称。
-3. 服务路径中的独立 Worker，或可信本地 CLI 启动的同进程 Runner，只在实际请求时从执行进程环境读取对应值。
-4. Key 只在内存中用于构造 `Authorization: Bearer ...`，不进入 Model/Run/Response Schema。成功内容、raw usage 的对象键/字符串值、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，会在离开 Adapter 前替换为 `[REDACTED]`。
-5. 环境变量不存在时，该题记录安全的 `missing_api_key` 错误，不会尝试无凭据联网。
+Model 用 `credential_source` 明确区分三种状态：
 
-### 3.2 操作规则
+| source | 写入方式 | 数据库存储 | 执行时取值 |
+| --- | --- | --- | --- |
+| `none` | `mock` 不接受凭据 | 无 `api_key_env`、无 credential row | 不读取秘密、不联网 |
+| `environment` | API/可信 CLI 传环境变量名称 `api_key_env` | Model 和 Run snapshot 只保存变量名 | Worker/本地 Runner 在调用前读取执行进程环境 |
+| `stored` | Web/API Model 写请求传 `api_key` | `model_credentials` 保存 AES-GCM envelope | Worker 在构造 Adapter 前解密为进程内 `SecretStr` |
 
-- `.env`、shell history、终端录屏、Issue、PR、截图和 Benchmark metadata 都不是秘密存储。
-- 本地开发可把值放在未提交的 `.env`；更稳妥的方式是使用操作系统 Keychain、密码管理器或临时 shell 环境。生产环境必须使用部署平台的 secret store。
-- `.env.example` 只能包含变量名和无效占位符；不得复制后直接填值并提交。
-- 给每个环境和用途使用独立、最小权限 Key；能设置预算、允许模型或来源 IP 时应开启。
-- 怀疑泄漏时先在 Provider 侧吊销/轮换，再清理仓库历史和日志。仅删除当前文件不足以让已提交密钥失效。
-- API 请求只传 `api_key_env`。Model Schema 将 `default_parameters` 限定为四个已知生成参数并校验类型/范围，同时拒绝 `base_url` query；任何真实 Secret 都不得进入请求 JSON。
-- `llmbenchlab-evaluate` 没有 `--api-key` 参数。它只从 `--api-key-env` 指定的环境变量读取，或在交互终端用 `getpass` 隐藏输入；非交互且环境变量为空时必须停止，不能把 Key 改放进 argv。
+Web stored 流程如下：
 
-数据库和 API 会公开环境变量**名称**。名称本身不应编码账号、项目机密或密钥片段。
+1. `api_key` 只定义在 Model create/PATCH schema，OpenAPI 标记 `writeOnly`。它必须为 8–8192 bytes、没有首尾空白且只含可见 ASCII；API 不会把该凭据数据流中的值复制进公开 Model 字段。
+2. API 使用部署 keyring 的 active 32-byte key、AES-256-GCM 与随机 12-byte nonce 加密；AAD 包含算法、Model ID 和规范化 Provider origin（scheme、host、非默认 port），不包含可变路径。
+3. `model_credentials` 以 `model_id` 为主键/外键，仅保存 `algorithm`、`key_id`、`nonce`、`ciphertext` 和时间戳；plaintext 从不映射到 ORM 或数据库列。
+4. Model 读响应只返回凭据状态 `credential_source`/`has_api_key`，以及 environment 兼容模式所需的变量名称；`has_api_key=true` 仅表示 stored row 存在，environment 模式不会因进程里恰好有变量值而返回 true。API/Run/Response/OpenAPI 读 schema 都不含 `api_key`、ciphertext、nonce 或 keyring 数据。
+5. Run 没有 credential reference/envelope 列。快照只保存 source、Model ID、远端模型和 endpoint；environment 模式另保存变量名。stored 模式的 Worker 按 `run.model_id` 读取 row，并用 `run.model_id + Run snapshot base_url origin` 做 AAD 解密，绝不以当前 Model Base URL 替代快照目标。
+6. keyring 缺失/无效、未知 key id、row 缺失、密文篡改、跨 Model 或错误 origin 都会 fail closed，并在 Adapter 构造和任何 Provider 网络请求之前结束该 Run attempt。environment 变量缺失则产生安全的 `missing_api_key`，同样不会无凭据联网。
+7. 解密值只在内存中用于 `Authorization: Bearer ...`。Provider 响应在离开 Adapter 前递归脱敏：成功内容、raw usage 的对象键和所有 JSON 标量（包括数值/布尔/null）、token/status 数值、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，都会替换为 `[REDACTED]`。
 
-### 3.3 Worker 秘密边界
+这里的保证限定于**不把 Key 或 Provider 对 Key 的回显从凭据数据流复制进公开字段或持久化证据**。create/PATCH 精确扫描 `ModelRead` 的所有字段和 Run snapshot 的 `model` 子投影；Adapter 递归扫描 Provider 返回证据。它不扫描整个 Run 中与 Model 无关的 Benchmark/Question 固定内容，也不声称用户数据与 Key 永远不会发生独立的字面巧合。
 
-- Provider Key 只应注入需要发起上游请求的 Worker，不应注入 frontend、浏览器、migrate 容器；API 只需处理 `api_key_env` 名称。当前本地 Compose 没有替用户注入任何真实 Provider Key，也不是 secrets manager。
-- 本地 `make dev` 会让 API、Worker 和 frontend 开发进程继承同一份 `.env`；只有 Worker 代码会读取已登记的 Provider Key，且 Vite 不会自动把非 `VITE_*` 变量打入客户端，但这仍不构成进程级秘密隔离。需要更严格边界时应分别启动进程，并只向 `make worker`/Worker 容器注入 Key。
-- Worker 同时需要数据库与 Redis 连接能力。生产设计应拆分 API/Worker/迁移数据库角色，限制 Worker 只能访问所需表和操作，并用独立的 Redis ACL、短期凭据及轮换流程代替共享本地凭据。
-- Worker 日志、崩溃转储、进程列表和诊断端点都属于秘密边界。不得把环境、DSN、Authorization header、Prompt 或原始 Provider 请求写入日志或 artifact。
+### 3.2 Keyring、更新与恢复边界
+
+- `LLMBENCHLAB_CREDENTIAL_KEYS_FILE` 指向部署 keyring；严格格式为 `{"active_key_id": ..., "keys": {"id": "base64url-encoded-32-bytes"}}`。active key 用于新加密，其他已登记 key 只用于解密旧 row，以支持显式轮换。
+- `make setup`/启动辅助脚本只在文件不存在时原子生成 Git 忽略的本地 keyring，不打印 key material；既有普通文件会严格校验并收紧为 `0600`，symlink、目录、超大或非法 JSON 会被拒绝。bootstrap 保持系统 Python 3.9 兼容。Compose 把同一只读 secret 挂载到 API 与 Worker，不挂载给 frontend 或 migrate。
+- keyring 本身不是加密的，也不是 KMS/HSM。它必须与数据库分开备份、限制权限并参与恢复演练；丢失 keyring 后 stored rows 不可恢复，数据库与 keyring 同时泄漏后攻击者可离线解密。
+- API 需要 keyring 是为了接收/加密 Web Key；Worker 需要它是为了解密 stored Run。API 不应读取 legacy Provider 环境变量值，Worker 不应提供读回 stored Key 的端点。
+- PATCH 省略 `api_key` 表示保留现有 row，显式 `api_key:null` 被拒绝；替换时重新加密并使用新 nonce。规范化 Provider origin 改变必须同时重输新 Key，同一 origin 的路径变化可保留现有 row。create/PATCH 会把新 Key 与精确 `ModelRead` 全字段及 Run snapshot 的 `model` 子投影比较；保留 stored 时只为同一比较解密旧值，任何匹配都在持久化前拒绝。
+- 若 stored row 缺失，或现有 envelope 因旧/未知 `key_id`、损坏密文而无法解密，操作者仍可在可用 active keyring 下通过**只修改凭据**的 PATCH 显式提供一个有效新 Key，或通过只切换为 `mock`/legacy `environment` 清理该状态；同一请求夹带无关公开字段更新会返回 `422 credential_recovery_requires_isolated_update`。若仍要保留 `stored` 且没有新 Key，则稳定返回 `503 credential_store_unavailable`，事务不修改 Model 或 credential。
+- Model 有 `pending`/`running` Run 时，Provider 类型、endpoint、远端模型或 credential 的敏感更新返回 `409 model_has_active_runs`。Run 创建与更新共用方言锁：PostgreSQL 对 Model 行执行 `SELECT ... FOR UPDATE`，SQLite 在读取 Model 前执行数据库级 `BEGIN IMMEDIATE`；AAD 绑定仍是绕过业务层、竞态或数据库篡改后的最后防转发边界。SQLite 因此仍是低并发本地模式，竞争写事务可能短暂阻塞请求；生产或并发评测应使用 PostgreSQL。
+- 切换到 `mock` 或 `api_key_env` environment 模式会删除 `model_credentials` row。active-run 锁保证仍可能执行的 Run 不会失去或换绑凭据；终态历史 Run 只保留非秘密 snapshot，不获得可重放的 credential 副本。
+
+### 3.3 操作与进程规则
+
+- Web/API 真实 Key 只能放在 Model JSON 请求体的 `api_key` 字段。不得放进 URL、query、path、header 名、模型名、Base URL、默认参数、环境变量名称、日志、Issue、PR 或截图。当前本地 Web→API 使用受信 loopback；任何跨主机或不受信网络传输都必须先增加 TLS、认证与授权。
+- `.env`、shell history、终端录屏、Issue、PR、截图和 Benchmark metadata 都不是秘密存储。environment 兼容模式可使用未提交的 `.env`、操作系统 Keychain/密码管理器注入或临时 shell 环境；`.env.example` 只能包含变量名和无效占位符。
+- `llmbenchlab-evaluate` 没有 `--api-key` 参数。它保留 `--api-key-env`/`getpass` 路径；非交互且环境变量为空时停止，不把 Key 放进 argv，也不会把 CLI Model 隐式改成 stored source。
+- 数据库和 API 会公开 environment 模式的变量**名称**。名称本身不应编码账号、项目机密或密钥片段。
+- 给每个环境和用途使用独立、最小权限 Key；能设置预算、允许模型或来源 IP 时应开启。怀疑泄漏时先在 Provider 侧吊销/轮换，再清理仓库历史、数据库副本、日志和 keyring 备份。
+- 本地 `make dev` 的 API/Worker 可能继承同一 `.env`，但只有 environment 执行路径解析已登记变量；Vite 不会自动把非 `VITE_*` 变量打入客户端。更严格部署应分别注入：API/Worker 共享 keyring，legacy Provider env 只给 Worker，frontend/migrate 两者都不给。
+- Worker 同时需要数据库与 Redis 连接能力。生产设计应拆分 API/Worker/迁移数据库角色，限制 Worker 只能访问所需表和操作，并用独立 Redis ACL、短期凭据及轮换流程代替共享本地凭据。
+- API/Worker 日志、崩溃转储、进程列表和诊断端点都属于秘密边界。不得记录环境、DSN、Authorization header、请求体、解密值或原始 Provider 请求。
 - at-least-once 只保证任务最终可再次处理；若 Worker 在 Provider 已响应而本地 Response 提交前崩溃，接管 Worker 可能重复上游调用和计费。本地 `(run_id, question_id)` 唯一约束不能消除这一外部副作用。
 
 ### 3.4 可信本地 CLI 秘密边界
@@ -103,18 +121,20 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 当前应用日志和 OpenAI-compatible Adapter 的错误处理会：
 
 - 对 LLMBenchLab 应用 logger 使用结构化 JSON、请求/Run correlation ID 和字段 allowlist；API 只记录代码定义的 route template，不记录原始查询串或请求体。
+- 请求校验响应只保留安全的 `type`、白名单化 `loc` 和 `msg`，省略 Pydantic `input`/`ctx`；keyring/加解密失败只暴露稳定错误码。Model create/PATCH 成功响应带 `Cache-Control: no-store`。
+- SQLAlchemy engine 固定 `hide_parameters=true`，因此 SQL echo/异常不会打印 bound Key/envelope 参数；这不替代关闭生产 SQL debug、保护数据库和限制第三方 telemetry。
 - 用 `[REDACTED]` 替换当前 API Key 的精确值。
 - 识别常见 Bearer、Authorization、API key、token 和 secret 表达形式。
 - 把上游错误折叠为单行并截断到 500 字符。
 - 不保存请求头、完整上游请求或响应对象；Run 只持久化分类后的错误类型与可读消息。
-- 对 Chat 成功内容、raw usage 的字符串值与对象键，以及 provider request ID、返回模型名、system fingerprint、finish reason 执行当前 Key 的精确替换，再允许其进入后续 Runner/preflight 边界。
+- 对 Chat 成功内容、raw usage 的对象键和全部 JSON 标量，以及 provider request ID、返回模型名、system fingerprint、finish reason 递归执行当前 Key 的精确替换，再允许其进入后续 Runner/preflight 边界。
 
 仍需遵守以下规则：
 
 - 不记录 `os.environ`、HTTP headers、完整异常 locals、请求体或 `.env` 内容。
 - 结构化 JSON/字段 allowlist 只覆盖 LLMBenchLab 应用 logger，不覆盖全部 Uvicorn、access log、SQLAlchemy、Redis client 或其他第三方 logger；部署侧必须另行统一采集、过滤和保留策略。
 - Uvicorn access log 仍可能记录方法、原始路径和状态码；因此秘密不得出现在 URL、查询参数或路径，反向代理 access log 也必须应用同一规则。
-- `DEBUG` 仅用于无秘密的本地排障。SQL echo、HTTP wire logging 和第三方 SDK debug logging 默认关闭。
+- `DEBUG` 仅用于无秘密的本地排障。HTTP wire logging 和第三方 SDK debug logging 默认关闭；即使 SQL 参数已隐藏，也不应在含敏感数据的部署中采集冗长 SQL trace。
 - 原始模型回答可能含供应商回显的其他敏感内容。当前只保证精确替换正在使用的 Key，并识别部分常见秘密形态；回答仍会作为评测证据持久化并通过 Responses API 返回，不能把“没有当前 Key”误当成“可以公开”。
 - 异常报告、CI artifact 和截图发出前再次人工检查，不把数据库或 `.env` 整体上传。
 
@@ -131,6 +151,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 - Adapter 使用有限连接/读取超时及有限重试；普通配置型 4xx 不会无限重试。
 - Provider 请求禁用 HTTP redirect。CLI 从兼容根地址推导同路径的 `/models` 和 `/chat/completions`；若传入完整 `/chat/completions`，模型发现回到其同级 `/models`。
 - 模型发现与 Chat 请求都发送 `Accept-Encoding: identity`，并在读取正文前拒绝压缩响应；发现体流式限制为 2 MiB，Chat 2xx 成功体限制为 4 MiB，非 2xx 错误体限制为 64 KiB，超限即中止而不保留整段正文。
+- stored credential 的 AES-GCM AAD 绑定规范化 origin；改变 scheme/host/非默认 port 时必须重输 Key，active Run 期间禁止 endpoint/credential 更新，Worker 解密只接受 Run snapshot origin。这阻止 Key 被静默换绑到另一 origin，但不判断首次配置的 HTTPS 目标是否可信。
 
 这些校验降低凭据经远端明文 HTTP 外泄和大/压缩响应耗尽内存的风险，但不保证目标安全。loopback HTTP 是明确支持的本地推理路径；RFC 1918 私网、IPv6 link-local、云元数据和其他敏感目标仍可能通过 HTTPS 被访问，DNS rebinding 也未防御。CORS 对服务端 SSRF 没有帮助。模型发现另有 10,000 个模型 ID 上限；2 MiB 与 4 MiB/64 KiB 分别适用于发现和 Chat 响应。
 
@@ -201,12 +222,13 @@ MVP **没有代码执行能力**。在 Phase 3 之前不得通过 `subprocess`�
 ## 8. CORS、健康探针与网络暴露
 
 - CORS Origin 来自配置；通配符 `*` 会在启动配置校验时被拒绝。
-- 默认只允许本地 Vite Origin；允许的方法为 `GET/POST/PATCH/DELETE/OPTIONS`，允许头为 `Accept`、`Content-Type` 和 `X-Request-ID`，并向浏览器暴露 `X-Request-ID`；`allow_credentials=false`。
+- 默认只允许本地 Vite Origin；允许的方法为 `GET/POST/PATCH/DELETE/OPTIONS`，请求头 allowlist 只含 `Accept` 和 `Content-Type`，但会向浏览器暴露响应中的 `X-Request-ID`；`allow_credentials=false`。API 忽略任何客户端 `X-Request-ID`，每次都生成新的 server-side UUID，防止攻击者把 write-only Key 复制到该头并迫使服务反射或记录。
+- `TrustedHostMiddleware` 使用非空显式 Host allowlist并拒绝 `*`；不匹配的 Host 在 Model 写入/credential 持久化前被拒绝。这降低 Host-header rebinding 风险，但不是客户端认证。
 - CORS 只约束浏览器，不阻止 curl、脚本、服务端请求或被攻陷的同源页面，不能替代认证、授权或防火墙。
 - 生产前需要反向代理 TLS、认证/RBAC、请求体上限、速率限制、可信代理配置、安全响应头与审计日志。
 - 不要在未理解代理头行为时信任 `X-Forwarded-*`；限制可信代理并验证 Host。
 
-Compose 默认只把 API 和 frontend 端口发布到宿主 `127.0.0.1`，PostgreSQL 与 Redis 不发布宿主端口；容器内 API 的 `0.0.0.0` 监听只在 Compose 网络中使用。这些是本地暴露面缩减，不是认证、TLS、防火墙或生产网络策略。
+Compose 默认只把 API 和 frontend 端口发布到宿主 `127.0.0.1`，PostgreSQL 与 Redis 不发布宿主端口；容器内 API 的 `0.0.0.0` 监听只在 Compose 网络中使用。Web `api_key` 因此只允许在操作者信任的 loopback 链路提交；loopback HTTP 没有提供 TLS 保密性，任何远程访问都必须先建立 TLS 与访问控制。这些是本地暴露面缩减，不是认证、TLS、防火墙或生产网络策略。
 
 健康端点也不是访问控制或完整监控：
 
@@ -219,19 +241,19 @@ Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL
 
 ## 9. 数据库、响应、迁移与备份
 
-- PostgreSQL/SQLite 数据库、Redis AOF、备份和容器 volume 都是明文静态数据；用专用系统账号和最小文件权限保护，不放在云盘公共共享目录。Compose 中的 `llmbenchlab-local-only` PostgreSQL 密码只是隔离本地开发占位，不是生产秘密。
-- 备份可能比在线数据库保留更久，应应用同等或更严格的访问、加密、保留和销毁策略。
+- PostgreSQL/SQLite、Redis AOF、备份和容器 volume 整体都没有存储层加密；只有 `model_credentials` 的 Provider Key 字段在应用层形成 AES-GCM envelope。题目、回答、endpoint、环境变量名和其他元数据仍是明文，应使用专用系统账号和最小文件权限保护，不放在云盘公共共享目录。Compose 中的 `llmbenchlab-local-only` PostgreSQL 密码只是隔离本地开发占位，不是生产秘密。
+- 数据库备份可能比在线数据库保留更久，应应用同等或更严格的访问、加密、保留和销毁策略。部署 keyring 必须单独备份：不备份会失去恢复能力，与数据库备份放在一起则失去 envelope 的隔离价值。
 - Responses API 包含 raw response、Prompt、标准答案和错误；Questions API 包含参考答案和 metadata。不要把它们接入公开 Dashboard。
 - 正式评测报告同样包含题目、参考答案、raw response、解析和错误证据。Exporter 创建权限收紧的目录/文件、拒绝覆盖已有目标并脱敏常见秘密形态；报告指标从计划题与 Responses 重算，`metrics_provenance` 会显式标注 Run 汇总字段漂移。操作者仍须像保护数据库一样保护 `summary.json`、`groups.csv` 与 `responses.jsonl`；脱敏不是内容访问控制。
-- Run 快照用于复现，会保存模型/Benchmark 标识和环境变量名称。设计环境变量名时避免包含机密业务信息。
+- Run 快照用于复现，会保存模型/Benchmark 标识、`credential_source`、Model ID、endpoint，以及 environment 模式的变量名称；不会保存 credential row ID、ciphertext、nonce、key id 或 plaintext。设计环境变量名时避免包含机密业务信息。
 - 删除 Model 会在存在历史 Run 时被拒绝，以保护证据；MVP 尚无合规删除、匿名化或数据生命周期功能。
 - 备份与恢复步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
-显式 SQLite→PostgreSQL importer 会复制五张核心表的**完整内容**，包括题目、参考答案、Prompt/模型快照、原始回答、错误和 `api_key_env` 名称。它只能在受信环境中针对停止写入、已在 Alembic head 的源库和空目标执行；源库、目标库、对账输出与中间备份必须按最高敏感数据等级保护。工具输出只包含行数和内容无关的 SHA-256 摘要，但摘要并不等于加密或访问控制。
+显式 SQLite→PostgreSQL importer 会按依赖顺序复制六张核心表的**完整内容**：`models`、`model_credentials`、`benchmarks`、`questions`、`evaluation_runs`、`evaluation_responses`。因此它会复制 encrypted credential 的 algorithm/key id/nonce/ciphertext，也会复制题目、参考答案、Prompt/模型快照、原始回答、错误和 `api_key_env` 名称，但不会解密或打印 row 内容。它只能在受信环境中针对停止写入、已在 Alembic head 的源库和空目标执行；源库、目标库、对账输出与中间备份必须按最高敏感数据等级保护。工具输出只包含每表行数、主键集 SHA-256 digest 和 canonical row SHA-256 digest；摘要仍可能用于关联同一快照，不等于加密或访问控制。
 
 - 含凭据的目标 DSN 必须通过 `--target-env ENV_VAR`（默认 `LLMBENCHLAB_DATABASE_URL`）读取；`--target` 只接受无密码 URL。仍需防止环境、进程转储和 CI 配置泄露 DSN。
 - 退出码 `0` 表示提交后对账成功；退出码 `2` 表示提交前失败并回滚目标事务。
-- 退出码 `4` 表示 PostgreSQL 未确认 `COMMIT` 结果：原子事务保证目标应为“空”或“完整”，但客户端不知道是哪一种。**禁止盲目重试**，必须先检查目标五表、Alembic head 和已有对账证据。
+- 退出码 `4` 表示 PostgreSQL 未确认 `COMMIT` 结果：原子事务保证目标应为“空”或“完整”，但客户端不知道是哪一种。**禁止盲目重试**，必须先检查目标六表、Alembic head 和已有对账证据。
 - 退出码 `3` 表示 `COMMIT` 已确认、但提交后验证或报告失败；导入已经提交。**禁止盲目重试或把它描述为回滚**，应先只读核验目标，必要时从已验证备份执行人工恢复。
 - 工具是单向导入，不提供 PostgreSQL→SQLite 自动回迁。schema downgrade 也不等于数据平台回滚。
 

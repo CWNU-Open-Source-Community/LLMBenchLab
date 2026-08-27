@@ -23,7 +23,8 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260825_0002"
+HEAD_REVISION = "20260827_0003"
+RELIABILITY_REVISION = "20260825_0002"
 
 
 def _database_url(database_path: Path) -> str:
@@ -404,6 +405,82 @@ def test_reliability_upgrade_settles_nonresumable_phase1_running_run(
     )
 
 
+def test_web_credential_migration_backfills_sources_and_refuses_lossy_downgrade(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "web-credentials.db"
+    _run_alembic(database_path, "upgrade", RELIABILITY_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO models (
+                id, name, provider_type, base_url, remote_model_name, api_key_env,
+                enabled, input_price_per_million, output_price_per_million,
+                default_parameters, created_at, updated_at
+            ) VALUES (
+                'model-environment', 'Environment Provider', 'openai_compatible',
+                'https://provider.example/v1', 'provider-model', 'PROVIDER_KEY',
+                1, NULL, NULL, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO models (
+                id, name, provider_type, base_url, remote_model_name, api_key_env,
+                enabled, input_price_per_million, output_price_per_million,
+                default_parameters, created_at, updated_at
+            ) VALUES (
+                'model-mock', 'Mock Provider', 'mock', NULL, NULL, NULL,
+                1, 0, 0, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id, credential_source FROM models ORDER BY id"
+        ).fetchall() == [
+            ("model-environment", "environment"),
+            ("model-mock", "none"),
+        ]
+        connection.execute(
+            "UPDATE models SET credential_source = 'stored', api_key_env = NULL "
+            "WHERE id = 'model-environment'"
+        )
+        connection.execute(
+            """
+            INSERT INTO model_credentials (
+                model_id, algorithm, key_id, nonce, ciphertext, created_at, updated_at
+            ) VALUES (
+                'model-environment', 'aes-256-gcm-v1', 'fixture-v1', ?, ?,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            """,
+            (sqlite3.Binary(b"n" * 12), sqlite3.Binary(b"ciphertext-is-not-plaintext")),
+        )
+
+    failed = _invoke_alembic(database_path, "downgrade", RELIABILITY_REVISION)
+
+    assert failed.returncode != 0
+    assert "Cannot downgrade while encrypted Web credentials exist" in failed.stderr
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT model_id, algorithm, key_id, nonce, ciphertext FROM model_credentials"
+        ).fetchone() == (
+            "model-environment",
+            "aes-256-gcm-v1",
+            "fixture-v1",
+            b"n" * 12,
+            b"ciphertext-is-not-plaintext",
+        )
+        assert connection.execute(
+            "SELECT credential_source, api_key_env FROM models WHERE id = 'model-environment'"
+        ).fetchone() == ("stored", None)
+
+
 def test_reliability_downgrade_rejects_active_runs_before_ddl(tmp_path: Path) -> None:
     database_path = tmp_path / "active-downgrade.db"
     _run_alembic(database_path, "upgrade", LEGACY_REVISION)
@@ -416,7 +493,7 @@ def test_reliability_downgrade_rejects_active_runs_before_ddl(tmp_path: Path) ->
 
     assert failed.returncode != 0
     assert "drain, cancel, or fail active runs first" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (RELIABILITY_REVISION,)
     with sqlite3.connect(database_path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluation_runs)")}
         assert "lease_token" in columns

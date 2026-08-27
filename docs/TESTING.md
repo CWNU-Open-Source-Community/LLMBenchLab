@@ -87,7 +87,7 @@ uv run alembic check
 uv run pytest -m integration tests -ra
 ```
 
-不要把真实 Provider Key 放入上述环境。这里的 PostgreSQL 必须是可破坏的专用测试库：lease integration fixture 会清空该 management database 的五张核心表。Importer 集成测试另在同一 loopback 服务器上创建正则约束的随机专用数据库并在结束时精确删除，不会替你保护或清空 management database。绝不能把开发、共享或生产数据库 DSN 传给这组命令。
+不要把真实 Provider Key 放入上述环境。这里的 PostgreSQL 必须是可破坏的专用测试库：lease integration fixture 会级联清空该 management database 的六张核心表。Importer 集成测试另在同一 loopback 服务器上创建正则约束的随机专用数据库并在结束时精确删除，不会替你保护或清空 management database。绝不能把开发、共享或生产数据库 DSN 传给这组命令。
 
 常用的目标化命令：
 
@@ -158,7 +158,7 @@ docker compose config --quiet
 - 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试。
 - 远端 HTTPS 强制、loopback HTTP 例外，以及在发送 Key 前拒绝远端明文 HTTP。
 - 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat 成功 4 MiB/错误 64 KiB 的流式上限。
-- Key 环境变量缺失、空 Provider 回答、非法配置与错误脱敏；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换。
+- legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换。
 
 OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
 
@@ -212,10 +212,13 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 
 - `/live` 不访问数据库、Redis 或 Provider；`/health` 只检查数据库；`/ready` 分别报告数据库、Alembic head 与队列状态；`/info` 保持 `llmbenchlab-protocol-v1`。
 - Redis 不可用时 `/ready` 返回脱敏的 `503 degraded`，但数据库正常时 `accepting_runs=true`、database reconciliation 可用；数据库或 schema 不可用时返回 `not_ready` 并停止接受新 Run。
-- `X-Request-ID` 校验、回传与错误关联；未知路径只记录 `<unmatched>`，不把用户路径或请求正文写入应用日志。
+- 服务端生成并回传 UUID `X-Request-ID`，忽略客户端同名值，防止调用方把 write-only Key 复制到 header 后迫使日志/响应反射；未知路径只记录 `<unmatched>`，不把用户路径或请求正文写入应用日志。
 - `/tasks/metrics` 只从数据库派生 pending/due/running/expired/cancel/retry/dead-letter/queue-notification-error/attempt gauges。
 - Model CRUD、分页、Provider 必需字段、远端 HTTP 拒绝/loopback 例外和名称冲突。
-- API 只返回 `api_key_env` 名称，不返回环境变量值。
+- Model POST/PATCH 接受 8–8192-byte visible-ASCII write-only `api_key`，并拒绝 7-byte、空白、非 ASCII 与过长输入；GET/list 的凭据相关字段只返回非秘密状态，不返回 Key、密文、nonce 或 key id。marker 测试覆盖 201、422、409、503、500、Host 与 request-ID 反射路径。
+- create/PATCH 会对新 Key 或保存旧 Key 执行精确 `ModelRead` 全字段及 Run snapshot `model` 子投影重复检查，包括生成 ID/时间戳、数值和默认参数；测试不把该保证扩大到无关 Benchmark/Question 字面巧合。缺行、未知/旧 `key_id` 或损坏 envelope 可在 active keyring 可用时通过隔离的新 Key PATCH 修复，或只切换 Mock/legacy env 清理；夹带无关公开修改返回 422，无新 Key 保留 stored 则稳定 503，且两种失败均保持事务不变。
+- stored credential 用 AES-GCM 随机 nonce 和 Model/origin AAD；Worker 的合法三态、错误 keyring、缺行、跨模型/跨 origin/篡改 snapshot 均在 Adapter 构造前 fail closed，legacy env 路径继续通过。
+- SQLite 并发测试断言 Model PATCH 与 Run create 在读取 Model 前以 `BEGIN IMMEDIATE` 串行化；PostgreSQL integration 断言两条路径共用 Model row `FOR UPDATE` 锁。SQLite 竞争期间允许请求短暂等待，这仍只是低并发本地模式；生产/并发评测门禁使用 PostgreSQL。
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
 - Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。
 
@@ -225,12 +228,13 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 
 `backend/tests/test_migrations.py` 使用独立临时 SQLite 和 Alembic 子进程验证：
 
-- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260825_0002` 最终 revision、可靠性字段、约束和索引。
+- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260827_0003` 最终 revision、可靠性/凭据字段、约束和索引。
 - 有模型、Benchmark、题目、Run 与 Response 的 legacy schema 被一致性备份、严格识别并无损升级；题目按原插入顺序回填 0-based `position`。
 - 与当前 metadata 一致但没有版本标记的库可安全收养，已有 head 重复 preflight 不生成多余备份。
 - 部分表、server default/CHECK 内容或重名、PK/UNIQUE/FK/index/partial index、trigger、SQLite conflict policy/generated column、`STRICT`/`WITHOUT ROWID` 等未知 drift 在创建版本标记和备份前被拒绝；已在 head 的库同样验证。
 - versioned legacy 的非法 Provider 配置数据会在任何 SQLite batch DDL 前失败，不残留临时重建表。
 - `0001 -> 0002` 会按冻结的 Phase 1 语义收敛旧 `running` Run；存在 active Run 时可靠性 downgrade 被拒绝，不能静默删除租约元数据。
+- `0002 -> 0003` 会把旧 OpenAI-compatible Model 回填为 `environment`、Mock 回填为 `none`；只要凭据表有任意行，credential downgrade 在 DDL 前拒绝并保留二进制内容。
 - 应用启动 revision 门禁拒绝未迁移库；测试夹具中的 `create_all` 仅用于隔离临时库，并显式 stamp 到与 metadata 对应的 head，不是运行时建表路径。
 
 目标化运行：
@@ -244,9 +248,9 @@ uv run pytest tests/test_migrations.py
 
 ### 6.3 SQLite→PostgreSQL 导入
 
-`backend/tests/test_sqlite_postgres_import.py` 的离线路径验证 canonical hash、只读 SQLite、head/integrity/FK/active-Run 拒绝、五表复制及提交前回滚。标记为 `integration` 的真实 PostgreSQL 用例还验证：
+`backend/tests/test_sqlite_postgres_import.py` 的离线路径验证 canonical hash、只读 SQLite、head/integrity/FK/active-Run 拒绝、六表复制及提交前回滚；fixture 含真实 AES-GCM nonce/ciphertext/key-id 行并断言明文不在 SQLite。标记为 `integration` 的真实 PostgreSQL 用例还验证：
 
-- 随机专用空库成功导入后，五表行数、主键集合和 canonical row hash 与源一致，JSON、Decimal、UTC、协议快照和逐题证据保持。
+- 随机专用空库成功导入后，六表行数、主键集合和 canonical row hash 与源一致，JSON、Decimal、UTC、协议快照、逐题证据及 credential 二进制保持；stdout/stderr 不打印 Key、key id、nonce 或 ciphertext。
 - 中途复制失败整体回滚；两个不同源并发导入时恰好一个成功，另一个在目标非空检查处拒绝。
 - `COMMIT` 确认丢失使用专用 `commit_outcome_unknown` 语义；已确认提交后的 snapshot 或输出失败使用 `committed_but_verification_failed`，两者都禁止盲目重试。
 - 源 SQLite 主文件 hash 不变；输出只有阶段、表名、行数与 SHA-256 摘要，不打印题目、回答或连接 URL。
@@ -299,7 +303,7 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 1. 所有端到端测试注册的 Provider 都是 `mock`；`MockModelAdapter.generate` 不执行网络 I/O。
 2. OpenAI-compatible 协议测试向 Adapter 注入 `httpx.MockTransport`，响应在进程内生成。
 3. 测试数据库和日志级别在应用导入前通过 fixture 环境变量设置，不读取开发 `.env`。
-4. CI 不配置任何 Provider Key；即使误走 OpenAI-compatible 路径，缺少 `api_key_env` 对应值也会在 HTTP 请求前失败。
+4. CI 不配置任何真实 Provider Key；测试进程只生成独立临时 keyring 和明显虚构 canary。所有 OpenAI-compatible 路径必须注入 `MockTransport`，篡改/错误凭据路径在构造 Adapter 前失败。
 5. 测试数据中的 Key 与域名必须是明显无效占位符，不从开发者环境复制。
 6. 标准数据测试必须注入内存 fetcher；CI 不运行在线 `llmbenchlab-evaluate prepare`，也不依赖本机已有 `artifacts/` 缓存。
 7. 报告和正式流程组件测试必须使用临时目录/临时数据库，不能读取或覆盖操作者已有正式 Run。
@@ -314,14 +318,17 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 
 ## 9. 前端测试要求
 
-当前有 4 个 Vitest 文件、13 个用例，实际自动化覆盖：
+当前有 5 个 Vitest 文件、21 个用例，实际自动化覆盖：
 
 - 分数、百分比、Token 合计/未知值、费用、UTC 时间、Hash 与答案的格式化。
 - `pending/running/completed/failed/cancelled` 五种状态标签。
 - Dashboard 主页面的 API 加载、严格总分、完成率、Run/模型/Benchmark 汇总与最近运行。
 - 后端不可达时的结构化、可重试错误状态。
+- Models password input、创建必填、编辑留空保留、origin 变化重输、请求 pending/成功/失败/关闭/切 Mock/unmount 清空、AbortSignal、恶意错误回显脱敏，以及不写 storage/console。
 
-所有 fetch 与 Recharts 均在进程内 stub，没有真实网络。这满足 MVP 的最低前端测试门槛，但下列交互目前仍由 production build、后端 Smoke 和手工验收覆盖，应在后续迭代补为组件测试：Models CRUD 表单、Benchmark Demo 标识、新建 Run 跳转、Run Detail 的 raw/parsed/reference/score/error 与终态停止轮询，以及 Leaderboard 分区筛选。不得把这份待补清单描述为已有自动化覆盖。
+所有 fetch 与 Recharts 均在进程内 stub，没有真实网络。Models 凭据生命周期已自动化；Benchmark Demo 标识、新建 Run 跳转、Run Detail 的 raw/parsed/reference/score/error 与终态停止轮询等交互仍由 production build、后端 Smoke 和手工验收覆盖，后续应继续补组件测试。不得把这份待补清单描述为已有自动化覆盖。
+
+本轮还在可信 loopback 的真实浏览器中手工核对 Models 表单：Key 控件实际为 password input，页面没有 `api_key_env` 控件，保存成功后表单/卡片/网络响应均不回显测试 Key，应用日志也没有该测试 Key。该检查使用无效测试值且没有触发真实 Provider；它补充 DOM stub 自动化，但不增加 Vitest 或后端测试计数。
 
 测试应优先按可见文本、label 和 role 查询 DOM，不依赖内部 class 或实现细节。时间、ID 和 API 返回应固定；不要用长 sleep 消除竞态。
 
@@ -332,9 +339,9 @@ GitHub Actions 对 `main` push 和 Pull Request 触发四类 job：
 | Job | 必需检查 | 隔离与失败规则 |
 | --- | --- | --- |
 | `backend` | Ruff lint/format；临时 SQLite `upgrade -> 0001 -> head`/check；`pytest -m "not integration"` | 临时 SQLite；不启动 PostgreSQL/Redis；离线 Mock/MockTransport |
-| `backend-integration` | 真实 PostgreSQL migration 往返；PostgreSQL/Redis/importer 的 5 个 `integration` 用例 | Actions service 容器；JUnit 必须收集非零用例且零 skip，否则 job 失败 |
+| `backend-integration` | 真实 PostgreSQL migration 往返；PostgreSQL/Redis/importer 的 6 个 `integration` 用例 | Actions service 容器；JUnit 必须收集非零用例且零 skip，否则 job 失败 |
 | `full-stack-reliability` | `python3 scripts/phase2_acceptance.py` 的隔离 Compose 八场景 | 唯一项目/卷、随机 loopback 端口、Mock-only；总是上传已脱敏 evidence，脚本总是精确清理 |
-| `frontend` | ESLint、13 个 Vitest、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
+| `frontend` | ESLint、21 个 Vitest、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
 
 CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
 
@@ -350,16 +357,18 @@ CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/
 
 这些数字证明“可靠任务执行基础”垂直切片，不代表 Phase 2 全部完成；限流、预算、完整背压、公平调度、完整历史可观测性/审计和性能基线仍未验收。
 
-2026-08-27 正式评测切片的当前工作树本地证据如下；精确 SHA 的远程 CI 仍须在 commit/push 后独立验证：
+2026-08-27 Web Provider 凭据切片的最终当前工作树本地证据如下；精确 SHA 的远程 CI 仍须在 commit/push 后独立验证：
 
 | 验证 | 当前工作树结果 |
 | --- | --- |
-| 后端全量 | `make test`：`310 passed, 5 skipped`；5 个 skip 为未注入 DSN 的 infrastructure marker |
-| 真实基础设施 | 临时 PostgreSQL 16/Redis 7：`5 passed, 0 skipped`，精确容器已清理 |
-| 前端 | ESLint/typecheck、4 files / `13 passed`、Vite production build 均通过；保留既有 chunk warning |
+| 后端全量 | `make test`：`421 passed, 6 skipped`；6 个 skip 为未注入 DSN 的 infrastructure marker |
+| 真实基础设施 | 临时 PostgreSQL 16/Redis 7：`6 passed, 0 skipped`，精确容器已清理 |
+| 前端 | ESLint/typecheck、5 files / `21 passed`、Vite production build 均通过；保留既有 chunk warning |
 | 离线 Smoke | `1 passed, 5 deselected` |
-| Compose 可靠性 | `8/8 passed`；evidence `llmbenchlab-p2-7cf8ce9e4428/evidence.json`，清理后项目容器/卷/网络为空 |
-| 其他静态门禁 | Ruff/format、Alembic check、`uv lock --check`、Compose config、`git diff --check` 与候选文件 secret scan 通过 |
+| Compose 可靠性 | `8/8 passed`；evidence `llmbenchlab-p2-60f3ccdac113/evidence.json`，清理后项目容器/卷/网络为空；每个 API 请求同时验证 client request-id 不被反射且响应为 UUIDv4 |
+| 其他静态门禁 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、`git diff --check` 与高置信 secret scan 通过 |
+
+部署辅助脚本另以系统 Python 3.9 验证 keyring bootstrap 的创建/既有文件校验路径，确保 postponed annotations 不在 setup 入口提前求值失败；该兼容检查不改变上表测试总数。
 
 ## 11. Mock 手工验收
 
@@ -436,7 +445,7 @@ make dev
 打开 `http://127.0.0.1:5173`，按顺序检查：
 
 - Dashboard 的模型、Benchmark、Run、得分/延迟/Token 汇总与最近运行来自 API，而非固定假数据。
-- Models 能新增、编辑、删除 Mock；表单不出现明文 Key 输入框，OpenAI-compatible 只要求环境变量名。
+- Models 能新增、编辑、删除 Mock；选择 OpenAI-compatible 后出现 masked API Key 输入框，用户直接粘贴真实 Key，保存后输入框清空且卡片只显示“已安全保存”。编辑留空保留，改变 Provider origin 必须重输。
 - Benchmarks 能重载 Demo、显示版本/题数/Hash/许可证与醒目的 Demo 警告。
 - New Run 能选择 Mock 与 Demo，生成参数约束正确，提交后跳转详情。
 - Run Detail 轮询进度并在终态停止；配置快照和 15 条逐题证据可查看。

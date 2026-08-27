@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class APIModel(BaseModel):
     """Strict request model used at the HTTP trust boundary."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", hide_input_in_errors=True)
 
 
 class ORMModel(BaseModel):

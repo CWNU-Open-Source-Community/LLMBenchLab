@@ -5,10 +5,10 @@
 ## 架构目标与原则
 
 - **离线可验证**：Mock adapter、Demo Benchmark、测试和 CI 均不得访问真实模型 API。
-- **真实调用显式 opt-in**：只有受信本地操作者运行正式 CLI 时才下载固定公共数据、读取 Key、确认费用并执行 canary/真实请求。
+- **真实调用显式 opt-in**：受信本地操作者可以在 Web Model 表单写入 Provider Key 后主动创建 Run，也可使用带发现、canary 和费用确认的正式 CLI；Mock/测试路径始终离线。
 - **可复现**：Run 保存模型、数据集、Evaluator、Prompt、生成参数、并发和重试策略的快照。
 - **失败隔离**：单题失败被持久化并计 0 分，不中断其余题目。
-- **秘密最小化**：数据库只保存环境变量名，不保存或返回密钥值；上游成功内容和相关标识在进入持久化边界前也检查当前 Key 的精确反射。
+- **秘密最小化**：Web Key 只以 AES-GCM authenticated ciphertext 持久化，部署 keyring 与数据库分离；兼容模式只保存环境变量名。API/Run/Response 不返回 Key 或 envelope，上游成功内容和相关标识在进入持久化边界前检查当前 Key 的精确反射。
 - **事实单一**：Run 状态、取消意图、attempt、租约、Response、聚合、错误和 dead-letter 只由数据库裁决；Redis、日志、指标和内存不是事实来源。
 - **at-least-once 与幂等**：通知可重复，逐题写入以 `(run_id, question_id)` 唯一并由当前 lease token fencing；不声称 Provider 调用或计费 exactly-once。
 - **边界稳定**：Adapter、Evaluator、Dataset Loader 和 Runner 通过明确接口解耦，便于后续替换实现。
@@ -28,11 +28,12 @@ flowchart LR
     CLI[可信本地评测 CLI]
     Reports[本地完整报告]
     Env[进程环境变量]
+    Keyring[部署 AES keyring]
     Upstream[OpenAI-compatible API]
     Git[本地 Git 元数据]
 
     User --> Browser
-    Browser -->|HTTP /api/v1| API
+    Browser -->|HTTP /api/v1；Model 写入可含 writeOnly api_key| API
     Dataset -->|manifest.json 与 questions.jsonl| API
     Pinned -->|固定 revision + 大小/SHA 校验| CLI
     CLI -->|转换、创建/恢复 Run、fenced 写入| DB
@@ -42,14 +43,17 @@ flowchart LR
     API -.->|commit 后 best-effort XADD| Queue
     Queue -.->|at-least-once 通知| Worker
     Worker -->|对账、租约、fenced 写入| DB
-    Env -->|仅 Worker 运行时读取密钥| Worker
+    API -->|AES-GCM credential envelope| DB
+    Keyring -->|加密 Web Key| API
+    Keyring -->|解密 stored credential| Worker
+    Env -->|兼容 environment 模式运行时读取| Worker
     Env -->|仅显式本地运行时读取密钥| CLI
     Worker -->|远端 HTTPS；HTTP 仅 loopback| Upstream
     CLI -->|发现 + canary + 题目；同一传输限制| Upstream
     API -->|状态、结果与排行榜| Browser
 ```
 
-信任边界如下：Benchmark 文件、固定上游下载的内容和用户提供的 `base_url` 均视为不可信输入；上游响应也不能直接作为日志或 HTML。固定数据转换器以 revision、大小和 SHA-256 限定供应链，但 Hash 不是签名。Mock adapter 必须完全离线。API/数据库只保存 Provider 密钥环境变量名，真实值只注入执行 Adapter 的 Worker，或由受信本地 CLI 从环境/隐藏输入临时提供。远端 Provider 只允许 HTTPS，明文 HTTP 仅允许字面 loopback/localhost；这仍不阻止 HTTPS 私网、云元数据或 DNS rebinding。前端只处理后端返回的数据，不接触模型密钥。导出的报告虽经秘密脱敏，仍含题目和原始回答，属于敏感本地 artifact。
+信任边界如下：Benchmark 文件、固定上游下载的内容和用户提供的 `base_url` 均视为不可信输入；上游响应也不能直接作为日志或 HTML。固定数据转换器以 revision、大小和 SHA-256 限定供应链，但 Hash 不是签名。Mock adapter 必须完全离线。浏览器只在 Model 表单提交期间持有 Web Key，并经受信 loopback 的 API 请求体发送；API 使用独立部署 keyring 加密后只写 envelope，Worker 使用同一 keyring 在请求前解密。兼容环境变量模式和受信本地 CLI 仍在执行进程中读取 Key。远端 Provider 只允许 HTTPS，明文 HTTP 仅允许字面 loopback/localhost；这仍不阻止 HTTPS 私网、云元数据或 DNS rebinding。任何非 loopback 浏览器/API 链路都必须另行提供 TLS、认证与授权。导出的报告虽经秘密脱敏，仍含题目和原始回答，属于敏感本地 artifact。
 
 ## 容器与模块
 
@@ -116,6 +120,7 @@ flowchart TB
 | 模块 | 单一职责 | 不承担的职责 |
 | --- | --- | --- |
 | API Routes / Schemas | HTTP 校验、分页、状态码和输出脱敏 | 评分和供应商协议细节 |
+| Credential Crypto | 严格读取部署 keyring，以 AES-256-GCM 加解密并把 algorithm、Model ID、Provider origin 绑定为 AAD | ORM、HTTP、Provider 调用或秘密展示 |
 | Application Services | 编排 CRUD、导入、创建/取消 Run；commit 后 best-effort 通知 | 执行 Adapter 或长时间阻塞请求 |
 | Dataset Loader | 限制文件、解析、逐字段校验、稳定 Hash | 下载远程数据或执行数据集代码 |
 | Standard Dataset Converters | 固定下载/缓存 MMLU-Pro、GPQA，校验源 Hash 并生成 dataset-v1 ZIP | 接受任意 URL、解释许可或执行题目代码 |
@@ -129,7 +134,7 @@ flowchart TB
 | ModelAdapter | 把统一生成请求映射到具体模型 | 评分 |
 | Evaluator | 安全解析答案并给出 0/1 分 | 调用模型或数据库 |
 | Repository / ORM | 事务与持久化 | API 序列化和业务展示 |
-| React UI | 用户操作、轮询和可视化 | 持有密钥或直接调用模型供应商 |
+| React UI | 用户操作、write-only Key 表单、轮询和可视化 | 持久化/读回 Key、读取 keyring 或直接调用模型供应商 |
 
 ## 关键数据流
 
@@ -144,6 +149,19 @@ flowchart TB
 
 标准数据转换是上述导入之前的受限供应链步骤：代码中固定 MMLU-Pro test/validation 或 GPQA archive 的 HTTPS URL、revision、大小和 SHA-256；缓存命中也重新校验。转换 profile、group/limit、GPQA seed 与转换器版本形成稳定版本指纹，生成的 ZIP 再完整经过普通 Loader。manifest 的 `source` 只是已验证事实说明，普通 Importer 仍不会跟随它联网。
 
+### 注册与更新 Provider 凭据
+
+Model 的凭据来源是显式状态，而不是从 nullable 字段猜测：`mock` 使用 `none`；旧客户端/可信 CLI 的 `api_key_env` 使用 `environment`；Web/API write-only `api_key` 使用 `stored`。
+
+1. 浏览器只在 Model create/PATCH 请求体的 `api_key` 字段提交明文；Pydantic 用 `SecretStr` 接收并校验 8–8192 bytes、可见 ASCII 和无首尾空白，422 响应不保留原始 `input`/`ctx`。
+2. API 从部署 keyring 选择 active 32-byte key，以 AES-256-GCM 和随机 12-byte nonce 加密。AAD 固定包含算法、Model ID 和规范化 Provider origin（scheme、host、非默认 port；不含路径），因此 envelope 不能跨 Model 或 origin 转发。
+3. `model_credentials` 以 `model_id` 同时作为主键和到 `models.id` 的级联外键，保存 `algorithm/key_id/nonce/ciphertext` 与时间戳；没有 plaintext 列。公开 Model 只返回非秘密凭据状态和 legacy environment 变量名称，不会序列化该关系。
+4. create/PATCH 在加密前把新 Key 与精确 `ModelRead` 全字段投影及 Run snapshot 的 `model` 子投影比较；PATCH 保留 stored row 时只为同一 fail-closed 比较解密旧 Key。省略 `api_key` 时保留 row；替换 Key 时用新 nonce 重加密。规范化 origin 改变必须重输 Key；切换到 `mock` 或 `environment` 删除 encrypted row。该边界防止凭据流复制，不扫描无关 Benchmark/Question 内容，也不承诺排除独立的字面巧合。
+5. stored row 缺失或现有 envelope 因未知/旧 `key_id`、损坏密文而不可读时，可在 active keyring 可用时通过隔离的凭据 PATCH 用显式新 Key 覆盖，或只切换 `mock`/legacy environment 清理；夹带无关公开字段变化返回 422，没有新 Key 却保留 `stored` 返回 503，两者都不修改事务。
+6. `pending/running` Run 存在时，Provider 类型、endpoint、远端模型和 credential 的敏感更新返回 409。Run 创建与 Model 更新共用方言锁：PostgreSQL 对 Model 行执行 `SELECT ... FOR UPDATE`，SQLite 在读 Model 前执行 `BEGIN IMMEDIATE`，把 Model snapshot 创建与修改串行化。SQLite 的数据库级竞争可能短暂阻塞请求，因此只适合低并发本地模式；生产或并发评测推荐 PostgreSQL。AES-GCM 的 origin AAD 是竞态或数据库篡改后的最后认证边界。
+
+部署 keyring 是 API 与 Worker 共同读取、但 frontend/migrate 不需要的独立秘密。API 仅用于加密，Worker 仅在 stored Run 执行前解密；keyring 缺失、格式错误、未知 key id 或认证失败均 fail closed。环境变量来源与可信本地 CLI 保持原行为，不会被隐式迁移成 stored credential。
+
 ### 创建并执行 Run
 
 ```mermaid
@@ -155,12 +173,13 @@ sequenceDiagram
     participant Q as Redis Streams
     participant K as Worker
     participant R as Lease + Runner
+    participant C as Deployment Keyring
     participant M as ModelAdapter
     participant E as Evaluator
 
     U->>W: 选择模型、Benchmark 与生成参数
     W->>A: POST /api/v1/runs
-    A->>D: 校验实体并写入 pending Run 与完整快照
+    A->>D: 校验实体并写入 pending Run 与完整快照（PostgreSQL 锁 Model）
     D-->>A: COMMIT
     A-->>Q: best-effort XADD(run_id, correlation_id)
     A-->>W: 202 + Run ID
@@ -168,6 +187,11 @@ sequenceDiagram
     Q-->>K: XREADGROUP / XAUTOCLAIM 可重复通知
     K->>R: 尝试处理 run_id
     R->>D: 条件领取；attempt/token +1，写 owner/heartbeat/expiry
+    R->>D: 读取 Run snapshot；stored 时按 run.model_id 读取 envelope
+    opt credential_source = stored
+        R->>C: 以 run.model_id + snapshot origin 认证解密
+        C-->>R: 进程内 SecretStr；失败则不构造 Adapter/不联网
+    end
     loop 租约有效
         R->>D: 按数据库时间续租
     end
@@ -195,6 +219,8 @@ sequenceDiagram
 ```
 
 创建接口不等待评测完成，也不在 API 进程内启动 Adapter。固定顺序是“数据库 COMMIT，再 XADD”：COMMIT 失败绝不通知；XADD 失败时保留可恢复的 `pending` Run、尝试写入 `last_error=queue_notification_unavailable`，仍返回 `202`。Worker 的数据库对账修复 commit/XADD 裂缝、Redis 丢消息或暂时不可用。
+
+Run 没有 credential 外键或 envelope 列；`model_parameters_snapshot.model` 只冻结来源、Model ID、远端模型和 endpoint，environment 模式另存环境变量名称。stored 模式由 Worker 按 `run.model_id` 读取当前受保护的 `model_credentials` 行，并用 **Run snapshot 的 Base URL origin** 做 AAD，而不是读取当前 Model endpoint。active-run 更新锁保证正常操作期间 row 不会被替换；即使绕过业务层发生竞态或篡改，错误 Model/origin 的认证也会在任何 Provider 网络调用前失败。
 
 Redis 通知和 ACK 都可重复，所以系统是 at-least-once；数据库中每题只保留一条 Response，并从 Response 事实重算进度和聚合。但若 Worker 在 Provider 已返回、Response 事务提交前崩溃，接管 Worker 可能再次调用 Provider；本架构不保证远程调用或计费 exactly-once。
 
@@ -280,9 +306,9 @@ generate(messages, generation_config) -> ModelGenerationResult
 Adapter Registry 根据 `provider_type` 选择实现：
 
 - `mock`：使用输入中稳定标识或 Demo 题目映射产生可预测回答，不读取密钥且不得发起网络请求。
-- `openai_compatible`：校验 `base_url` 和 `remote_model_name`，在调用前根据 `api_key_env` 读取环境变量，使用 Chat Completions 风格接口。远端 URL 必须为 HTTPS，HTTP 仅允许 loopback；请求声明 `Accept-Encoding: identity` 并拒绝压缩响应。成功体最多 4 MiB、错误体最多 64 KiB，均以流式有界读取提前终止超限内容。对 429、部分 5xx 和暂时性网络错误执行有上限的指数退避；明显的 4xx 配置错误不重试。
+- `openai_compatible`：校验 `base_url` 和 `remote_model_name`，并要求恰好一种凭据输入：environment Run 在调用前按 `api_key_env` 读取，stored Run 由 Worker 传入已解密的 `SecretStr`。Adapter 不读取数据库或 keyring。远端 URL 必须为 HTTPS，HTTP 仅允许 loopback；请求声明 `Accept-Encoding: identity` 并拒绝压缩响应。成功体最多 4 MiB、错误体最多 64 KiB，均以流式有界读取提前终止超限内容。对 429、部分 5xx 和暂时性网络错误执行有上限的指数退避；明显的 4xx 配置错误不重试。
 
-Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error` 和 `empty_response`。日志和持久化错误不得包含 Authorization、密钥值或完整敏感响应头。成功内容、raw usage 的对象键/字符串值，以及 provider request ID、返回模型名、system fingerprint 和 finish reason 中出现的当前 Key，会先做精确替换；这不是对任意敏感内容的通用 DLP。
+Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error` 和 `empty_response`。日志和持久化错误不得包含 Authorization、密钥值或完整敏感响应头。Provider 返回证据会递归检查成功内容、raw usage 的对象键和 JSON 标量，以及 provider request ID、返回模型名、system fingerprint 和 finish reason；其中出现的当前 Key 会先做精确替换。这不是对任意敏感内容的通用 DLP，也不扫描与 Provider 响应无关的固定数据。
 
 ## Evaluator 架构
 
@@ -323,6 +349,7 @@ Evaluator Registry 由题型和 manifest 中的版本化映射选择实现。Eva
 ```mermaid
 erDiagram
     MODEL ||--o{ EVALUATION_RUN : evaluates
+    MODEL ||--o| MODEL_CREDENTIAL : owns
     BENCHMARK ||--|{ QUESTION : contains
     BENCHMARK ||--o{ EVALUATION_RUN : selected_for
     EVALUATION_RUN ||--o{ EVALUATION_RESPONSE : produces
@@ -331,8 +358,16 @@ erDiagram
     MODEL {
         string id PK
         string provider_type
+        string credential_source
         string api_key_env
         json default_parameters
+    }
+    MODEL_CREDENTIAL {
+        string model_id PK, FK
+        string algorithm
+        string key_id
+        bytes nonce
+        bytes ciphertext
     }
     BENCHMARK {
         string id PK
@@ -387,20 +422,20 @@ PostgreSQL 是共享部署目标，并提供真实多 Worker 条件领取、行�
 - Evaluator 名称、版本和数据集级配置；逐题配置属于按 Hash 锁定且无更新 API 的不可变 Question 记录；
 - Prompt template、system prompt；
 - temperature、top_p、max_tokens、seed；
-- 展示模型名、远端模型名、adapter 类型、Base URL、密钥环境变量名、价格和有效模型参数；
+- 展示模型名、远端模型名、adapter 类型、Base URL、`credential_source`、价格和有效模型参数；environment 模式另含密钥环境变量名，stored 模式不含 Key/envelope/reference；
 - Git commit SHA（无法读取时为 `null`）；
 - 并发度、超时和重试策略；
 - `protocol_version`、创建时间、开始时间和结束时间。
 - 可信本地正式 Run 的初次模型发现/canary 脱敏结果：是否发现、候选数/request ID，以及返回模型、system fingerprint、finish reason、usage、延迟和尝试次数；不含 Key/header。`resume` 的新 canary 当前不会追加为独立审计事件。
 
-Runner 从 Run 快照读取模型连接配置、价格、生成参数、Prompt、并发、超时和重试策略，不回读可编辑 Model 的这些值。题目内容与逐题 Evaluator 配置通过不可变 Benchmark 记录和 `benchmark_hash_snapshot` 绑定；Phase 1 不提供 Benchmark/Question 更新或删除 API。
+Runner 从 Run 快照读取模型连接配置、凭据来源、价格、生成参数、Prompt、并发、超时和重试策略，不回读可编辑 Model 的这些值。environment 模式按快照变量名取值；stored 模式仅按 `run.model_id` 读取 envelope，并用快照 Base URL origin 认证解密。题目内容与逐题 Evaluator 配置通过不可变 Benchmark 记录和 `benchmark_hash_snapshot` 绑定；Phase 1 不提供 Benchmark/Question 更新或删除 API。
 
 Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `temperature`、`top_p`、`max_tokens`、`seed`。创建 Run 时显式字段覆盖 Model 默认，省略字段才使用 Model 默认；`generation` 块因此只包含实际执行值，不把未转发的 Provider 扩展伪装成有效参数。
 
 写入约束：
 
 - 时间以 UTC 存储，API 使用带 `Z` 或显式偏移的 ISO 8601。
-- JSON 字段只保存可序列化值；秘密值、Authorization 和未脱敏上游头禁止写入。
+- JSON 字段只保存可序列化值；plaintext Key、Authorization 和未脱敏上游头禁止写入。`model_credentials` 只允许受约束的 AES-GCM envelope，SQL engine 隐藏 bound parameters。
 - `(benchmark_id, external_id)` 唯一；一个 Run 对同一 Question 最多一条 EvaluationResponse。
 - 导入 Benchmark 使用整体事务；逐题结果和进度使用短事务，避免把网络请求包在数据库事务中。
 - 只有 owner/token 匹配、租约未过期的 Worker 能写 Response、进度、费用、retry 或终态；唯一约束是最后的竞态防线，不替代 fencing。
@@ -411,8 +446,8 @@ Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `te
 数据库平台迁移是 stopped-source/offline-empty-target 操作，不是双写或在线复制：
 
 1. 停止 SQLite 源的 API/Worker 和新 Run 创建，确认无 `pending/running` Run。导入器使用 read-only URI，校验 integrity、foreign keys 和 Alembic head，不修改源文件。
-2. PostgreSQL 目标必须已在 head，五张核心表必须为空且不可对外服务。事务级 advisory lock 在空库检查之前串行化竞争导入，随后对 `alembic_version` 和核心表取 `ACCESS EXCLUSIVE` 锁。
-3. 五表在一个目标事务中按依赖顺序复制。源、precommit target 都输出不含内容的 row count、主键集 digest 和 canonical row digest；任一 precommit 失配/复制失败都整体 rollback，CLI 退出 `2`。
+2. PostgreSQL 目标必须已在 head，六张核心表必须为空且不可对外服务。事务级 advisory lock 在空库检查之前串行化竞争导入，随后对 `alembic_version` 和核心表取 `ACCESS EXCLUSIVE` 锁。
+3. `models → model_credentials → benchmarks → questions → evaluation_runs → evaluation_responses` 六表在一个目标事务中按依赖顺序复制，包括 encrypted credential envelope，但不解密或输出其列值。源、precommit target 都只输出 row count、主键集 digest 和 canonical row digest；任一 precommit 失配/复制失败都整体 rollback，CLI 退出 `2`。
 4. COMMIT 确认后，工具在独立的只读 `REPEATABLE READ` 事务中取稳定 postcommit snapshot，再对账并输出第三组摘要。全部完成才退出 `0`。
 
 带凭据的目标 DSN 必须通过 `--target-env` 从受控环境读取；`--target` 拒绝 URL password 和 password query。COMMIT 未获得 PostgreSQL 确认时退出 `4`/`commit_outcome_unknown`；由于事务原子性，目标可能为空，也可能是完整的 precommit 快照。COMMIT 已确认但连接收尾、postcommit 快照/对账或报告失败时退出 `3`/`committed_but_verification_failed`；这时目标已提交完整 precommit 快照，不会自动回滚。两种结果都禁止盲目重试，必须保持目标离线，按已输出摘要独立检查目标是空还是完整提交。非空目标会拒绝再次导入，工具也不提供 PostgreSQL 到 SQLite 的反向同步。
@@ -432,7 +467,7 @@ Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `te
 
 可观测基础包含：
 
-- API 接受 1–128 字符、只含字母数字与 `-._:` 的 `X-Request-ID`；非法/缺失值由服务生成，每个响应回传。新 Run 使用 run ID 作为稳定 correlation ID，通知、Worker、Runner 和 Question 事件继承该链路。
+- API 忽略客户端传入的 `X-Request-ID`，为每个请求始终生成全新的 server-side UUID 并在响应中回传。CORS 请求 header allowlist 不含 `X-Request-ID`，但会向浏览器暴露响应中的该 header，避免客户端把 write-only Key 复制到 correlation ID 后迫使服务反射或记录。新 Run 使用 run ID 作为稳定 correlation ID，通知、Worker、Runner 和 Question 事件继承该链路。
 - LLMBenchLab **应用 logger** 使用字段白名单的 JSON formatter，记录 request route template、run/question/worker、attempt、lease token、message ID 和结果；不记录请求体、header、原始回答或异常文本，只可记异常类型。这一保证不涵盖所有 Uvicorn/access log handler，所以秘密不得出现在 URL、query 或 path。这些生命周期日志也不是不可篡改的完整审计日志。
 - `/live` 是纯进程存活检查，不访问 DB/Redis/Provider；`/health` 保持 DB-only 兼容语义；`/ready` 并行检查 DB 连接/Alembic head 与 Redis，不探测 Provider。Redis 失败时返回 `503/degraded`，但 DB/head 可用时 `accepting_runs=true` 且对账可用；DB/head 失败时 `not_ready` 且不接收任务。
 - `/ready` 将同步 DB 探测放入 `asyncio.to_thread` 并限制 HTTP 等待时间。async timeout 不会取消已进入线程的驱动调用；后台资源的真正上界仍依赖数据库 driver/connect/pool timeout。
@@ -442,7 +477,7 @@ Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `te
 
 ## 部署拓扑与安全边界
 
-本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
+本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。`make setup` 通过兼容系统 Python 3.9 的 bootstrap 为 Web credential 生成 Git 忽略、权限为 `0600` 的 `.secrets/credential-keys.json`，API 与 Worker 读取同一文件。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate；同一只读 Compose secret 只挂载到 API/Worker。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
 
 当前 Compose 只是本地开发/故障验收拓扑，示例数据库密码不是生产秘密管理。虽然远端 Provider 已强制 HTTPS、明文 HTTP 只允许 loopback，`base_url` 的允许范围仍未达到公网多租户要求；有效的 HTTPS URL 仍可能指向私网/云元数据或发生 DNS rebinding。本版本仅供受信任的本地操作者使用，不应直接暴露公网。后续公开部署必须增加鉴权、TLS、URL allowlist、DNS/IP 重绑定防护、出站网络策略、上传隔离、权限拆分、备份/PITR 和资源配额。当前不声称生产、HA 或灾备 SLA。
 
@@ -457,6 +492,7 @@ Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `te
 - Benchmark 可来自本地受信任操作者，或两个固定公共数据转换器；尚无通用远程注册表、发布者签名、隔离解压或恶意内容扫描。
 - MMLU-Pro `direct`/`official_cot`、group/limit、GPQA shuffle seed 或 Dataset Hash 不同的结果不可直接比较；公共题污染与 Provider 同名模型滚动更新仍无法由平台消除。
 - 单用户、无鉴权、无配额；只能在可信本地环境或受保护网络使用。
+- Web credential 使用本地文件 keyring，而不是集中 secrets manager/HSM；keyring 丢失会使 stored rows 不可恢复，数据库与 keyring 同时泄漏则可解密，因此必须分开备份和限制访问。
 - 成本为基于配置单价和供应商 usage 的估算；usage 缺失时不能视为真实的 0 成本。
 
 ## 后续扩展方式

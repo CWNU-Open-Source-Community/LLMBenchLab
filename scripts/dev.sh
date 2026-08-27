@@ -16,6 +16,8 @@ if [[ ! -d backend/.venv || ! -d frontend/node_modules ]]; then
   exit 1
 fi
 
+python3 scripts/ensure_credential_keys.py
+
 if [[ -f .env ]]; then
   set -a
   # shellcheck disable=SC1091

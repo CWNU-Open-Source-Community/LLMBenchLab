@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pytest
 import sqlalchemy as sa
+from pydantic import SecretStr
 from sqlalchemy.engine import make_url
 
 import app.db.import_sqlite as import_sqlite_module
@@ -42,9 +43,13 @@ from app.db.import_sqlite import (
 )
 from app.db.session import create_database_engine
 from app.db.types import UTCDateTime
-from app.models import ProviderType, QuestionType, RunStatus
+from app.models import CredentialSource, ProviderType, QuestionType, RunStatus
+from app.security import CredentialKeyring, EncryptedCredential
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
+IMPORT_CREDENTIAL_CANARY = "sk-import-canary-Q8mT3vN7rL2pX5cK9wS4"
+IMPORT_KEY_ID = "import-test-key-v1"
+IMPORT_KEY_MATERIAL = bytes(range(32))
 
 
 def _sqlite_url(path: Path) -> str:
@@ -74,16 +79,25 @@ def _insert_complete_mock_evidence(
     *,
     status: RunStatus = RunStatus.COMPLETED,
     namespace: str = "",
-) -> None:
+) -> EncryptedCredential:
     created_at = datetime(2026, 8, 25, 4, 5, 6, 123456, tzinfo=UTC)
     finished_at = created_at + timedelta(seconds=2)
     suffix = f"-{namespace}" if namespace else ""
     model_id = f"model-import{suffix}"
+    stored_model_id = f"model-credential-import{suffix}"
     benchmark_id = f"benchmark-import{suffix}"
     run_id = f"run-import{suffix}"
     question_ids = (f"question-import-1{suffix}", f"question-import-2{suffix}")
     engine = create_database_engine(_sqlite_url(path))
     tables = Base.metadata.tables
+    encrypted = CredentialKeyring(
+        IMPORT_KEY_ID,
+        {IMPORT_KEY_ID: IMPORT_KEY_MATERIAL},
+    ).encrypt(
+        SecretStr(IMPORT_CREDENTIAL_CANARY),
+        model_id=stored_model_id,
+        provider_base_url="https://provider.example/v1",
+    )
     try:
         with engine.begin() as connection:
             connection.execute(
@@ -102,6 +116,36 @@ def _insert_complete_mock_evidence(
                         "temperature": 0,
                         "nested": {"beta": [True, None], "alpha": "value"},
                     },
+                    "created_at": created_at,
+                    "updated_at": finished_at,
+                },
+            )
+            connection.execute(
+                tables["models"].insert(),
+                {
+                    "id": stored_model_id,
+                    "name": f"Encrypted Import Provider {namespace}".rstrip(),
+                    "provider_type": ProviderType.OPENAI_COMPATIBLE,
+                    "base_url": "https://provider.example/v1",
+                    "remote_model_name": "provider-model",
+                    "api_key_env": None,
+                    "credential_source": CredentialSource.STORED,
+                    "enabled": True,
+                    "input_price_per_million": None,
+                    "output_price_per_million": None,
+                    "default_parameters": {},
+                    "created_at": created_at,
+                    "updated_at": finished_at,
+                },
+            )
+            connection.execute(
+                tables["model_credentials"].insert(),
+                {
+                    "model_id": stored_model_id,
+                    "algorithm": encrypted.algorithm,
+                    "key_id": encrypted.key_id,
+                    "nonce": encrypted.nonce,
+                    "ciphertext": encrypted.ciphertext,
                     "created_at": created_at,
                     "updated_at": finished_at,
                 },
@@ -247,6 +291,7 @@ def _insert_complete_mock_evidence(
                 )
     finally:
         engine.dispose()
+    return encrypted
 
 
 def _read_only_snapshot(path: Path):
@@ -439,7 +484,8 @@ def test_read_only_source_preflight_preserves_file_and_reconciles_rows(tmp_path:
 
     snapshot = _read_only_snapshot(source)
 
-    assert snapshot.summaries["models"].row_count == 1
+    assert snapshot.summaries["models"].row_count == 2
+    assert snapshot.summaries["model_credentials"].row_count == 1
     assert snapshot.summaries["questions"].row_count == 2
     assert snapshot.summaries["evaluation_responses"].row_count == 2
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
@@ -569,7 +615,7 @@ def test_copy_failure_rolls_back_every_target_table(tmp_path: Path) -> None:
         target.dispose()
 
 
-def test_copy_snapshot_preserves_all_five_tables_in_sqlite(tmp_path: Path) -> None:
+def test_copy_snapshot_preserves_all_six_tables_in_sqlite(tmp_path: Path) -> None:
     source = tmp_path / "copy-source.db"
     target_path = tmp_path / "copy-target.db"
     _run_alembic(source)
@@ -595,6 +641,9 @@ def test_copy_snapshot_preserves_all_five_tables_in_sqlite(tmp_path: Path) -> No
     assert postcommit.rows["evaluation_runs"][0]["protocol_version"] == PROTOCOL_VERSION
     assert postcommit.rows["evaluation_runs"][0]["attempt_count"] == 2
     assert postcommit.rows["evaluation_responses"][1]["estimated_cost"] == Decimal("0.00000073")
+    assert len(postcommit.rows["model_credentials"]) == 1
+    assert postcommit.rows["model_credentials"][0] == source_snapshot.rows["model_credentials"][0]
+    assert IMPORT_CREDENTIAL_CANARY.encode() not in target_path.read_bytes()
 
 
 @pytest.mark.integration
@@ -624,7 +673,7 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
     rival_source = tmp_path / "complete-mock-rival.db"
     _run_alembic(source)
     _run_alembic(rival_source)
-    _insert_complete_mock_evidence(source)
+    credential_evidence = _insert_complete_mock_evidence(source)
     _insert_complete_mock_evidence(rival_source, namespace="rival")
     source_file_digest = hashlib.sha256(source.read_bytes()).hexdigest()
     management = create_database_engine(management_url)
@@ -799,7 +848,8 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
         report = import_sqlite_to_postgres(str(source), target_url, output=output)
 
         assert report.source == report.precommit_target == report.postcommit_target
-        assert report.source["models"].row_count == 1
+        assert report.source["models"].row_count == 2
+        assert report.source["model_credentials"].row_count == 1
         assert report.source["benchmarks"].row_count == 1
         assert report.source["questions"].row_count == 2
         assert report.source["evaluation_runs"].row_count == 1
@@ -856,6 +906,14 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
         assert all("canonical_row_digest=sha256:" in line for line in report_lines)
         assert "SQLite Import Mock" not in output.getvalue()
         assert "One?" not in output.getvalue()
+        forbidden_credential_output = (
+            IMPORT_CREDENTIAL_CANARY,
+            IMPORT_KEY_ID,
+            credential_evidence.nonce.hex(),
+            credential_evidence.ciphertext.hex(),
+        )
+        assert all(marker not in output.getvalue() for marker in forbidden_credential_output)
+        assert IMPORT_CREDENTIAL_CANARY.encode() not in source.read_bytes()
 
         _truncate_postgres(target)
         target_env = "LLMBENCHLAB_IMPORT_TEST_TARGET_URL"
@@ -865,6 +923,7 @@ def test_real_postgres_import_preserves_complete_mock_evidence(
         assert "SQLite to PostgreSQL import completed and reconciled" in cli_output
         assert "SQLite Import Mock" not in cli_output
         assert "One?" not in cli_output
+        assert all(marker not in cli_output for marker in forbidden_credential_output)
         if parsed_management_url.password:
             assert parsed_management_url.password not in cli_output
         with target.connect() as connection:

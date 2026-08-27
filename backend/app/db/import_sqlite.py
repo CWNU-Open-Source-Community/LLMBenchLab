@@ -31,6 +31,7 @@ from app.db.session import create_database_engine
 
 CORE_TABLE_NAMES = (
     "models",
+    "model_credentials",
     "benchmarks",
     "questions",
     "evaluation_runs",

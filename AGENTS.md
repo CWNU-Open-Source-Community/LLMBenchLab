@@ -58,7 +58,7 @@
 ### 3.4 安全底线
 
 - 不写入、提交、回显或记录真实 API Key、Authorization header、Cookie 或其他凭据。
-- 数据库仅保存 `api_key_env`（环境变量名称），运行时再读取对应值；响应 Schema 不得暴露密钥值。
+- Web/API 仅可通过 write-only `api_key` 接收 Provider Key，并立即以数据库外 keyring 做认证加密；数据库不得保存明文，响应、Run snapshot、队列、日志和报告不得暴露 Key 或加密材料。旧 `api_key_env` 路径可继续在运行时读取。
 - `.env` 不提交，`.env.example` 只能放安全占位符。
 - 不使用 `eval`，不执行 Benchmark 中的代码，不允许 manifest 引用任意本地路径。
 - 数据集导入必须限制大小、阻止路径穿越并返回明确的行号/字段错误。

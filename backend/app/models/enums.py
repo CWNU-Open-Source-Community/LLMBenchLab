@@ -8,6 +8,12 @@ class ProviderType(StrEnum):
     OPENAI_COMPATIBLE = "openai_compatible"
 
 
+class CredentialSource(StrEnum):
+    NONE = "none"
+    ENVIRONMENT = "environment"
+    STORED = "stored"
+
+
 class QuestionType(StrEnum):
     EXACT_MATCH = "exact_match"
     MULTIPLE_CHOICE = "multiple_choice"

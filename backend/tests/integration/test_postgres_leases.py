@@ -3,21 +3,25 @@
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.v1.models import _active_run_exists
 from app.db.session import create_database_engine
 from app.models import (
     Benchmark,
+    CredentialSource,
     EvaluationResponse,
     EvaluationRun,
     Model,
+    ProviderType,
     Question,
     RunStatus,
 )
@@ -191,3 +195,71 @@ def test_postgres_claim_and_cancel_race_preserves_state_constraints(postgres_sto
             assert run.lease_owner == lease.owner
             assert run.lease_expires_at is not None
             assert run.heartbeat_at is not None
+
+
+def test_postgres_model_lock_serializes_run_creation_before_sensitive_patch(
+    postgres_store,
+) -> None:
+    model_id = "model-pg-credential-lock"
+    run_id = "run-pg-credential-lock"
+    with postgres_store() as session, session.begin():
+        session.add(
+            Model(
+                id=model_id,
+                name="Postgres Credential Lock",
+                provider_type=ProviderType.OPENAI_COMPATIBLE,
+                base_url="https://provider.example/v1",
+                remote_model_name="provider-model",
+                api_key_env="PROVIDER_KEY",
+                credential_source=CredentialSource.ENVIRONMENT,
+            )
+        )
+
+    creator_has_lock = Event()
+    updater_entered = Event()
+
+    def create_pending_run() -> str:
+        with postgres_store() as session, session.begin():
+            model = session.scalar(select(Model).where(Model.id == model_id).with_for_update())
+            assert model is not None
+            creator_has_lock.set()
+            assert updater_entered.wait(timeout=5)
+            # Let PostgreSQL receive the updater's SELECT FOR UPDATE before this
+            # transaction inserts and commits the pending Run.
+            time.sleep(0.1)
+            session.add(
+                EvaluationRun(
+                    id=run_id,
+                    model_id=model_id,
+                    benchmark_id="benchmark-pg",
+                    status=RunStatus.PENDING,
+                    model_parameters_snapshot={},
+                    benchmark_hash_snapshot="postgres-lease-hash",
+                    prompt_template_snapshot={},
+                    total_questions=1,
+                )
+            )
+        return "created"
+
+    def patch_provider_origin() -> str:
+        assert creator_has_lock.wait(timeout=5)
+        with postgres_store() as session, session.begin():
+            updater_entered.set()
+            model = session.scalar(select(Model).where(Model.id == model_id).with_for_update())
+            assert model is not None
+            if _active_run_exists(session, model_id):
+                return "blocked"
+            model.base_url = "https://attacker.example/v1"
+            return "updated"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        create_future = executor.submit(create_pending_run)
+        update_future = executor.submit(patch_provider_origin)
+        assert create_future.result(timeout=10) == "created"
+        assert update_future.result(timeout=10) == "blocked"
+
+    with postgres_store() as session:
+        model = session.get(Model, model_id)
+        run = session.get(EvaluationRun, run_id)
+        assert model is not None and model.base_url == "https://provider.example/v1"
+        assert run is not None and run.status == RunStatus.PENDING

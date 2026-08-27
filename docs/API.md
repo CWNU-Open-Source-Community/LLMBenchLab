@@ -13,11 +13,11 @@ Phase 2 可靠执行基础保持了 `/api/v1` 和 `llmbenchlab-protocol-v1` 评�
 - 除 Benchmark ZIP 上传外，请求与响应均使用 `application/json`。
 - 所有持久化时间以 UTC 产生；示例使用 ISO 8601 的 `Z` 形式。客户端显示时应明确时区。
 - 资源 ID 是 36 字符 UUID 字符串。下面 UUID、模型名和地址为示例值；`demo-general` 的内容与 Dataset Hash 使用仓库内置数据的真实 canonical 值。
-- Model 只保存并返回 `api_key_env`（环境变量名称），不会返回该变量对应的值。
+- Model 写接口接受 Web 使用的 write-only `api_key`，也保留 `api_key_env` 环境变量兼容模式；Model 读响应只公开 `credential_source`、`has_api_key` 和兼容模式的变量名称，绝不返回 Key、密文、nonce、加密 key id 或部署 keyring 内容。
 - `score`、`completion_rate` 和 `answered_accuracy` 的单位均为百分比 `0..100`；逐题
   `score` 为 `0..1`。
 - Token usage 或费用无法从上游取得时为 `null`，不能解释为零。
-- 调用方可传 `X-Request-ID`；服务只接受 1–128 字符、仅含字母数字与 `-._:` 的值，非法或缺失时生成 UUID。所有响应（包括通用 500）均回传 `X-Request-ID`，CORS 允许并暴露该 header。它用于诊断关联，不是请求幂等键。当前仍没有速率限制。
+- 服务为每个请求始终生成全新的 server-side UUID，并在所有响应（包括通用 500）的 `X-Request-ID` header 中回传。客户端传入的同名 header 会被忽略，且 CORS 不允许它作为请求 header；浏览器仍可读取响应中暴露的 `X-Request-ID`。它用于诊断关联，不是请求幂等键。当前仍没有速率限制。
 
 ### 1.1 分页
 
@@ -75,7 +75,7 @@ Phase 2 可靠执行基础保持了 `/api/v1` 和 `llmbenchlab-protocol-v1` 评�
 }
 ```
 
-应用主动从 422 响应中省略 Pydantic 的 `input` 与 `ctx`，避免反射可能敏感的原始输入。调用方仍不得把真实密钥作为未知字段发送；正确做法始终是只发送环境变量名称。
+应用主动从 422 响应中省略 Pydantic 的 `input` 与 `ctx`，并把未知字段位置折叠为安全占位符，避免反射可能敏感的原始输入。Web/API 调用方只能在 Model 写请求定义的 `api_key` 字段传真实 Key；不得把它放进未知字段、URL、query、模型名、Base URL、默认参数或其他公开字段。
 
 Benchmark 校验错误还会提供文件、行、列或 JSON Pointer：
 
@@ -302,15 +302,18 @@ curl -sS http://127.0.0.1:8000/api/v1/info
 | `provider_type` | `mock` 或 `openai_compatible`，必填 | 首期封闭集合 |
 | `base_url` | string/null | 绝对 URL；远端只允许 HTTPS，明文 HTTP 仅允许 loopback；禁止 URL 内嵌账号密码、query 与 fragment |
 | `remote_model_name` | string/null | 最长 256 |
-| `api_key_env` | string/null | 环境变量名格式，不是密钥值 |
+| `api_key` | string/null | **仅写入**；8–8192 bytes、无首尾空白、只含可见 ASCII；OpenAPI 标记 `writeOnly`，所有响应均省略 |
+| `api_key_env` | string/null | 兼容 CLI/旧客户端的环境变量名，不是密钥值；不能与 `api_key` 同时提供 |
 | `enabled` | boolean，默认 `true` | 禁用模型不能创建 Run |
 | `input_price_per_million` | number/null，默认 `null` | 有限非负数；Mock 未填时规范化为明确的 `0` |
 | `output_price_per_million` | number/null，默认 `null` | 有限非负数；Mock 未填时规范化为明确的 `0` |
 | `default_parameters` | object，默认 `{}` | 只允许 `temperature`、`top_p`、`max_tokens`、`seed`，并使用与 Run 相同的类型/范围约束 |
 
-`openai_compatible` 必须同时提供 `base_url`、`remote_model_name` 和 `api_key_env`；`mock` 的这三个远端连接字段必须为空。Model Schema、Provider preflight 和 Adapter 都拒绝远端明文 HTTP，只有 `localhost` 或字面量 loopback IP 可使用 HTTP；HTTPS 私网、云元数据、DNS rebinding 和其他出站目标仍没有 allowlist，详见 [SECURITY.md](SECURITY.md)。
+`openai_compatible` 必须同时提供 `base_url`、`remote_model_name`，并在 `api_key` 与 `api_key_env` 中恰好选择一个；`mock` 的四个远端连接/凭据字段必须为空。Model Schema、Provider preflight 和 Adapter 都拒绝远端明文 HTTP，只有 `localhost` 或字面量 loopback IP 可使用 HTTP；HTTPS 私网、云元数据、DNS rebinding 和其他出站目标仍没有 allowlist，详见 [SECURITY.md](SECURITY.md)。
 
-本 API 的 `GET /models` 是 LLMBenchLab 本地模型注册表，不会代替操作者访问 Provider。可信本地 `llmbenchlab-evaluate` 才会调用上游 `/models` 与付费 canary：发现到的任一模型 ID 若包含当前 Key，预检立即失败；canary 成功体若明确返回不同于请求目标的模型名，也会失败。模型发现与正式 Chat 请求声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体上限为 2 MiB，Chat 成功体上限为 4 MiB、错误体上限为 64 KiB。成功内容、raw usage、request ID、返回模型名、system fingerprint 与 finish reason 中出现的当前 Key 会在进入持久化边界前按精确值替换为 `[REDACTED]`。
+读响应额外包含两个派生字段：`credential_source` 为 `none | environment | stored`；`has_api_key` 只表示该 Model 当前拥有应用加密保存的 Web Key。环境变量模式即使 Worker 环境中已有值也仍返回 `has_api_key=false`。`stored` 模式在独立 `model_credentials` 行中以 `model_id` 为主键保存 AES-GCM envelope，Model/Run/Response Schema 均不映射其内部列。
+
+本 API 的 `GET /models` 是 LLMBenchLab 本地模型注册表，不会代替操作者访问 Provider。可信本地 `llmbenchlab-evaluate` 才会调用上游 `/models` 与付费 canary：发现到的任一模型 ID 若包含当前 Key，预检立即失败；canary 成功体若明确返回不同于请求目标的模型名，也会失败。模型发现与正式 Chat 请求声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体上限为 2 MiB，Chat 成功体上限为 4 MiB、错误体上限为 64 KiB。成功内容、raw usage 的对象键/所有 JSON 标量、token/status 数值、request ID、返回模型名、system fingerprint 与 finish reason 中出现的当前 Key 会在进入持久化边界前按精确值替换为 `[REDACTED]`。
 
 Phase 1 的 Model 默认参数只覆盖上述四个实际由 Adapter 转发的生成字段。创建 Run 时，显式请求值优先；某字段未出现在请求 JSON 中时才使用 Model 默认值，否则使用协议默认值。Run 的 `generation` 快照保存最终有效值。
 
@@ -324,6 +327,8 @@ Model 响应示例（后续接口引用为 `ModelRead`）：
   "base_url": null,
   "remote_model_name": null,
   "api_key_env": null,
+  "credential_source": "none",
+  "has_api_key": false,
   "enabled": true,
   "input_price_per_million": 0.0,
   "output_price_per_million": 0.0,
@@ -353,6 +358,8 @@ curl -sS 'http://127.0.0.1:8000/api/v1/models?provider_type=mock&enabled=true&of
       "base_url": null,
       "remote_model_name": null,
       "api_key_env": null,
+      "credential_source": "none",
+      "has_api_key": false,
       "enabled": true,
       "input_price_per_million": 0.0,
       "output_price_per_million": 0.0,
@@ -379,28 +386,31 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/models \
   -d '{"name":"Offline Mock","provider_type":"mock","enabled":true}'
 ```
 
-注册 OpenAI-compatible 配置。这里的 `LOCAL_COMPAT_API_KEY` 只是环境变量名称：
+注册供 Web 使用的 OpenAI-compatible 配置。推荐在 Models 页面粘贴 Key；`api_key` 只出现在这次写请求中，成功响应不会返回它，数据库也不会保存其明文。下面只是请求结构，不是可直接填入真实 Key 的 shell 命令：
 
-```bash
-curl -sS -X POST http://127.0.0.1:8000/api/v1/models \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name":"Local Compatible",
-    "provider_type":"openai_compatible",
-    "base_url":"https://llm-gateway.invalid/v1",
-    "remote_model_name":"example-chat-model",
-    "api_key_env":"LOCAL_COMPAT_API_KEY",
-    "enabled":true,
-    "input_price_per_million":null,
-    "output_price_per_million":null,
-    "default_parameters":{}
-  }'
+```json
+{
+  "name": "Local Compatible",
+  "provider_type": "openai_compatible",
+  "base_url": "https://llm-gateway.invalid/v1",
+  "remote_model_name": "example-chat-model",
+  "api_key": "<write-only value entered in the Web form>",
+  "enabled": true,
+  "input_price_per_million": null,
+  "output_price_per_million": null,
+  "default_parameters": {}
+}
 ```
 
-`201 Created` 返回 `ModelRead`。错误：
+不要把真实 Key 写入 `curl -d`、命令行参数、脚本源码或 shell history。若必须编写 API 客户端，应从隐藏提示或受保护的 secret source 读入进程内存，再把 JSON body 直接发送到 loopback API。
+
+可信本地 CLI 与旧客户端仍可省略 `api_key` 并改传 `"api_key_env":"LOCAL_COMPAT_API_KEY"`。这只保存变量名称并令 `credential_source="environment"`；Web 表单默认使用 `api_key`，令 `credential_source="stored"`、`has_api_key=true` 和 `api_key_env=null`。
+
+`201 Created` 返回 `ModelRead` 并带 `Cache-Control: no-store`。错误：
 
 - `409 model_name_conflict`：名称已存在。
-- `422`：字段缺失、额外字段、非法 URL/环境变量名、远端明文 HTTP，或 Provider 必需字段不完整。
+- `422`：字段缺失、额外字段、非法 URL/环境变量名、非法 Key、同时提供两种凭据、远端明文 HTTP，或 Provider 必需字段不完整；响应不反射原始 Key。
+- `503 credential_store_unavailable`：请求使用 `api_key` 但部署 keyring 缺失/不可读/无效，或 PATCH 要保留的 stored envelope 无法解密且没有显式新 Key；事务不保存 Model 或凭据。
 
 ```json
 {
@@ -437,8 +447,13 @@ curl -sS -X PATCH http://127.0.0.1:8000/api/v1/models/11111111-1111-4111-8111-11
   -d '{"enabled":false,"default_parameters":{"temperature":0}}'
 ```
 
-`200 OK` 返回更新后的 `ModelRead`。`404 model_not_found`、`409 model_name_conflict` 和
-`422` 的含义与创建接口一致。
+省略 `api_key` 会保留现有 stored credential；显式传 `api_key:null` 会返回 `422`，避免把清除操作误当成“保持不变”。传入新 `api_key` 会替换并重新加密旧值。create/PATCH 会把新 Key 与精确 `ModelRead` 全字段投影、Run snapshot 的 `model` 子投影比较；保留 stored 时只为同一比较解密旧 Key，因此不能把凭据流中的 Key 复制到这些以后可读取的 Model 表面。该保证不扫描与 Model 无关的 Benchmark/Question 内容，也不排除无关用户数据恰好包含相同文本。Provider 的规范化 origin（scheme、host、非默认 port）发生变化时必须同时重输 `api_key`；仅改变同一 origin 下的路径不需要重输。切换为 `mock` 会清空远端字段并删除 encrypted row；改传 `api_key_env` 切到兼容环境变量模式时也会删除 encrypted row。
+
+若 stored row 缺失，或旧 envelope 因未知/退役 `key_id`、损坏密文无法解密，PATCH 仍允许在 active keyring 可用时通过**只修改凭据**显式提交新的有效 `api_key`，或只切换至 `mock`/legacy `api_key_env` 来清理它。恢复请求若同时改名称、价格、默认参数或其他无关公开字段，会返回 `422 credential_recovery_requires_isolated_update`；若仍要保留 `stored` 且没有新 Key，则返回稳定、无秘密的 `503 credential_store_unavailable`。这些拒绝都保持 Model 与 credential 原样。
+
+只要该 Model 仍有 `pending` 或 `running` Run，Provider 类型、endpoint、远端模型或凭据来源/值等敏感更新均返回 `409 model_has_active_runs`。Run 创建和 Model 更新使用同一方言锁：PostgreSQL 对 Model 行执行 `SELECT ... FOR UPDATE`，SQLite 在读取 Model 前先取得数据库级 `BEGIN IMMEDIATE`，避免检查、快照与提交之间的竞态。SQLite 的数据库级竞争会短暂阻塞请求，只定位为低并发本地模式；生产或并发评测推荐 PostgreSQL。名称、展示/价格和默认参数等非敏感更新仍由 Run 快照隔离。
+
+`200 OK` 返回更新后的 `ModelRead` 并带 `Cache-Control: no-store`。`404 model_not_found`、`409 model_name_conflict`、`409 model_has_active_runs`、`422 api_key_required_for_origin_change`、通用 `422` 和 `503 credential_store_unavailable` 均使用稳定且不含 Key 的响应。
 
 ### 4.6 `DELETE /models/{model_id}`
 
@@ -655,7 +670,7 @@ Run 响应示例（后续接口引用为 `RunRead`）：
   "protocol_version": "llmbenchlab-protocol-v1",
   "model_parameters_snapshot": {
     "generation": {"temperature": 0.0, "top_p": 1.0, "max_tokens": 256, "seed": 42},
-    "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
+    "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "credential_source": "none", "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
     "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true, "schema_version": "llmbenchlab-dataset-v1", "source": "Original bilingual demo authored for LLMBenchLab", "license": "MIT", "dimension": "general", "language": "zh-en"},
     "evaluator": {"name": "builtin-objective", "version": "1.0", "mapping": {"exact_match": "exact_match_v1", "multiple_choice": "multiple_choice_v1", "numeric": "numeric_v1"}},
     "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "task_delivery": "at_least_once", "task_max_attempts": 3, "restart_recovery": "database_lease_resume_missing_responses"}
@@ -693,6 +708,8 @@ Run 响应示例（后续接口引用为 `RunRead`）：
 ```
 
 状态集合：`pending`、`running`、`completed`、`failed`、`cancelled`。
+
+Run 表没有 `credential_id`、ciphertext、nonce 或 keyring 列，Run API 也不会返回这些值。`model_parameters_snapshot.model` 只冻结 Model ID、`credential_source`、远端模型和 endpoint；只有 `environment` 模式会同时冻结 `api_key_env` 名称。执行 stored Run 时，Worker 用 `run.model_id` 读取 `model_credentials`，再以 `run.model_id + Run snapshot base_url` 作为认证上下文解密；它不会用当前可编辑 Model 的 Base URL 替代快照目标。缺失 keyring、未知 key id、密文篡改或 AAD 不匹配都会在构造 Adapter/网络请求前失败。
 
 可靠执行字段的语义：
 
@@ -732,7 +749,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs?run_status=completed&protocol_versio
       "protocol_version": "llmbenchlab-protocol-v1",
       "model_parameters_snapshot": {
         "generation": {"temperature": 0.0, "top_p": 1.0, "max_tokens": 256, "seed": 42},
-        "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
+        "model": {"id": "11111111-1111-4111-8111-111111111111", "name": "Offline Mock", "remote_model_name": null, "adapter_type": "mock", "base_url": null, "credential_source": "none", "api_key_env": null, "input_price_per_million": "0", "output_price_per_million": "0", "currency_assumption": "USD", "default_parameters": {}},
         "benchmark": {"id": "22222222-2222-4222-8222-222222222222", "slug": "demo-general", "name": "Demo General / 通用演示集", "version": "1.0.0", "dataset_hash": "5c51bb4fa42fc6aa2e8b0b95bb7e37ef8bdff8b6fa4eecfb66da5d4faf755afe", "question_count": 15, "is_demo": true, "schema_version": "llmbenchlab-dataset-v1", "source": "Original bilingual demo authored for LLMBenchLab", "license": "MIT", "dimension": "general", "language": "zh-en"},
         "evaluator": {"name": "builtin-objective", "version": "1.0", "mapping": {"exact_match": "exact_match_v1", "multiple_choice": "multiple_choice_v1", "numeric": "numeric_v1"}},
         "execution": {"concurrency": 1, "timeouts_seconds": {"connect": 5.0, "read": 60.0, "write": 30.0, "pool": 5.0}, "retry_policy": {"name": "bounded_exponential_backoff", "max_retries": 2, "max_attempts": 3, "backoff_base_seconds": 0.25, "backoff_cap_seconds": 2.0, "retryable_status_codes": [408, 429, 500, 502, 503, 504]}, "task_delivery": "at_least_once", "task_max_attempts": 3, "restart_recovery": "database_lease_resume_missing_responses"}
@@ -778,7 +795,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs?run_status=completed&protocol_versio
 
 ### 6.3 `POST /runs`
 
-创建顺序固定为：先在数据库提交 `pending` Run 及完整快照，再 best-effort 发布 Redis Streams 通知，然后返回 Run。API 不加载 Adapter，不执行题目；独立 Worker 从 Redis 通知或数据库 reconciliation 获取工作。
+创建顺序固定为：先用与 endpoint/credential 更新相同的方言锁读取并校验 Model，再写入 `pending` Run 及完整快照，提交后 best-effort 发布 Redis Streams 通知，然后返回 Run。PostgreSQL 使用 Model row `FOR UPDATE`；SQLite 在首次读取前使用 `BEGIN IMMEDIATE` 串行化写事务。API 不解密 stored credential、不加载 Adapter、不执行题目；独立 Worker 从 Redis 通知或数据库 reconciliation 获取工作。
 
 ```bash
 curl -sS -X POST http://127.0.0.1:8000/api/v1/runs \
@@ -992,6 +1009,6 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/summary
 - CORS 只允许配置中的显式前端 Origin，拒绝通配符；默认开发 Origin 为
   `http://localhost:5173` 和 `http://127.0.0.1:5173`。
 - 允许的方法为 `GET`、`POST`、`PATCH`、`DELETE`、`OPTIONS`，允许的请求头为
-  `Accept`、`Content-Type`、`X-Request-ID`，并向浏览器暴露响应 `X-Request-ID`；不启用跨域凭据。
+  `Accept`、`Content-Type`，并向浏览器暴露响应 `X-Request-ID`；不启用跨域凭据。客户端不应发送 `X-Request-ID`：API 忽略该输入并总是自行生成新 UUID。
 - Run 创建后建议每 0.5–2 秒轮询一次，见到终态即停止；MVP 没有 WebSocket。
 - API 重启不拥有也不改写 Run；Worker 重启或异常退出后，未完成 Run 在租约过期后被接管，已持久 Response 保留且不重复写入。客户端应继续轮询同一 Run ID，并可使用 `attempt_count`、`last_error`、`dead_lettered_at` 和终态 `error_message` 展示恢复轨迹。

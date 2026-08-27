@@ -26,6 +26,7 @@ dev:
 	@./scripts/dev.sh
 
 backend:
+	@python3 scripts/ensure_credential_keys.py
 	@set -a; \
 	if [[ -f .env ]]; then source ./.env; fi; \
 	set +a; \
@@ -35,6 +36,7 @@ backend:
 		--reload
 
 worker:
+	@python3 scripts/ensure_credential_keys.py
 	@set -a; \
 	if [[ -f .env ]]; then source ./.env; fi; \
 	set +a; \
@@ -71,6 +73,7 @@ phase2-acceptance:
 	@python3 scripts/phase2_acceptance.py
 
 docker-up:
+	@python3 scripts/ensure_credential_keys.py
 	@docker compose up --build --wait --wait-timeout 180 --remove-orphans
 
 docker-down:

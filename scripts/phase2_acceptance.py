@@ -15,6 +15,7 @@ guards without creating containers.
 """
 
 import argparse
+import base64
 import contextlib
 import datetime as dt
 import hashlib
@@ -25,8 +26,10 @@ import re
 import shutil
 import signal
 import socket
+import secrets
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 import urllib.error
@@ -215,6 +218,26 @@ class Phase2Acceptance:
         self.artifact_dir = resolved_artifacts_root / self.project
         self.evidence_path = self.artifact_dir / "evidence.json"
 
+        self._credential_secret_dir = tempfile.TemporaryDirectory(
+            prefix="llmbenchlab-p2-credential-"
+        )
+        credential_keys_path = Path(self._credential_secret_dir.name) / "keys.json"
+        credential_keys_path.write_text(
+            json.dumps(
+                {
+                    "active_key_id": "acceptance-v1",
+                    "keys": {
+                        "acceptance-v1": base64.urlsafe_b64encode(
+                            secrets.token_bytes(32)
+                        ).decode("ascii")
+                    },
+                },
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        credential_keys_path.chmod(0o600)
+
         self.env = os.environ.copy()
         for inherited_key in (
             "COMPOSE_FILE",
@@ -229,6 +252,9 @@ class Phase2Acceptance:
                 "API_PORT": str(self.api_port),
                 "FRONTEND_PORT": str(self.frontend_port),
                 "LLMBENCHLAB_IMAGE_TAG": "p2-" + suffix,
+                "LLMBENCHLAB_COMPOSE_CREDENTIAL_KEYS_FILE": str(
+                    credential_keys_path
+                ),
                 "LLMBENCHLAB_COMPOSE_DATABASE_URL": (
                     "postgresql+psycopg://llmbenchlab:{}@postgres:5432/"
                     "llmbenchlab?connect_timeout=3"
@@ -546,7 +572,8 @@ class Phase2Acceptance:
     ) -> Dict[str, Any]:
         base = self.frontend_base if frontend else self.api_base
         data = None
-        headers = {"Accept": "application/json", "X-Request-ID": "p2-" + uuid.uuid4().hex}
+        client_request_id = "p2-" + uuid.uuid4().hex
+        headers = {"Accept": "application/json", "X-Request-ID": client_request_id}
         if body is not None:
             data = json.dumps(body, separators=(",", ":")).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -579,10 +606,22 @@ class Phase2Acceptance:
                     sanitize(payload),
                 )
             )
+        response_request_id = response_headers.get("X-Request-ID")
+        if not frontend:
+            if response_request_id == client_request_id:
+                raise AcceptanceFailure("API reflected a client-controlled X-Request-ID")
+            try:
+                server_request_id = uuid.UUID(str(response_request_id))
+            except (AttributeError, TypeError, ValueError) as exc:
+                raise AcceptanceFailure(
+                    "API did not return a server-generated UUID request ID"
+                ) from exc
+            if server_request_id.version != 4 or str(server_request_id) != response_request_id:
+                raise AcceptanceFailure("API request ID was not a canonical UUIDv4")
         return {
             "status_code": status_code,
             "elapsed_seconds": elapsed,
-            "request_id": response_headers.get("X-Request-ID"),
+            "request_id": response_request_id,
             "payload": payload,
         }
 

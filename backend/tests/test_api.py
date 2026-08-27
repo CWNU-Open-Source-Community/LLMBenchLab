@@ -51,7 +51,8 @@ def test_liveness_readiness_and_request_id_are_componentized(client, monkeypatch
     liveness = client.get("/api/v1/live", headers={"X-Request-ID": "request-safe-1"})
     assert liveness.status_code == 200
     assert liveness.json()["status"] == "live"
-    assert liveness.headers["X-Request-ID"] == "request-safe-1"
+    assert liveness.headers["X-Request-ID"]
+    assert liveness.headers["X-Request-ID"] != "request-safe-1"
 
     ready = client.get("/api/v1/ready")
     assert ready.status_code == 200
@@ -207,7 +208,8 @@ def test_unhandled_api_error_is_sanitized_and_keeps_request_id(
     )
 
     assert response.status_code == 500
-    assert response.headers["X-Request-ID"] == "request-safe-error-1"
+    assert response.headers["X-Request-ID"]
+    assert response.headers["X-Request-ID"] != "request-safe-error-1"
     assert response.json() == {
         "detail": {
             "code": "internal_server_error",
@@ -216,7 +218,7 @@ def test_unhandled_api_error_is_sanitized_and_keeps_request_id(
     }
     assert secret not in response.text
     failure = next(record for record in caplog.records if record.event == "api_request_failed")
-    assert failure.request_id == "request-safe-error-1"
+    assert failure.request_id == response.headers["X-Request-ID"]
     assert failure.request_path == "/live"
     assert failure.error_code == "api_error:RuntimeError"
     assert failure.result == "internal_server_error"

@@ -35,6 +35,7 @@ def build_adapter(provider_type: str, **kwargs: Any) -> ModelAdapter:
             "base_url",
             "remote_model_name",
             "api_key_env",
+            "api_key",
             "connect_timeout_seconds",
             "read_timeout_seconds",
             "write_timeout_seconds",
@@ -45,7 +46,7 @@ def build_adapter(provider_type: str, **kwargs: Any) -> ModelAdapter:
             "client",
             "sleep",
         }
-        required = {"base_url", "remote_model_name", "api_key_env"}
+        required = {"base_url", "remote_model_name"}
         adapter_options = {
             key: value
             for key, value in options.items()

@@ -41,7 +41,7 @@ MVP 不面向需要组织级权限、海量并发、合规托管或公网多租�
 - **证据可查**：保留逐题原始输出、解析答案、标准答案快照、评分和错误。
 - **低门槛**：SQLite、本地进程内任务与 Mock 模型形成无需外部服务的默认路径。
 - **可扩展**：Adapter、Evaluator、Runner 和 Dataset Loader 各自有清晰接口，未来可替换 Worker 或增加评测类型。
-- **安全默认**：只保存密钥环境变量名称；CI 和演示不访问真实付费 API。
+- **安全默认**：Web 中直接输入的 Provider Key 只写不回显，由独立 keyring 加密后保存；环境变量方式保留给兼容场景，CI 和演示不访问真实付费 API。
 
 ## 项目目标
 
@@ -86,6 +86,7 @@ MVP 不实现或不承诺：
 - 单仓库、前后端分离的 Web 应用；FastAPI/SQLAlchemy/SQLite 后端和 React/TypeScript 前端。
 - 版本化 JSON manifest + JSONL 数据集导入、验证和稳定 SHA-256。
 - 本地 Mock 及用户配置的 OpenAI-compatible Chat Completions 接口。
+- 可信 loopback Web 界面中的只写 API Key 输入、加密凭据存储和 Worker 解密调用；环境变量为兼容路径。
 - 进程内、受控并发、可取消标志的后台 Run；逐题隔离错误并持久化状态。
 - 客观、确定性的 Evaluator 与可筛选排行榜。
 - 面向开源协作的测试、CI、License、贡献和变更记录。
@@ -94,6 +95,7 @@ MVP 不实现或不承诺：
 
 - 用户负责确认外部模型和数据集的许可、费用、隐私与使用条款。
 - 项目不自动上传数据；只有用户显式配置 OpenAI-compatible 模型时，Prompt 才会发送到其指定端点。
+- Provider Key 会经过浏览器与本地 API 进程，并在 Worker 调用时短暂存在于内存和 Authorization header；当前威胁模型不覆盖浏览器扩展、DevTools、主机/root 失陷或数据库与 keyring 同时失陷。
 - 自定义 `base_url` 在 MVP 中属于受信配置；其 SSRF 风险使本项目不适合直接暴露公网。
 - 进程内后台任务在进程重启后不能自动恢复；遗留 `running` Run 应标记为失败或中断并说明原因。
 - SQLite 面向本地低并发使用，不承诺多进程写入吞吐与高可用。
@@ -105,4 +107,3 @@ MVP 不实现或不承诺：
 3. 默认离线、安全、低成本；真实模型接入必须由用户显式配置。
 4. 先完成可靠垂直切片，再按 Roadmap 替换基础设施。
 5. 项目状态以测试和验收证据为准，不以文件存在或计划完成为准。
-

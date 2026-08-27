@@ -28,6 +28,13 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_CONFIG_PATH = BACKEND_ROOT / "alembic.ini"
 LEGACY_REVISION = "20260824_0000"
 PHASE_1_REVISION = "20260824_0001"
+RELIABILITY_REVISION = "20260825_0002"
+
+_CREDENTIAL_DIFFERENCES = {
+    "add_table:model_credentials",
+    "add_column:models.credential_source",
+    "add_constraint:models.ck_models_credential_source_values",
+}
 
 _RELIABILITY_COLUMNS = {
     "add_column:evaluation_runs.attempt_count",
@@ -59,8 +66,15 @@ _RELIABILITY_CHECK_NAMES = {
 }
 _RELIABILITY_INDEX_NAMES = {fingerprint.rsplit(".", 1)[1] for fingerprint in _RELIABILITY_INDEXES}
 _PHASE_1_DIFFERENCES = tuple(
-    sorted(_RELIABILITY_COLUMNS | _RELIABILITY_CONSTRAINTS | _RELIABILITY_INDEXES)
+    sorted(
+        _CREDENTIAL_DIFFERENCES
+        | _RELIABILITY_COLUMNS
+        | _RELIABILITY_CONSTRAINTS
+        | _RELIABILITY_INDEXES
+    )
 )
+
+_RELIABILITY_DIFFERENCES = tuple(sorted(_CREDENTIAL_DIFFERENCES))
 
 _LEGACY_DIFFERENCES = tuple(
     sorted(
@@ -172,6 +186,9 @@ def _difference_fingerprint(difference: tuple[Any, ...]) -> str:
     if operation == "add_index":
         index = difference[1]
         return f"add_index:{index.table.name}.{index.name}"
+    if operation == "add_table":
+        table = difference[1]
+        return f"add_table:{table.name}"
     return f"unsupported:{operation}"
 
 
@@ -271,13 +288,21 @@ def _validate_sqlite_ddl_modifiers(connection: Connection) -> None:
             )
 
 
-def _validate_sqlite_table_options(connection: Connection) -> None:
+def _schema_tables_for_revision(schema_revision: str) -> dict[str, sa.Table]:
+    tables = dict(Base.metadata.tables)
+    if schema_revision in {LEGACY_REVISION, PHASE_1_REVISION, RELIABILITY_REVISION}:
+        tables.pop("model_credentials", None)
+    return tables
+
+
+def _validate_sqlite_table_options(connection: Connection, *, schema_revision: str) -> None:
+    expected_tables = _schema_tables_for_revision(schema_revision)
     table_options = {
         row["name"]: row
         for row in connection.exec_driver_sql("PRAGMA table_list").mappings()
-        if row["schema"] == "main" and row["name"] in Base.metadata.tables
+        if row["schema"] == "main" and row["name"] in expected_tables
     }
-    for table_name in Base.metadata.tables:
+    for table_name in expected_tables:
         options = table_options.get(table_name)
         columns = connection.exec_driver_sql(f'PRAGMA table_xinfo("{table_name}")').mappings()
         has_hidden_columns = any(bool(column.get("hidden", 0)) for column in columns)
@@ -299,7 +324,7 @@ def _validate_relational_structure(connection: Connection, *, schema_revision: s
     inspector = sa.inspect(connection)
     legacy = schema_revision == LEGACY_REVISION
     pre_reliability = schema_revision in {LEGACY_REVISION, PHASE_1_REVISION}
-    for table_name, table in Base.metadata.tables.items():
+    for table_name, table in _schema_tables_for_revision(schema_revision).items():
         table_sql = connection.exec_driver_sql(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -417,7 +442,12 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
     inspector = sa.inspect(connection)
     legacy = schema_revision == LEGACY_REVISION
     pre_reliability = schema_revision in {LEGACY_REVISION, PHASE_1_REVISION}
-    for table_name, table in Base.metadata.tables.items():
+    pre_credentials = schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+    }
+    for table_name, table in _schema_tables_for_revision(schema_revision).items():
         expected_entries = [
             (str(constraint.name), _normalized_check_sql(constraint.sqltext))
             for constraint in table.constraints
@@ -429,10 +459,36 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
                 for entry in expected_entries
                 if entry[0]
                 not in {
+                    "ck_models_credential_source_values",
                     "ck_models_mock_configuration_empty",
                     "ck_models_openai_configuration_required",
                 }
             ]
+        elif pre_credentials and table_name == "models":
+            expected_entries = [
+                entry
+                for entry in expected_entries
+                if entry[0]
+                not in {
+                    "ck_models_credential_source_values",
+                    "ck_models_mock_configuration_empty",
+                    "ck_models_openai_configuration_required",
+                }
+            ]
+            expected_entries.extend(
+                [
+                    (
+                        "ck_models_mock_configuration_empty",
+                        "provider_type != 'mock' OR (base_url IS NULL AND "
+                        "remote_model_name IS NULL AND api_key_env IS NULL)",
+                    ),
+                    (
+                        "ck_models_openai_configuration_required",
+                        "provider_type != 'openai_compatible' OR (base_url IS NOT NULL "
+                        "AND remote_model_name IS NOT NULL AND api_key_env IS NOT NULL)",
+                    ),
+                ]
+            )
         if pre_reliability and table_name == "evaluation_runs":
             expected_entries = [
                 entry for entry in expected_entries if entry[0] not in _RELIABILITY_CHECK_NAMES
@@ -458,7 +514,7 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
 
 def _validate_sqlite_database(connection: Connection, *, schema_revision: str) -> None:
     _validate_sqlite_ddl_modifiers(connection)
-    _validate_sqlite_table_options(connection)
+    _validate_sqlite_table_options(connection, schema_revision=schema_revision)
     _validate_relational_structure(connection, schema_revision=schema_revision)
     _validate_check_constraints(connection, schema_revision=schema_revision)
     triggers = connection.exec_driver_sql(
@@ -542,13 +598,15 @@ def prepare_database(
         current_heads = database_heads(connection)
         table_names = set(sa.inspect(connection).get_table_names())
         domain_tables = set(Base.metadata.tables)
+        pre_credential_tables = domain_tables - {"model_credentials"}
         present_domain_tables = table_names & domain_tables
 
         expected_heads = expected_database_heads(config_path)
         head_revision = expected_heads[0]
         pre_reliability_heads = {(LEGACY_REVISION,), (PHASE_1_REVISION,)}
+        historical_heads = pre_reliability_heads | {(RELIABILITY_REVISION,)}
 
-        if current_heads and current_heads not in pre_reliability_heads:
+        if current_heads and current_heads not in historical_heads:
             if set(current_heads) == set(expected_heads):
                 if present_domain_tables != domain_tables:
                     missing = ", ".join(sorted(domain_tables - present_domain_tables))
@@ -568,8 +626,13 @@ def prepare_database(
             return PreparationResult(action="versioned")
         if not present_domain_tables:
             return PreparationResult(action="empty")
-        if present_domain_tables != domain_tables:
-            missing = ", ".join(sorted(domain_tables - present_domain_tables))
+        expected_present_tables = (
+            pre_credential_tables if current_heads in historical_heads else domain_tables
+        )
+        if not current_heads and present_domain_tables == pre_credential_tables:
+            expected_present_tables = pre_credential_tables
+        if present_domain_tables != expected_present_tables:
+            missing = ", ".join(sorted(expected_present_tables - present_domain_tables))
             raise SchemaPreparationError(
                 "Database contains only part of the LLMBenchLab schema "
                 f"(missing: {missing}); no migration marker was written."
@@ -577,13 +640,16 @@ def prepare_database(
 
         target_revision: str | None
         source_revision: str
-        if current_heads in pre_reliability_heads:
+        if current_heads in historical_heads:
             if not sqlite_locked:
                 return PreparationResult(action="versioned")
             source_revision = current_heads[0]
-            expected_differences = (
-                _LEGACY_DIFFERENCES if source_revision == LEGACY_REVISION else _PHASE_1_DIFFERENCES
-            )
+            if source_revision == LEGACY_REVISION:
+                expected_differences = _LEGACY_DIFFERENCES
+            elif source_revision == PHASE_1_REVISION:
+                expected_differences = _PHASE_1_DIFFERENCES
+            else:
+                expected_differences = _RELIABILITY_DIFFERENCES
             differences = _schema_differences(connection)
             if differences != expected_differences:
                 rendered_differences = ", ".join(sorted(differences)) or "unknown"
@@ -593,9 +659,11 @@ def prepare_database(
                 )
             _validate_sqlite_database(connection, schema_revision=source_revision)
             target_revision = None
-            action = (
-                "versioned_legacy" if source_revision == LEGACY_REVISION else "versioned_phase1"
-            )
+            action = {
+                LEGACY_REVISION: "versioned_legacy",
+                PHASE_1_REVISION: "versioned_phase1",
+                RELIABILITY_REVISION: "versioned_reliability",
+            }[source_revision]
         else:
             if not sqlite_locked:
                 raise SchemaPreparationError(
@@ -611,6 +679,10 @@ def prepare_database(
                 target_revision = PHASE_1_REVISION
                 action = "stamped_phase1"
                 source_revision = PHASE_1_REVISION
+            elif differences == _RELIABILITY_DIFFERENCES:
+                target_revision = RELIABILITY_REVISION
+                action = "stamped_reliability"
+                source_revision = RELIABILITY_REVISION
             elif differences == _LEGACY_DIFFERENCES:
                 target_revision = LEGACY_REVISION
                 action = "stamped_legacy"

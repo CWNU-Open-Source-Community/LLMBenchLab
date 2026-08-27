@@ -45,7 +45,7 @@ API 系统端点：
 make setup
 ```
 
-脚本只在 `.env` 不存在时复制 `.env.example`，按 lockfile 安装依赖，执行安全迁移 preflight，并将本地 SQLite 升级到 Alembic head。已有 `.env` 不会覆盖；`.env`、数据库、WAL/SHM 与自动收养备份都被 Git 忽略。
+脚本只在 `.env` 不存在时复制 `.env.example`，按 lockfile 安装依赖，创建或严格校验 `.secrets/credential-keys.json`，执行安全迁移 preflight，并将本地 SQLite 升级到 Alembic head。已有 `.env` 不会覆盖；即使旧 `.env` 没有新变量，API/Worker 也使用仓库根目录的绝对默认 keyring 路径。`.env`、keyring、数据库、WAL/SHM 与自动收养备份都被 Git 忽略。
 
 ### 3.2 启动 API、Worker 与前端
 
@@ -157,7 +157,7 @@ Base URL 支持以下两种形式：
 
 CLI 在发出 canary 前显示 Provider host、模型、计分题数、剩余 Run attempts 和最多 Chat Completion HTTP 尝试数，交互要求精确输入 `RUN`。canary 必须可解析为预期答案；若成功体明确返回不同于目标的模型名也会失败。上界包含每个逻辑调用最多 3 次 HTTP attempts，以及新 Run 的全部或恢复 Run 的剩余 execution attempts：`(缺失计分题数 × 剩余 Run attempts + 1 个 canary) × 3`。`--yes` 仅用于操作者明确批准的非交互环境。MMLU `official_cot` 默认 `temperature=0/max_tokens=4000`；其他配置默认 `temperature=0/max_tokens=1024`，共同默认 `top_p=1/seed=42/concurrency=1`，都可由命令参数覆盖并冻结到 Run。
 
-模型发现与 Chat 请求固定声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体最多读取 2 MiB，Chat 成功体最多读取 4 MiB、错误体最多读取 64 KiB。成功内容、raw usage 的对象键/字符串值、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，会在进入 Runner/快照/Response 边界前替换为 `[REDACTED]`。这些控制不替代 Provider 账单检查、内容访问控制或通用 DLP。
+模型发现与 Chat 请求固定声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体最多读取 2 MiB，Chat 成功体最多读取 4 MiB、错误体最多读取 64 KiB。Provider 返回证据会递归检查成功内容、raw usage 的对象键/全部 JSON 标量、request ID、返回模型名、system fingerprint 和 finish reason；当前 Key 的精确回显会在进入 Runner/快照/Response 边界前替换为 `[REDACTED]`。这些控制不扫描无关 Benchmark/Question 内容，也不替代 Provider 账单检查、内容访问控制或通用 DLP。
 
 API URL 与 Key 已足以在 `/models` 只返回一个可用 ID 时选择模型；若返回多个模型，仍需提供 `--model`，避免猜测付费目标。`--input-price-per-million`/`--output-price-per-million` 是可选成本估算输入；不提供价格或 Provider usage 时报告成本为 unknown，而不是虚假 `0`。
 
@@ -227,6 +227,7 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_WORKER_RETRY_BACKOFF_CAP_SECONDS` | `30` | 重试退避上限 |
 | `LLMBENCHLAB_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | SIGTERM 后等待活动 Run 的应用 grace |
 | `LLMBENCHLAB_MOCK_GENERATION_DELAY_SECONDS` | `0` | 只用于确定性 Mock 故障测试；不改变报告 latency 或协议评分 |
+| `LLMBENCHLAB_CREDENTIAL_KEYS_FILE` | 仓库根 `.secrets/credential-keys.json` | API 加密、Worker 解密 Web Key 的共享 keyring；空值会关闭 stored 模式并 fail closed |
 
 配置校验要求 `heartbeat * 2 <= lease`，退避 base 不得大于 cap。不要为了让超时测试通过而把生产时间参数直接套到验收脚本；`phase2_acceptance.py` 使用隔离的短租约配置。
 
@@ -258,12 +259,15 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_COMPOSE_DATABASE_POOL_TIMEOUT_SECONDS` | `2` | 容器连接池 timeout |
 | `LLMBENCHLAB_COMPOSE_READINESS_DATABASE_TIMEOUT_SECONDS` | `2` | 容器 readiness 等待上限 |
 | `LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS` | `0` | 可靠性测试专用 Mock delay |
+| `LLMBENCHLAB_COMPOSE_CREDENTIAL_KEYS_FILE` | `.secrets/credential-keys.json` | Compose 只读挂载给 API/Worker 的宿主 keyring |
 
 ### 4.4 OpenAI-compatible Key
 
-模型表只保存环境变量名，例如 `LOCAL_COMPAT_API_KEY`。真正调用 Adapter 的是 Worker，因此秘密必须注入 Worker 进程；只给 API 注入不会生效。`make dev` 会让三个本地进程继承同一 `.env`，但真实部署应按进程最小权限拆分。
+Web 服务路径让用户在 Models 表单直接输入真实 Provider Key。API 将它作为 write-only 字段接收，用共享 keyring 做 AES-256-GCM 加密，并只把认证密文写入 `model_credentials`；Worker 读取同一 keyring 解密。API 不把凭据流中的 Key 或 Provider 回显复制进 Model GET/list、Run 的 model snapshot、队列和报告证据，也不返回密文、nonce 或 key id；这不排除无关用户数据的独立字面巧合。keyring 必须与数据库分开备份；数据库与 keyring 同时泄漏时，Provider Key 仍可被解密。
 
-Compose 默认不注入任何 Provider Key。用户主动手工验证时使用未提交 override 或 secret 系统，只给 Worker 注入选定变量：
+Compose 不把 Provider Key 放入环境变量；它只把同一个 keyring secret 挂载给 API 与 Worker。`make setup`/`make docker-up` 会创建或验证宿主 keyring，既有普通文件会收紧到 `0600`，符号链接、目录、超大或无效 JSON 会被拒绝。切勿提交、打印或把 keyring 与数据库备份放在同一无保护位置。
+
+旧 `api_key_env` Model 与可信本地 CLI 仍兼容。只有使用旧模式时，才应通过未提交 override 或 secret 系统把选定环境变量只注入 Worker：
 
 ```yaml
 services:
@@ -272,9 +276,9 @@ services:
       LOCAL_COMPAT_API_KEY: ${LOCAL_COMPAT_API_KEY:?set_in_controlled_shell}
 ```
 
-不要提交 override，不要把展开后的 `docker compose config` 发到公共日志，也不要把 Key 写入 `VITE_*`、Model API JSON、数据库或命令行。自动化、CI、Smoke 与 Phase 2 验收禁止调用真实 Provider。
+不要提交 override，不要把展开后的 `docker compose config` 发到公共日志，也不要把 Key 写入 `VITE_*`、URL、命令行或日志。Web Key 会有意进入一次本机 Model POST/PATCH 请求体，但不会以明文落库。自动化、CI、Smoke 与 Phase 2 验收禁止调用真实 Provider。
 
-可信本地 CLI 默认读取 `LLMBENCHLAB_REAL_API_KEY`，或读取 `--api-key-env` 指定的变量/隐藏输入；值只在该 CLI/Runner 进程中暂存，数据库仍只保存变量名。环境变量和进程内存可被同权限进程读取，因此这不是 OS 级 secret isolation。`prepare` 与 `report` 不需要 Key，CI 也不得给它们注入真实凭据。
+可信本地 CLI 默认读取 `LLMBENCHLAB_REAL_API_KEY`，或读取 `--api-key-env` 指定的变量/隐藏输入；这条 legacy CLI 路径仍只在数据库保存变量名。环境变量和进程内存可被同权限进程读取，因此这不是 OS 级 secret isolation。`prepare` 与 `report` 不需要 Key，CI 也不得给它们注入真实凭据。
 
 ## 5. 数据库、队列与 Alembic
 
@@ -293,6 +297,7 @@ Redis 开启 AOF (`appendfsync everysec`) 只改善通知持久性，不是备�
 - `20260824_0000`：可执行 legacy schema。
 - `20260824_0001`：Phase 1 schema、模型约束与题目 position。
 - `20260825_0002`：attempt、租约、心跳、backoff、queue audit 与 dead-letter 字段/约束/索引。
+- `20260827_0003`：Model credential source、AES-GCM `model_credentials` 与 Web write-only Key。
 
 本地 SQLite 更新：
 
@@ -310,13 +315,13 @@ python -m app.db.prepare_migrations && alembic upgrade head && alembic check
 
 `api` 与 `worker` 必须等待 migrate exit 0，然后仅执行 head check。不要把 Alembic 命令加回 API/Worker entrypoint，也不要同时运行多个 migration owner。
 
-`0002 -> 0001` downgrade 在发现 `pending` 或 `running` Run 时拒绝；它会删除可靠性元数据但保留五类核心实体与协议证据。它不是 PostgreSQL→SQLite 反向同步，也不恢复 Phase 1 进程内 Runner。
+`0003 -> 0002` downgrade 只要 `model_credentials` 存在任意行就会在 DDL 前拒绝，避免静默丢失 Provider Key；必须先把所有 stored Model 切换为环境变量/Mock，或保留新版本。`0002 -> 0001` downgrade 在发现 `pending` 或 `running` Run 时拒绝；它会删除可靠性元数据但保留核心实体与协议证据。它不是 PostgreSQL→SQLite 反向同步，也不恢复 Phase 1 进程内 Runner。
 
 ### 5.3 备份与恢复证据边界
 
 仓库当前没有自动 PostgreSQL 备份、PITR、跨主机灾难恢复或经过记录的生产恢复演练。升级、导入、truncate、volume 删除或 schema downgrade 前，操作方必须按自己的 PostgreSQL/SQLite 平台创建并验证备份；不能把“volume 存在”或本地导入测试写成恢复演练通过。
 
-SQLite 自动收养生成的 `.bak` 只保护该 preflight 窗口，不是长期备份策略。Redis volume/AOF 也不是任务事实备份。
+SQLite 自动收养生成的 `.bak` 只保护该 preflight 窗口，不是长期备份策略。Redis volume/AOF 也不是任务事实备份。备份含 `model_credentials` 的数据库时必须同时安排独立 keyring 备份与恢复验证；只有数据库没有可用 keyring 时，密文不可恢复，只有 keyring 没有数据库也无凭据记录。二者应分开存放并使用不同访问控制。
 
 ## 6. Docker Compose 六服务拓扑
 
@@ -327,9 +332,9 @@ Compose 定义六个 service，其中五个常驻，`migrate` 为一次性任务
 | `postgres` | PostgreSQL 16，任务和评测唯一事实来源 | `pg_isready`；`postgres-data`；无 host port |
 | `redis` | Redis 7 Streams 通知层，AOF everysec | `redis-cli ping`；`redis-data`；无 host port |
 | `migrate` | 唯一 Alembic preflight/upgrade/check owner | 等 PostgreSQL healthy；成功后 exit 0，不常驻 |
-| `api` | FastAPI CRUD、Run commit 与 best-effort publish | 等 migrate 成功；启动只 head check；`/ready` 为容器 health；loopback API port |
-| `worker` | 独立租约 Worker、DB reconciliation、Redis consume/ACK | 等 migrate 成功；启动只 head check；dependency probe；容器 stop grace 45 秒 |
-| `frontend` | Nginx 静态站与 `/api/` 同源代理 | 等 API healthy；loopback frontend port |
+| `api` | FastAPI CRUD、write-only Key 加密、Run commit 与 best-effort publish | 等 migrate 成功；只读挂载 keyring；启动只 head check；`/ready` 为容器 health；loopback API port |
+| `worker` | 独立租约 Worker、stored Key 解密、DB reconciliation、Redis consume/ACK | 等 migrate 成功；只读挂载同一 keyring；启动只 head check；dependency probe；容器 stop grace 45 秒 |
+| `frontend` | Nginx 静态站与 `/api/` 同源代理 | 等 API healthy；loopback frontend port；关闭 API request buffering，避免 Key body 被 Nginx 临时落盘 |
 
 ### 6.1 启动、检查和停止
 
@@ -383,14 +388,14 @@ Redis 不可用时：
 
 ## 7. SQLite→PostgreSQL 单向导入 runbook
 
-导入器是显式、一次性的五表复制，不会自动在应用启动时运行，也不会反向同步。
+导入器是显式、一次性的六表复制，不会自动在应用启动时运行，也不会反向同步。第六张 `model_credentials` 含认证密文；工具输出仍只包含行数与摘要，但源、目标和数据库备份必须作为敏感数据保护。
 
 ### 7.1 前置条件
 
 1. 停止源 SQLite 的 API、Worker 和所有写进程；同时停止目标 API/Worker 和用户入口。导入器只能保证自身连接只读，不能证明外部写进程已停止。
 2. 按组织要求创建并独立验证源与目标备份。仓库没有生产备份/恢复演练，不得把本 runbook 描述为已验证灾难恢复。
 3. 源必须是文件型 SQLite、处于当前 Alembic head；不能有 `pending` 或 `running` Run。
-4. 目标必须是当前 head 的 PostgreSQL，五张核心表必须为空。先由唯一 migrate owner 完成 schema，再保持 API/Worker 停止。
+4. 目标必须是当前 head 的 PostgreSQL，六张核心表必须为空。先由唯一 migrate owner 完成 schema，再保持 API/Worker 停止。
 5. 在受信环境运行；源可能包含题目、参考答案、原始模型输出和错误内容。保护源文件、终端输出和摘要日志。
 
 导入器以 SQLite URI `mode=ro` 打开源、设置 `PRAGMA query_only=ON`，在显式读事务内执行 `integrity_check`、`foreign_key_check`、head/no-active 检查与 snapshot。任何一项失败都会在接触目标数据前停止。
@@ -445,12 +450,12 @@ docker compose run --rm \
 目标流程在一个 PostgreSQL 事务内：
 
 1. 获取固定 transaction advisory lock，串行化两个 importer。
-2. 检查 head，随后对 `alembic_version` 与五张核心表获取 `ACCESS EXCLUSIVE` lock，再次检查 head 与空表。
-3. 按依赖顺序复制 `models`、`benchmarks`、`questions`、`evaluation_runs`、`evaluation_responses`。
+2. 检查 head，随后对 `alembic_version` 与六张核心表获取 `ACCESS EXCLUSIVE` lock，再次检查 head 与空表。
+3. 按依赖顺序复制 `models`、`model_credentials`、`benchmarks`、`questions`、`evaluation_runs`、`evaluation_responses`。
 4. 提交前比较行数、主键集合 SHA-256 与 canonical row SHA-256；失败整体 rollback。
 5. COMMIT 成功确认后，在单个 `REPEATABLE READ`、`READ ONLY` 事务中做 post-commit snapshot。
 
-成功输出三组、每组五行的 content-free 摘要：`phase=source`、`phase=precommit_target`、`phase=postcommit_target`。每张表的 `row_count`、`pk_set_digest` 和 `canonical_row_digest` 必须三阶段一致。摘要不打印行内容或 URL，但行数/hash 仍是敏感运维元数据。
+成功输出三组、每组六行的 content-free 摘要：`phase=source`、`phase=precommit_target`、`phase=postcommit_target`。每张表的 `row_count`、`pk_set_digest` 和 `canonical_row_digest` 必须三阶段一致。摘要不打印行内容、密文或 URL，但行数/hash 仍是敏感运维元数据。导入后还必须把与源库匹配的 keyring 通过目标环境的 secret 流程单独交付给 API/Worker；导入器不会复制 keyring 文件。
 
 ### 7.5 Exit code 与恢复动作
 
@@ -458,10 +463,10 @@ docker compose run --rm \
 | --- | --- | --- | --- |
 | `0` | completed and reconciled | COMMIT 已确认，post-commit 摘要匹配 | 保存脱敏摘要；检查 head/ready 后再启动 API/Worker |
 | `2` | pre-commit failure | preflight/copy/提交前对账失败；目标事务若已开始会 rollback | 保留错误与源；确认目标仍为空并修复原因后，才考虑重新执行 |
-| `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 | 立即停止；保持应用停机，检查目标五表和摘要；禁止盲目重试、truncate 或覆盖 |
+| `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 | 立即停止；保持应用停机，检查目标六表和摘要；禁止盲目重试、truncate 或覆盖 |
 | `3` | `committed_but_verification_failed` | COMMIT 已确认，但 post-commit snapshot/比较或摘要输出未完成 | 将目标视为已提交；保持只读检查并补做对账；禁止重新导入或清空 |
 
-exit 4 时，只有在独立检查证明五表仍为空后才可按新变更重新运行；若非空，按“可能已完整提交”保护现场。exit 3 已明确提交，不得把它当成 rollback。任何不确定状态都应升级给数据库负责人，而不是靠重复命令猜测。
+exit 4 时，只有在独立检查证明六表仍为空后才可按新变更重新运行；若非空，按“可能已完整提交”保护现场。exit 3 已明确提交，不得把它当成 rollback。任何不确定状态都应升级给数据库负责人，而不是靠重复命令猜测。
 
 ### 7.6 导入后与回退
 
@@ -500,7 +505,7 @@ probe 检查数据库连接、Alembic head 与队列能力：DB/head 或队列�
 
 ### 8.3 结构化日志
 
-LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、request/correlation ID、run/question、worker、attempt、lease token、message ID、结果和异常类型。它不应记录 Authorization、DSN/Redis URL、请求正文、Provider 请求/响应正文、完整题目或原始模型输出。API 接受安全的 `X-Request-ID`；Run correlation 默认稳定使用 Run ID。
+LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、request/correlation ID、run/question、worker、attempt、lease token、message ID、结果和异常类型。它不应记录 Authorization、DSN/Redis URL、请求正文、Provider 请求/响应正文、完整题目或原始模型输出。API 始终生成服务端 UUID request ID，不信任或回显客户端 `X-Request-ID`；Run correlation 默认稳定使用 Run ID。
 
 这个保证只覆盖 LLMBenchLab 配置的应用 logger。Uvicorn/error/access handler 仍可能使用原生日志格式；不得把当前实现描述为所有容器日志统一 JSON。秘密也不能放入 URL，因为反向代理/access logger 可能记录 URL。
 
@@ -534,7 +539,7 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 
 ### 9.3 Schema/code 回滚
 
-代码回滚必须与当前 schema、API 和 `protocol_version` 兼容。回退 `0002` 前必须停止 API/Worker 并确认没有 `pending/running`；downgrade 删除的租约/attempt 元数据不可逆，必须先接受其数据损失语义。
+代码回滚必须与当前 schema、API 和 `protocol_version` 兼容。回退 `0003` 前必须停止 API/Worker，并确认 `model_credentials` 为空；downgrade 会拒绝替你删除任何 stored Key。回退 `0002` 前必须确认没有 `pending/running`；downgrade 删除的租约/attempt 元数据不可逆，必须先接受其数据损失语义。
 
 不同 protocol version、Benchmark version 或 dataset hash 不能因回滚无提示混排。优先使用经过平台验证的完整备份恢复，而不是盲目 downgrade；本仓库当前没有 PostgreSQL→SQLite 自动回退或生产恢复演练。
 
@@ -547,7 +552,7 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 | PostgreSQL | 单实例、named volume、迁移/故障测试 | 托管/HA、TLS、最小权限角色、加密、备份/PITR、RPO/RTO 与真实恢复演练 |
 | Redis | 单实例 AOF、非权威通知层 | 认证/TLS、HA/容量/保留策略、监控；继续保持 DB 事实来源 |
 | Worker | 租约/心跳/fencing/重试/取消，默认单 Worker | 全局/Provider 限流、预算、完整背压、公平调度、滚动排空与容量规划 |
-| Secrets | 环境变量名入库，值只在 Worker 运行时读取 | Secret manager、短期凭据、轮换、每进程最小注入 |
+| Secrets | Web write-only；AES-GCM 密文入库；API/Worker 共享独立 keyring；legacy env 可用 | 身份/对象授权、KMS/HSM、短期凭据、批量重加密、轮换审计与每进程最小权限 |
 | SSRF/数据外发 | 远端 HTTPS、HTTP 仅 loopback、禁重定向与有界正文 | allowlist、DNS/IP 验证、出站代理、元数据阻断、外发审批 |
 | 可观测性 | 应用 JSON 日志、组件健康、DB gauges、初次 canary 快照 | 统一运行时日志、历史 metrics/traces、告警、resume/逐题 Provider 审计、SLO |
 | 数据保护 | 显式单向 importer 与 hash 对账 | 保留/删除策略、静态加密、备份/PITR、灾备演练、受控导出 |

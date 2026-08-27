@@ -199,7 +199,7 @@
 | ID | 状态 | 已交付 / 剩余范围 |
 | --- | --- | --- |
 | P2-01 一致性与容量设计 | 部分完成 | ADR-0005 已固定数据库事实来源、at-least-once、租约/fencing、恢复与回滚语义；正式 SLO、容量模型和测量基线未完成 |
-| P2-02 PostgreSQL 迁移 | 可靠基础已交付 | `0002` 双方言 revision、真实 PostgreSQL 往返/check、只读源/空目标/单事务 SQLite 导入与 count/PK/content digest 对账已验证；不提供自动反向回迁 |
+| P2-02 PostgreSQL 迁移 | 可靠基础已交付 | `0002` 可靠执行字段与 `0003` Web 加密凭据均有双数据库方言 revision；真实 PostgreSQL 往返/check、只读源/空目标/单事务 SQLite 六表导入与 count/PK/content digest/credential binary 对账已验证；不提供自动反向回迁 |
 | P2-03 Queue/Worker | 可靠基础已交付 | Redis Streams 通知、独立 Worker、数据库扫描、租约、心跳、fencing 和重复消息 no-op 已交付 |
 | P2-04 生命周期可靠性 | 可靠基础已交付 | 有限重试/退避、取消、过期恢复、幂等 Response、dead-letter 和终态聚合已交付；fail-attempt 与 expired-lease dead-letter 都先聚合已持久化证据，Provider 外部调用仍不保证 exactly-once |
 | P2-05 并发治理 | 未完成 | Provider 速率限制、预算硬上限、完整背压和公平调度均未完成；不得据此扩容或宣称成本可控 |
@@ -211,7 +211,7 @@
 - `delivered`：API 执行中重启和实际租约 owner Worker `SIGKILL` 后，未完成 Mock Run 可恢复，已有 Response ID 保持唯一。
 - `delivered`：真实 PostgreSQL 并发领取只有一个有效 lease；自然过期后由递增 fencing token 接管，陈旧 owner 写入被拒绝。
 - `delivered/partial`：pending/running 取消有真实 Compose 证据；有限重试、超时和 dead-letter 有自动化状态机/Runner 证据，但尚未把所有失败组合都纳入完整生产式故障演练。
-- `delivered`：SQLite→PostgreSQL 五表导入、提交前回滚、提交结果不确定、提交后验证失败、双源竞争和 PostgreSQL `head -> 0001 -> head` 已在真实 PostgreSQL 16 验证。
+- `delivered`：SQLite→PostgreSQL 六表导入（含 encrypted credential binary）、提交前回滚、提交结果不确定、提交后验证失败、双源竞争和 PostgreSQL `head -> 0001 -> head` 已在真实 PostgreSQL 16 验证。
 - `not_met`：Provider 限流、预算、完整背压和公平调度尚未实现。
 - `partial`：应用日志可关联请求、Run 和 Question，数据库 gauges 可见当前队列事实，首次 canary 证据随 Run 快照固化；resume canary 独立事件、每题 transport request ID/model/fingerprint、历史 counter/延迟、完整任务审计、全日志源覆盖和 Worker 主循环 liveness 尚未实现。
 - `delivered`：既有 API、离线 Mock Smoke 和 `llmbenchlab-protocol-v1` 评分/聚合回归继续通过，没有调用真实 Provider。

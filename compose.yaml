@@ -10,6 +10,7 @@ x-app-environment: &app-environment
   DATABASE_URL: ${LLMBENCHLAB_COMPOSE_DATABASE_URL:-postgresql+psycopg://llmbenchlab:llmbenchlab-local-only@postgres:5432/llmbenchlab?connect_timeout=2}
   REDIS_URL: ${LLMBENCHLAB_COMPOSE_REDIS_URL:-redis://redis:6379/0}
   CORS_ORIGINS: http://localhost:${FRONTEND_PORT:-8080},http://127.0.0.1:${FRONTEND_PORT:-8080}
+  LLMBENCHLAB_TRUSTED_HOSTS: localhost,127.0.0.1
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LLMBENCHLAB_WORKER_LEASE_SECONDS: ${LLMBENCHLAB_COMPOSE_WORKER_LEASE_SECONDS:-30}
   LLMBENCHLAB_WORKER_HEARTBEAT_SECONDS: ${LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS:-10}
@@ -70,7 +71,11 @@ services:
   api:
     <<: *backend-image
     init: true
-    environment: *app-environment
+    environment:
+      <<: *app-environment
+      LLMBENCHLAB_CREDENTIAL_KEYS_FILE: /run/secrets/credential-keys
+    secrets:
+      - credential-keys
     command:
       - uvicorn
       - app.main:app
@@ -106,7 +111,10 @@ services:
     init: true
     environment:
       <<: *app-environment
+      LLMBENCHLAB_CREDENTIAL_KEYS_FILE: /run/secrets/credential-keys
       LLMBENCHLAB_MOCK_GENERATION_DELAY_SECONDS: ${LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS:-0}
+    secrets:
+      - credential-keys
     command: ["python", "-m", "app.worker"]
     depends_on:
       migrate:
@@ -134,6 +142,10 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+
+secrets:
+  credential-keys:
+    file: ${LLMBENCHLAB_COMPOSE_CREDENTIAL_KEYS_FILE:-.secrets/credential-keys.json}
 
 volumes:
   postgres-data:

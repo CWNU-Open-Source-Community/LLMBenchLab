@@ -19,9 +19,9 @@
 ## 已完成功能
 
 - 完整的 Charter、Requirements、Architecture、Benchmark Protocol、Dataset Format、Roadmap、Phase 0–6、ADR、治理规则和开源协作文件。
-- FastAPI、SQLAlchemy 2.x 与 Alembic 后端；PostgreSQL 是 Compose/共享部署目标和任务事实来源，SQLite 保留单 Worker 本地兼容；五个核心实体、UTC 时间、约束、索引，以及 `0000 -> 0001 -> 0002` 线性迁移链。
+- FastAPI、SQLAlchemy 2.x 与 Alembic 后端；PostgreSQL 是 Compose/共享部署目标和任务事实来源，SQLite 保留单 Worker 本地兼容；六个核心实体、UTC 时间、约束、索引，以及 `0000 -> 0001 -> 0002 -> 0003` 线性迁移链。
 - Alembic 是唯一 schema owner；Compose 只允许一次性 `migrate` 服务执行迁移，API/Worker 只检查 head。setup/migrate 仍可安全收养已知未版本化 SQLite，未知漂移在 stamp 前被拒绝。
-- Model CRUD 与 Mock/OpenAI-compatible Adapter；Key 只通过 `api_key_env` 在运行时读取。远程 Provider 只允许 HTTPS，HTTP 只允许 loopback；模型发现与 Chat 都只接受 identity 编码，发现体上限 2 MiB，Chat 成功体上限 4 MiB、错误体上限 64 KiB，并在持久化前从成功内容、raw usage、Provider request ID、返回模型名、system fingerprint 和 finish reason 中精确替换当前 Key。
+- Model CRUD 与 Mock/OpenAI-compatible Adapter；Web/API 可通过只写 `api_key` 直接接收 Provider Key，并在一模型一行的 `model_credentials` 中以 AES-256-GCM 保存认证密文。API 不把凭据流中的 Key 复制到公开 `ModelRead`/Run-model snapshot，也不返回 nonce、ciphertext 或 key ID；凭据状态由 `credential_source` 与仅表示 stored ciphertext 的 `has_api_key` 表达，既有 `api_key_env` 名称保持 API 兼容但 Web 不展示。可信本地 CLI 环境/隐藏输入路径继续兼容，API 与 Worker 必须共享独立于数据库的部署 keyring。远程 Provider 只允许 HTTPS，HTTP 只允许 loopback；模型发现与 Chat 都只接受 identity 编码，发现体上限 2 MiB，Chat 成功体上限 4 MiB、错误体上限 64 KiB，并在持久化前递归检查 Provider 返回证据的对象键/JSON 标量，将当前 Key 的精确回显替换为 `[REDACTED]`。该保证不扫描无关 Benchmark/Question 的独立字面巧合。
 - 受限 ZIP/目录 Dataset Loader、严格 Schema/JSONL 校验、路径与压缩炸弹防护、稳定 SHA-256，以及 15 道原创 `demo-general`；资源上限现为 20,000 题、128 MiB `questions.jsonl` 和 130 MiB ZIP。
 - MMLU-Pro test 与 GPQA-Diamond 的固定 revision/SHA 下载、验证缓存、确定性转换和可复现 ZIP；不在仓库提交第三方题目。MMLU-Pro 支持 `direct` 与 category 5-shot `official_cot`，GPQA 使用固定 seed 逐题重排和 `zero-shot-cot-answer-line-v1`。
 - 可信本地 `llmbenchlab-evaluate` CLI：`prepare/run/resume/report`，支持 `/models` 发现、最小 canary、隐藏输入/环境变量 Key、题数与 HTTP attempts 上界确认、缺题恢复和终态报告。发现结果若把当前 Key 反射为模型 ID 会失败；canary 若返回不同于请求目标的模型也会失败；首次 Run 的 discovery/canary 证据会固化进 Run 快照。
@@ -30,9 +30,9 @@
 - Phase 2 可靠执行基础：API 只提交数据库事实并 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库扫描/领取、租约、心跳、单调 fencing token、逐题幂等和有限 attempt 执行 Run。大 Run 的快照加载已移出事件循环，加载期间租约心跳继续运行。
 - 数据库裁决取消、重试/退避、租约过期接管、终态聚合和 dead-letter；fail-attempt 与过期租约两条 dead-letter 路径都先从持久化 Response 聚合证据。Redis 是 at-least-once 通知层，不是状态数据库，通知丢失时可由数据库对账恢复。
 - 22 个版本化 `/api/v1` 操作：liveness、health、readiness、任务 gauges、服务信息、模型、Benchmark、Run、逐题 Response、Leaderboard 与 Dashboard Metrics；OpenAPI 可用。
-- React 中文界面：Dashboard、Models、Benchmarks、New Run、Run Detail、Leaderboard，含轮询、筛选、Demo 标识和响应式错误/空/加载状态。
+- React 中文界面：Dashboard、Models、Benchmarks、New Run、Run Detail、Leaderboard，含轮询、筛选、Demo 标识和响应式错误/空/加载状态。Models 对 OpenAI-compatible 提供 password 类型 Key 输入：创建时必填，编辑留空保留同 origin 的 stored/legacy environment 凭据，页面从不回填或展示原文；提交开始、关闭、切换 Mock 与 unmount 都会清空浏览器状态。
 - LLMBenchLab 应用 JSON 日志、请求/Run/Question correlation ID、`/live`、`/health`、`/ready`、数据库派生任务 gauges，以及数据库/队列依赖能力 Worker probe。
-- PostgreSQL/SQLite `0002` migration 往返；显式 SQLite→PostgreSQL 单向导入器以只读源、空目标、单目标事务和五表 count/PK/content digest 做对账，并区分提交前回滚、COMMIT 结果未知与提交后验证失败。
+- PostgreSQL/SQLite migration 已扩展到 `0003`；显式 SQLite→PostgreSQL 单向导入器以只读源、空目标、单目标事务和六表 count/PK/content digest 对账（包括 `model_credentials`），并区分提交前回滚、COMMIT 结果未知与提交后验证失败。数据库迁移不会复制部署 keyring，含 stored credential 的目标必须另行获得匹配 keyring 才能解密。
 - 统一 Make 命令、setup/dev/smoke/故障验收脚本、锁文件和 GitHub Actions；六服务本地 Compose 由 `postgres`、`redis`、一次性 `migrate`、`api`、`worker`、`frontend` 组成，API/frontend 只绑定 loopback，PostgreSQL/Redis 不发布宿主端口。
 - 项目已发布到 CWNU Open Source Community 组织；初始 `main` commit `d2b9bc8` 的远程 CI 四个 job 全部成功，包括真实 PostgreSQL/Redis integration 与 Compose 8/8 故障验收。
 
@@ -42,6 +42,7 @@
 - Phase 2 可靠任务执行基础已按 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 交付并经过真实 PostgreSQL/Redis 与进程故障验证；实现、验证和阶段边界记录在 [当前工作日志](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)。
 - Phase 2 总状态仍为 `in_progress`：P2-05 尚未实施；P2-06 和 P2-07 只有部分交付，不能称为完整可观测、生产 HA 或容量已验证。
 - [ADR-0006](decisions/ADR-0006-local-real-provider-evaluation.md) 按用户优先级批准可信本地正式数据/真实 Provider 提前切片；本地代码、固定数据源下载和 Mock-only 回归已通过，真实 Provider 调用留给持有 Key 的用户显式执行。该切片没有补齐 P2-05，也不代表 Phase 3 完成。
+- [ADR-0007](decisions/ADR-0007-web-provider-credentials.md) 已按用户明确要求接受 Web 直接输入 Key：当前工作树包含 write-only API/UI、AES-GCM `model_credentials`、API/Worker 共享 keyring、legacy environment 兼容、origin 变更重输 Key 和 active-Run 变更禁令。该切片仍在执行最终完整门禁，尚未形成新的阶段 commit/push/精确 SHA CI，也没有调用真实 Provider；它不改变 Phase 2 的 `in_progress` 状态。
 - 当前分支 `codex/complete-evaluation-workflow` 的实现、独立终审和完整本地门禁已通过；实现 commit `0e62a371b9dd7bd819359a4a2b16ff8d5faa3a0d` 已推送并与远端一致，但工作流只由 PR 或 `main` push 触发，该 SHA 当前没有 Actions run。创建 PR 需用户明确授权，远程绿色前保持任务 `in_progress`。
 
 ## 尚未完成的功能
@@ -63,9 +64,9 @@
 - 取消和失租会阻止后续题目与陈旧 Worker 写入，但已经发出的 Provider 请求可能继续至响应或超时。
 - Redis 故障会让 API readiness 降级并增加调度延迟；数据库可继续提交/对账，但这不是 Redis 高可用保证。当前本地 Redis 无 ACL/TLS，只能位于隔离网络。
 - Worker probe 只检查数据库/head/队列能力，不证明 Worker 主循环仍在领取、心跳或推进任务。API readiness 的 `asyncio.to_thread` 超时也不会取消底层同步数据库调用，最终上界取决于驱动/连接池 timeout。
-- SQLite→PostgreSQL importer 会复制完整敏感评测内容且只支持空目标的单向导入；退出码 3/4 禁止盲目重试，工具不提供 PostgreSQL→SQLite 自动回迁。
+- SQLite→PostgreSQL importer 会复制完整敏感评测内容和 `model_credentials` 认证密文，且只支持空目标的单向导入；退出码 3/4 禁止盲目重试，工具不提供 PostgreSQL→SQLite 自动回迁。keyring 不随数据库导入，必须作为独立部署秘密安全转移。
 - OpenAI-compatible `base_url` 已强制远程 HTTPS、仅允许 loopback 使用 HTTP，但仍没有目的地址 allowlist、DNS 重绑定防护或出站网络隔离，题目外发与 SSRF 风险未消除；MVP 不得直接暴露公网。
-- 没有认证、授权、TLS、限流、预算上限或生产级秘密管理；Compose 仅用于本地验证。
+- 没有认证、授权、TLS、限流、预算上限或生产 KMS；Web 凭据仅限可信 loopback 使用，Compose 仍只用于本地验证。部署 keyring 是新的高价值秘密；数据库与 keyring 同时泄漏时 stored Provider Key 可被解密。
 - 标准数据当前只有 MMLU-Pro 与 GPQA-Diamond，且仅通过可信本地 CLI 运行；没有 IFEval、代码沙箱、Judge、Arena 或 Agent 能力。
 - 可信本地 CLI 没有全局 RPM/TPM/金额硬上限，也无法阻止连接同一数据库的空闲常规 Worker 抢走新 `pending` Run；操作者必须先停止 API/Worker 并独占数据库。Provider 调用/计费仍不保证 exactly-once。
 - 当前本地 `uv` 环境选择 Python 3.14，测试出现 `pytest-asyncio` 与 FastAPI TestClient 的上游弃用警告，但无失败；CI 固定 Python 3.12。
@@ -75,14 +76,14 @@
 
 | 验证 | 结果 | 证据 |
 | --- | --- | --- |
-| 当前工作树后端测试 | 通过 | `make test`：`310 passed, 5 skipped`；skip 仅为未注入 DSN 的 5 项基础设施用例 |
-| 当前工作树真实基础设施集成 | 通过 | 临时 PostgreSQL 16/Redis 7：5 项 `integration` 全部通过、零 skip，精确容器已清理 |
-| 当前工作树前端测试/构建 | 通过 | ESLint/typecheck 通过；Vitest 4 files / 13 tests；Vite production build 成功（保留既有 647.22 kB chunk warning） |
-| 当前工作树离线 Smoke | 通过 | `1 passed, 5 deselected`，全程 Mock 与隔离 SQLite |
-| 当前工作树 Ruff/静态/迁移/Compose 检查 | 通过 | Ruff/format、Alembic check、`uv lock --check`、Compose config、本地 8/8 故障验收、diff check 与 47 文件 secret scan 均通过 |
+| Web 凭据后端全量 | 通过 | `make test`：`421 passed, 6 skipped`；6 个 skip 仅为未注入 DSN 的 PostgreSQL/Redis/importer integration |
+| Web 凭据真实基础设施 | 通过 | 临时 PostgreSQL 16/Redis 7：`6 passed, 0 skipped`，含 Model 行锁、Redis 重投递和六表 credential binary 导入；精确容器已清理 |
+| Web 凭据前端 | 通过 | ESLint/typecheck 通过；Vitest 5 files / `21 passed`；Vite production build 成功（保留既有约 649 kB chunk warning） |
+| Web 凭据离线 Smoke | 通过 | `1 passed, 5 deselected`，全程 Mock 与隔离 SQLite |
+| Web 凭据静态/迁移/Compose | 通过 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、更新后的 8/8 故障验收、diff check 与高置信 secret scan 均通过；evidence `llmbenchlab-p2-60f3ccdac113` 已确认无残留容器/卷/网络 |
 | 标准数据真实源验证 | 通过 | 固定源下载并转换完整 MMLU-Pro 两个 profile（各 12,032 题）与 GPQA-Diamond（198 题）；另以 CLI `prepare --limit 2` 验证普通入口和可复现归档 |
 | 真实 Provider | 未运行（有意） | 本任务没有 API Key；自动化只用 Mock/MockTransport，真实调用及费用必须由用户显式确认后发生 |
-| 远程精确 SHA CI | 阻塞于 PR 授权 | 实现 commit `0e62a371b9dd7bd819359a4a2b16ff8d5faa3a0d` 已推送，`gh run list --commit` 返回空列表；需用户明确授权创建 PR 才会触发四个 required job |
+| 远程精确 SHA CI | 待阶段 commit/push 后核验 | 本表只记录当前工作树本地事实；不得把本地通过替代为远程精确 SHA 结论 |
 
 所有模型相关自动化路径均使用 Mock、MockTransport 或 stub fetch；基础设施用例只连接隔离的 PostgreSQL/Redis，没有调用真实 Provider，也不要求 Provider API Key。详细命令和结果见工作日志与 [TESTING.md](TESTING.md)。
 
@@ -93,6 +94,8 @@
 [2026-08-25-phase-2-reliable-execution-foundation.md](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)（可靠执行基础实现、真实故障验证与剩余阶段边界）
 
 [2026-08-27-complete-evaluation-workflow.md](worklogs/2026-08-27-complete-evaluation-workflow.md)（固定正式数据、真实 API 本地 CLI、恢复、完整报告与本地验收）
+
+[2026-08-27-web-provider-credentials.md](worklogs/2026-08-27-web-provider-credentials.md)（Web 只写 Key、AES-GCM 凭据、共享 keyring、兼容迁移与安全门禁）
 
 ## 当前任务入口
 

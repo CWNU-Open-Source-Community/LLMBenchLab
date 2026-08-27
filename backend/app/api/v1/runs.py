@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import PaginationDep, SessionDep, SettingsDep
 from app.core.config import Settings
-from app.models import Benchmark, EvaluationResponse, EvaluationRun, Model, Question, RunStatus
+from app.db.model_lock import lock_model_for_update
+from app.models import Benchmark, EvaluationResponse, EvaluationRun, Question, RunStatus
 from app.runners.run_leases import CancelDisposition, RunLeaseRepository
 from app.schemas.evaluation_response import EvaluationResponseList
 from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, EvaluationRunRead
@@ -91,7 +92,9 @@ async def create_run(
     session: SessionDep,
     settings: SettingsDep,
 ) -> EvaluationRun:
-    model = session.get(Model, payload.model_id)
+    # Serialize Run creation with endpoint/credential mutation on every
+    # supported database so a pending Run cannot race its Provider guard.
+    model = lock_model_for_update(session, payload.model_id)
     if model is None:
         raise HTTPException(
             status_code=404, detail={"code": "model_not_found", "message": "Model was not found"}

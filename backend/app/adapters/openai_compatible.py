@@ -14,6 +14,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from pydantic import SecretStr
 
 from app.core.constants import (
     DEFAULT_CONNECT_TIMEOUT_SECONDS,
@@ -108,7 +109,17 @@ def _redact_json_secret(value: Any, secret: str) -> Any:
             ): _redact_json_secret(item, secret)
             for key, item in value.items()
         }
+    if value is None or isinstance(value, (bool, int, float)):
+        rendered = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
+        if secret in rendered:
+            return "[REDACTED]"
     return value
+
+
+def _safe_status_code(status_code: int, secret: str) -> int | None:
+    """Prevent an all-numeric credential from escaping through status metadata."""
+
+    return None if secret and secret in str(status_code) else status_code
 
 
 class OpenAICompatibleAdapter(ModelAdapter):
@@ -123,8 +134,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self,
         base_url: str,
         remote_model_name: str,
-        api_key_env: str,
+        api_key_env: str | None = None,
         *,
+        api_key: SecretStr | str | None = None,
         connect_timeout_seconds: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
         read_timeout_seconds: float = DEFAULT_READ_TIMEOUT_SECONDS,
         write_timeout_seconds: float = DEFAULT_WRITE_TIMEOUT_SECONDS,
@@ -137,11 +149,14 @@ class OpenAICompatibleAdapter(ModelAdapter):
     ) -> None:
         if not isinstance(base_url, str) or not isinstance(remote_model_name, str):
             raise ValueError("base_url and remote_model_name must be strings")
-        if not isinstance(api_key_env, str):
-            raise ValueError("api_key_env must be a string")
+        if api_key_env is not None and not isinstance(api_key_env, str):
+            raise ValueError("api_key_env must be a string or null")
+        if api_key is not None and not isinstance(api_key, (SecretStr, str)):
+            raise ValueError("api_key must be a secret string or null")
         self.base_url = _validated_base_url(base_url)
         self.remote_model_name = remote_model_name
         self.api_key_env = api_key_env
+        self._api_key = SecretStr(api_key) if isinstance(api_key, str) else api_key
         self.max_retries = max_retries
         self.retry_backoff_base_seconds = retry_backoff_base_seconds
         self.retry_backoff_cap_seconds = retry_backoff_cap_seconds
@@ -149,8 +164,10 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self._owns_client = client is None
         self._sleep = sleep or asyncio.sleep
 
-        if not self.base_url or not self.remote_model_name or not self.api_key_env:
-            raise ValueError("base_url, remote_model_name, and api_key_env are required")
+        if not self.base_url or not self.remote_model_name:
+            raise ValueError("base_url and remote_model_name are required")
+        if bool(self.api_key_env) == bool(self._api_key):
+            raise ValueError("exactly one of api_key_env or api_key is required")
         if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
             raise ValueError("max_retries must be a non-negative integer")
         numeric_settings = {
@@ -198,11 +215,19 @@ class OpenAICompatibleAdapter(ModelAdapter):
         messages: Sequence[Message],
         generation_config: GenerationConfig,
     ) -> ModelGenerationResult:
-        api_key = os.environ.get(self.api_key_env)
+        api_key = (
+            self._api_key.get_secret_value()
+            if self._api_key is not None
+            else os.environ.get(self.api_key_env or "")
+        )
         if not api_key:
+            if self._api_key is not None:
+                source = "stored API key"
+            else:
+                source = f"API key environment variable {self.api_key_env!r}"
             raise AdapterError(
                 "missing_api_key",
-                f"API key environment variable {self.api_key_env!r} is not set.",
+                f"{source} is not set.",
                 status_code=None,
             )
 
@@ -215,7 +240,11 @@ class OpenAICompatibleAdapter(ModelAdapter):
         started = time.perf_counter()
         client = self._client
         if client is None:
-            client = httpx.AsyncClient(timeout=self._timeout, follow_redirects=False)
+            client = httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=False,
+                trust_env=False,
+            )
             self._client = client
         for attempt in range(1, self.max_retries + 2):
             try:
@@ -232,7 +261,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                             "unsupported_provider_response_encoding",
                             "Upstream returned a compressed response despite the identity-only "
                             "request.",
-                            status_code=response.status_code,
+                            status_code=_safe_status_code(response.status_code, api_key),
                             attempts=attempt,
                         )
                     response_limit = (
@@ -247,8 +276,11 @@ class OpenAICompatibleAdapter(ModelAdapter):
             except _ResponseBodyTooLarge as exc:
                 raise AdapterError(
                     "provider_response_too_large",
-                    f"Upstream response exceeded the {exc.limit}-byte safety limit.",
-                    status_code=exc.status_code,
+                    sanitize_error_message(
+                        f"Upstream response exceeded the {exc.limit}-byte safety limit.",
+                        api_key,
+                    ),
+                    status_code=_safe_status_code(exc.status_code, api_key),
                     attempts=attempt,
                 ) from exc
             except httpx.TransportError as exc:
@@ -272,9 +304,12 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     continue
                 raise AdapterError(
                     error_type,
-                    f"Upstream returned HTTP {response.status_code}: {safe_detail}",
+                    sanitize_error_message(
+                        f"Upstream returned HTTP {response.status_code}: {safe_detail}",
+                        api_key,
+                    ),
                     retryable=retryable,
-                    status_code=response.status_code,
+                    status_code=_safe_status_code(response.status_code, api_key),
                     attempts=attempt,
                 )
 
@@ -294,6 +329,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         if self._owns_client and self._client is not None:
             await self._client.aclose()
             self._client = None
+        self._api_key = None
 
     def _build_payload(
         self,
@@ -431,7 +467,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream returned a non-JSON success response.",
-                status_code=response.status_code,
+                status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
             ) from exc
         try:
@@ -441,21 +477,21 @@ class OpenAICompatibleAdapter(ModelAdapter):
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream response did not contain choices[0].message.content.",
-                status_code=response.status_code,
+                status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
             ) from exc
         if not isinstance(content, str):
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream response content was not text.",
-                status_code=response.status_code,
+                status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
             )
         if not content.strip():
             raise AdapterError(
                 "empty_response",
                 "Upstream returned an empty model response.",
-                status_code=response.status_code,
+                status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
             )
         content = content.replace(api_key, "[REDACTED]")
@@ -466,8 +502,8 @@ class OpenAICompatibleAdapter(ModelAdapter):
             if isinstance(usage_obj, Mapping)
             else None
         )
-        input_tokens = OpenAICompatibleAdapter._usage_int(usage_obj, "prompt_tokens")
-        output_tokens = OpenAICompatibleAdapter._usage_int(usage_obj, "completion_tokens")
+        input_tokens = OpenAICompatibleAdapter._usage_int(raw_usage, "prompt_tokens")
+        output_tokens = OpenAICompatibleAdapter._usage_int(raw_usage, "completion_tokens")
         provider_request_id = body.get("id") if isinstance(body, Mapping) else None
         if provider_request_id is None:
             provider_request_id = response.headers.get("x-request-id") or response.headers.get(

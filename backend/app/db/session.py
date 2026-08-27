@@ -31,7 +31,11 @@ def create_database_engine(
 
     _ensure_sqlite_parent(database_url)
     url = make_url(database_url)
-    kwargs: dict[str, Any] = {"echo": echo, "pool_pre_ping": True}
+    kwargs: dict[str, Any] = {
+        "echo": echo,
+        "hide_parameters": True,
+        "pool_pre_ping": True,
+    }
     if url.get_backend_name() == "sqlite":
         kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
         if not url.database or url.database == ":memory:":

@@ -34,7 +34,7 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - **幂等与恢复**：同一 Run/Question 只有一条计分证据；租约心跳、有限 attempt、退避、取消、过期接管和 dead-letter 都由数据库裁决，Redis 不是状态数据库。
 - **可复现记录**：持久化模型参数、Prompt、Benchmark Hash、协议版本、代码 commit（可用时）、raw response、parsed answer、参考答案快照和逐题评分。
 - **六个前端页面**：Dashboard、Models、Benchmarks、New Run、Run Detail 和 Leaderboard，含加载、空数据、错误状态与响应式布局。
-- **秘密最小化**：数据库和 API 只保存/返回 `api_key_env` 的变量名；成功回答、raw usage、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，会在进入 Runner/持久化前替换为 `[REDACTED]`。
+- **Web 只写凭据**：用户可在 Models 表单直接粘贴 API Key；API 不把凭据流中的原值复制到公开 Model/Run-model 字段，数据库只保存由独立 keyring 加密的 AES-GCM 密文。旧 `api_key_env` 模型仍兼容；Provider 返回证据会递归检查对象键/JSON 标量，当前 Key 的精确回显会在进入 Runner/持久化前替换为 `[REDACTED]`。这不是对无关 Benchmark/Question 内容的全局字面扫描。
 - **开发交付完整**：Alembic、Ruff、pytest、ESLint、TypeScript、Vitest、Vite production build、GitHub Actions、Makefile，以及 PostgreSQL、Redis、API、Worker、frontend 和一次性 migrate 组成的 Docker Compose。
 
 ## 产品截图
@@ -56,18 +56,20 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 
 ```mermaid
 flowchart LR
-    User[本地用户] --> Web[React / Nginx]
+    User[本地用户] -->|password input / 只写 Key| Web[React / Nginx]
     Web -->|REST /api/v1| API[FastAPI API]
     API -->|事务写入 Run| DB[(PostgreSQL / SQLite)]
     API -.->|commit 后 best-effort XADD| Redis[(Redis Streams)]
     Redis -.->|at-least-once 通知| Worker[独立 Worker]
     Worker -->|扫描、领取、心跳、fenced 写入| DB
     Worker --> Runner[Evaluation Runner]
+    Keyring[(Git 忽略的部署 keyring)] -->|加密| API
+    Keyring -->|解密| Worker
     Runner --> Adapters[Adapter Registry]
     Runner --> Evaluators[Evaluator Registry]
     Adapters --> Mock[Mock / 无网络]
     Adapters -->|仅用户主动配置| Provider[OpenAI-compatible API]
-    WorkerEnv[Worker 环境变量] -->|运行时读取 Key| Adapters
+    WorkerEnv[Worker 环境变量 / 旧配置] -.->|兼容读取| Adapters
 ```
 
 API 创建 Run 时先提交数据库，再尝试发送 Redis 通知，并立即返回 `202`；通知失败不回滚数据库事实。Worker 优先从数据库对账，并可消费重复 Redis 消息；每次写入都校验当前租约 owner/token，恢复时跳过已有 Response。数据库因此是唯一事实来源，Redis、日志、指标和 Worker 内存都不能覆盖 Run 状态。前端轮询 Run，进入 `completed`、`failed` 或 `cancelled` 终态后停止。详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，评分语义见 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)。
@@ -145,7 +147,7 @@ curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
 
 `/live` 不访问外部依赖，`/health` 仅检查数据库，`/ready` 检查数据库、Alembic head 和 Redis。Redis 不可用时 `/ready` 返回 `503/degraded`，但数据库可用时 API 仍可提交 Run，Worker 也可仅靠数据库对账恢复。`/ready` 对 `asyncio.to_thread` 的等待超时不会取消已进入线程的同步数据库驱动调用，真正资源上界仍由驱动/连接池 timeout 约束。`/tasks/metrics` 只是数据库当前事实派生的 gauges，不是完整历史 counters、延迟监控或审计日志。
 
-API 接受经校验的 `X-Request-ID`，非法或缺失时自动生成，并在每个响应中返回。LLMBenchLab **应用 logger** 使用字段白名单的脱敏 JSON，关联 request/run/question/worker/attempt/lease 事件；这一保证不涵盖所有 Uvicorn 或 access log handler，因此凭据和敏感内容仍绝不得放在 URL、header 或请求路径中。
+API 为每个请求自行生成 `X-Request-ID` 并在响应中返回，不信任或回显客户端提供的同名 header。LLMBenchLab **应用 logger** 使用字段白名单的脱敏 JSON，关联 request/run/question/worker/attempt/lease 事件；这一保证不涵盖所有 Uvicorn 或 access log handler，因此凭据和敏感内容仍绝不得放在 URL、header 或请求路径中。
 
 如需分别观察日志，可在三个终端运行 `make backend`、`make worker` 和 `make frontend`。只启动 API 时，新 Run 会持久化为 `pending`，但不会在 API 进程内执行。本地 SQLite 只支持一个 Worker；Redis URL 可留空，Worker 将使用数据库对账。所有命令可通过 `make help` 查看；更完整的环境变量、迁移和排障说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
@@ -154,7 +156,7 @@ API 接受经校验的 `X-Request-ID`，非法或缺失时自动生成，并在�
 这条路径不需要任何 API Key，不会访问网络模型：
 
 1. 执行 `make setup` 和 `make dev`，打开 `http://127.0.0.1:5173`。
-2. 进入 **模型** 页面，新建模型；名称可填 `Offline Mock`，Provider 选择 `mock`，保持启用。Mock 不需要 Base URL、远端模型名或 `api_key_env`。
+2. 进入 **模型** 页面，新建模型；名称可填 `Offline Mock`，Provider 选择 `mock`，保持启用。Mock 不需要 Base URL、远端模型名或 API Key。
 3. 进入 **评测集** 页面，点击重载/载入内置 Demo。确认它显示 `demo-general`、版本 `1.0.0`、15 道题，以及“Demo 数据，不代表正式模型能力”的提示。
 4. 点击 **新建评测**，选择刚注册的 Mock 和 Demo Benchmark。默认参数可直接使用；推荐可复现基线为 `temperature=0`、`top_p=1`、`max_tokens=256`、`seed=42`、`concurrency=1`。
 5. 提交后进入 Run Detail。页面会轮询 `pending/running` 状态，展示进度、配置快照和逐题结果，并在终态停止轮询。
@@ -257,27 +259,27 @@ uv run llmbenchlab-evaluate report <RUN_ID> \
 
 本节描述通过 Web/API 加常驻 Worker 的服务路径；一次性正式评测优先使用上一节的可信本地 CLI。LLMBenchLab 使用 Chat Completions 风格接口。若 `base_url` 为 `https://provider.example/v1`，Adapter 会请求 `https://provider.example/v1/chat/completions`；如果填写的 URL 已以 `/chat/completions` 结尾，则不会重复追加。
 
-1. 选择一个 Worker 环境变量名，例如 `LOCAL_COMPAT_API_KEY`，通过操作系统 Keychain、秘密管理器或受控 shell 把真实 Key 注入**执行 `make worker` 或 Worker 容器的进程环境**。
-2. 在 Models 页面或 `POST /api/v1/models` 中把 `api_key_env` 填为字符串 `LOCAL_COMPAT_API_KEY`。这里只填变量名，不能填真实值。
-3. 同时填写可信的 `base_url` 和 Provider 的 `remote_model_name`，然后创建 Run。注册模型本身不会调用 Provider；Run 执行时 Adapter 才读取环境变量并发起请求。
+1. 运行 `make setup && make dev`，打开 `http://127.0.0.1:5173`，进入 **模型**，点击新建模型。
+2. Provider 选择 `openai_compatible`，填写 API Base URL、远端模型名，并把真实 Key 直接粘贴到 **API Key** 密码框；这里不再填写环境变量名称。
+3. 保存后密码框立即清空，卡片只显示“已安全保存”，GET/list/编辑表单都不会回填原 Key。进入 **新建评测** 选择模型和 Benchmark 后，独立 Worker 才解密并调用 Provider。
 
-API 示例中的域名是故意无效的占位符：
+`make setup` 会自动创建 Git 忽略且权限为 `0600` 的 `.secrets/credential-keys.json`；本机 API 与 Worker 默认读取同一文件，Compose 则把同一文件只读挂载给二者。请把它与数据库分开安全备份：丢失 keyring 后已有 Provider Key 无法恢复，只能重新输入。编辑模型时 Key 留空表示保留；改变 Provider origin 必须重新输入；存在 `pending`/`running` Run 时端点和凭据不能修改。旧 `api_key_env` API/CLI 配置仍可运行，但 Web 不再展示该入口。
 
-```bash
-curl -sS -X POST http://127.0.0.1:8000/api/v1/models \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "name":"My Compatible Model",
-    "provider_type":"openai_compatible",
-    "base_url":"https://provider.example.invalid/v1",
-    "remote_model_name":"replace-with-provider-model-name",
-    "api_key_env":"LOCAL_COMPAT_API_KEY",
-    "enabled":true,
-    "default_parameters":{"temperature":0}
-  }'
+直接调用 REST 时，`api_key` 是 write-only 请求字段。下面只是 JSON 结构示意，域名和 Key 都是不可直接运行的占位符；不要把真实 Key 写入 shell history：
+
+```json
+{
+  "name": "My Compatible Model",
+  "provider_type": "openai_compatible",
+  "base_url": "https://provider.example.invalid/v1",
+  "remote_model_name": "replace-with-provider-model-name",
+  "api_key": "<write-only-provider-key>",
+  "enabled": true,
+  "default_parameters": {"temperature": 0}
+}
 ```
 
-真实 Key 不应进入 API JSON、数据库、Git、Issue、日志、截图或 `VITE_*` 变量。Model Schema 会拒绝 `base_url` query，拒绝远端明文 HTTP（仅 loopback 可用 HTTP），并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段；浏览器不会直接调用 Provider。模型发现与 Chat 都只接受 identity encoding；发现体最多 2 MiB，Chat 成功体最多 4 MiB、错误体最多 64 KiB。当前 MVP 尚无 SSRF allowlist，只可使用已审查的 Provider 地址，并在执行前确认题目外发许可、数据政策和费用。缺少目标环境变量时，相关单题会安全记录为 `missing_api_key`。
+真实 Key 会且只会在创建/替换模型时进入本机 API 请求体，随后以 AES-256-GCM 密文落库；它不应进入 Git、Issue、日志、截图、URL、命令行或 `VITE_*` 变量。浏览器不会直接调用 Provider。Model Schema 会拒绝 `base_url` query，拒绝远端明文 HTTP（仅 loopback 可用 HTTP），并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段。当前 MVP 尚无 SSRF allowlist，只可使用已审查的 Provider 地址，并在执行前确认题目外发许可、数据政策和费用。
 
 ## 测试与质量检查
 
@@ -330,7 +332,7 @@ docker compose config
 
 ## SQLite → PostgreSQL 显式导入
 
-导入器只支持一次性、单向迁移，不是在线复制。必须先停止 SQLite 源的 API/Worker 和新 Run 创建，排空、取消或终结所有 `pending/running` Run，并准备一个已迁移到当前 Alembic head 的**空、离线 PostgreSQL 目标**。导入器以 SQLite read-only URI 读源，检查 integrity/FK/head/active Run；目标使用 advisory lock、`ACCESS EXCLUSIVE` table locks 和一个事务复制五张核心表。
+导入器只支持一次性、单向迁移，不是在线复制。必须先停止 SQLite 源的 API/Worker 和新 Run 创建，排空、取消或终结所有 `pending/running` Run，并准备一个已迁移到当前 Alembic head 的**空、离线 PostgreSQL 目标**。导入器以 SQLite read-only URI 读源，检查 integrity/FK/head/active Run；目标使用 advisory lock、`ACCESS EXCLUSIVE` table locks 和一个事务复制六张核心表（包括加密凭据表）。
 
 带凭据的 PostgreSQL DSN 必须通过受控环境变量提供，不得放入命令行：
 
@@ -351,7 +353,7 @@ uv run python -m app.db.import_sqlite \
 | `3` | `committed_but_verification_failed` | 目标已提交完整 precommit 快照，但 postcommit 验证或报告失败；停止服务并独立对账 |
 | `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 |
 
-退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、五表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。
+退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、六表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。
 
 ## Roadmap
 
@@ -371,7 +373,8 @@ uv run python -m app.db.import_sqlite \
 
 - MVP 没有认证、授权、限流、TLS、多租户隔离或生产级秘密管理，**不得直接暴露到公网**。
 - 本地 Make 模式默认只监听 `127.0.0.1`；CORS 是浏览器策略，不是访问控制。
-- API 与数据库只保存 `api_key_env` 名称；真实 Key 只由执行 Adapter 的 Worker 在请求时从环境读取。
+- Web/API 接收一次 write-only `api_key`，数据库只保存绑定 Model/origin 的认证密文；系统不会把凭据流中的 Key 或 Provider 对它的回显复制进读取接口、Run 的 model snapshot、队列或报告证据，也不公开加密材料。该保证不排除无关用户数据发生独立字面巧合；keyring 与数据库同时泄漏仍可解密 Provider Key。
+- 服务仅限可信 loopback 本机；Host allowlist 与 Nginx 请求流式转发不能替代公网认证、授权或 KMS。
 - `VITE_*` 会进入浏览器构建产物，永远不能用于存放秘密。
 - Benchmark ZIP 会做路径、文件类型、大小、压缩比、Schema 和题数校验，但导入者仍需审查来源、许可证、敏感数据和提示注入风险。
 - 任意 OpenAI-compatible `base_url` 存在 SSRF 与数据外发风险；公开部署前必须加入地址策略、出站隔离、鉴权和费用控制。

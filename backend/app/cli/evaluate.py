@@ -454,7 +454,9 @@ def _resolve_model_registration(
     session: Session,
     payload: ModelCreate,
 ) -> tuple[Model | None, ModelCreate]:
-    existing = session.scalar(select(Model).where(Model.name == payload.name))
+    # Share the same Model row lock as REST Run creation and Model PATCH so a
+    # CLI-created pending Run cannot race an endpoint/credential mutation.
+    existing = session.scalar(select(Model).where(Model.name == payload.name).with_for_update())
     if existing is not None and _same_model_configuration(existing, payload):
         if not existing.enabled:
             raise EvaluationCLIError(
@@ -469,7 +471,7 @@ def _resolve_model_registration(
         json.dumps(payload.model_dump(mode="json"), sort_keys=True).encode()
     ).hexdigest()[:8]
     payload.name = f"{base_name[:151]}-{fingerprint}"
-    conflict = session.scalar(select(Model).where(Model.name == payload.name))
+    conflict = session.scalar(select(Model).where(Model.name == payload.name).with_for_update())
     if conflict is None:
         return None, payload
     if _same_model_configuration(conflict, payload):
@@ -505,7 +507,10 @@ def _find_or_create_model(
     existing, payload = _resolve_model_registration(session, payload)
     if existing is not None:
         return existing, False
-    model = Model(**payload.model_dump())
+    model = Model(
+        **payload.model_dump(exclude={"api_key"}),
+        credential_source="environment",
+    )
     session.add(model)
     session.flush()
     return model, True

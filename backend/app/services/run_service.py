@@ -20,6 +20,7 @@ from app.core.constants import (
 )
 from app.models import Benchmark, EvaluationRun, Model, RunStatus
 from app.schemas.evaluation_run import EvaluationRunCreate
+from app.schemas.model import model_run_snapshot_values
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -65,26 +66,7 @@ def build_evaluation_run(
     }
     snapshot: dict[str, Any] = {
         "generation": generation,
-        "model": {
-            "id": model.id,
-            "name": model.name,
-            "remote_model_name": model.remote_model_name,
-            "adapter_type": model.provider_type.value,
-            "base_url": model.base_url,
-            "api_key_env": model.api_key_env,
-            "input_price_per_million": (
-                str(model.input_price_per_million)
-                if model.input_price_per_million is not None
-                else None
-            ),
-            "output_price_per_million": (
-                str(model.output_price_per_million)
-                if model.output_price_per_million is not None
-                else None
-            ),
-            "currency_assumption": "USD",
-            "default_parameters": dict(model.default_parameters or {}),
-        },
+        "model": model_run_snapshot_values(model),
         "benchmark": {
             "id": benchmark.id,
             "slug": benchmark.slug,
