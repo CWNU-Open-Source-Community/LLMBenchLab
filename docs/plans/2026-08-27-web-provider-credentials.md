@@ -105,7 +105,7 @@
 
 - 修改文件：后端 credential crypto/ORM/API/Adapter/Worker/migration/importer、安全回归；前端 Models 表单与测试；setup/Compose/Nginx；ADR、用户与状态文档。
 - 实际命令：`make lint`、`make test`、`make smoke`、真实 PostgreSQL/Redis `pytest -m integration`、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、`make phase2-acceptance`、diff/secret scan。
-- 验收对应：WEBKEY-01–06 的本地证据全部通过；Web 凭据基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push，当前 bootstrap remediation 尚待 commit/push。该分支没有 PR，workflow 仅监听 PR/main，故基础实现 SHA 无远程 run；未获授权创建 PR，远程门禁继续保持未完成。
+- 验收对应：WEBKEY-01–06 的本地证据全部通过；Web 凭据基础实现 `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 与 bootstrap remediation `d26cdbe4f3f97057ce09d5d7a539ddbfe605d967` 均已正常 push。该分支没有 PR，workflow 仅监听 PR/main，故 remediation 精确 SHA 无远程 run；未获授权创建 PR，远程门禁继续保持未完成。
 - 未运行：真实 Provider 调用（无用户 Key，自动化禁止）。
 - 已知问题：可信本地边界不等于公网秘密托管；外部 KMS 和完整审计后续处理。
 

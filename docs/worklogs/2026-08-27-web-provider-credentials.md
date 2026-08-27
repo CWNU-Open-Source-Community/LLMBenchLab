@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2](../phases/PHASE-2-RELIABILITY.md)
 - 关联计划：[Web Provider 凭据输入执行计划](../plans/2026-08-27-web-provider-credentials.md)
 - 关联 ADR：[ADR-0007](../decisions/ADR-0007-web-provider-credentials.md)、[ADR-0004](../decisions/ADR-0004-secret-management.md)、[ADR-0006](../decisions/ADR-0006-local-real-provider-evaluation.md)
-- 最终状态：`in_progress`（功能与全部本地门禁已完成；Web 凭据基础实现/文档已 push，当前 bootstrap remediation 尚待 commit/push；分支无 PR，精确 SHA CI 未触发）
+- 最终状态：`in_progress`（功能、全部本地门禁与 bootstrap remediation commit/push 已完成；分支无 PR，精确 SHA CI 未触发）
 
 ## 初始仓库状态
 
@@ -35,7 +35,7 @@
 - [x] origin 重输、active Run 锁、keyring fail-closed、双方言 migration/downgrade 和六表 importer 回归通过。
 - [x] README/API/Architecture/Security/Deployment/Testing/状态/Changelog/Phase/Next Task 已同步。
 - [x] Web 凭据基础实现 commit 已正常 push。
-- [ ] 当前 keyring bootstrap remediation commit/push 与精确 SHA 查询。
+- [x] keyring bootstrap remediation commit/push 与精确 SHA 查询；结果因无 PR 而无 run。
 - [ ] 该精确 SHA 的远程必需 CI 全绿；当前分支无 PR，且 workflow 只监听 PR/main，未获授权创建 PR。
 
 ## 实际实现
@@ -92,8 +92,9 @@
 | PyPy-first `PATH` + `bootstrap_credential_keyring.sh --path <临时路径>`（连续两次） | 0 | 入口通过 `uv` 选择 CPython；全新创建与既有文件校验均通过，权限 `0600`、96 bytes，不打印 key material；精确临时文件/目录已删除 |
 | `make setup` | 0 | 保留已有 `.env`/keyring，锁定依赖检查、npm 安装和 SQLite Alembic migration 全部完成 |
 | `make dev` + loopback readiness | — | API、独立 Worker、Vite 启动成功；`/api/v1/live` 与 Web 根页面返回成功，进程继续运行供用户使用 |
-| Web 凭据基础实现 `git commit` / `git push origin codex/complete-evaluation-workflow` | 0 | 基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常推送；当前 bootstrap remediation 尚待提交 |
-| `gh pr list --head ...` / `gh run list --commit ...` | 0 | PR 列表与该 SHA run 列表均为空；workflow 仅监听 PR/main，未自行创建 PR |
+| Web 凭据基础实现 `git commit` / `git push origin codex/complete-evaluation-workflow` | 0 | 基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常推送 |
+| bootstrap remediation `git commit` / `git push origin codex/complete-evaluation-workflow` | 0 | commit `d26cdbe4f3f97057ce09d5d7a539ddbfe605d967` 已正常推送 |
+| `gh pr list --head ...` / `gh run list --commit d26cdbe...` | 0 | PR 列表与该精确 SHA run 列表均为空；workflow 仅监听 PR/main，未自行创建 PR |
 
 ## 测试与安全结论
 
@@ -106,7 +107,7 @@
 
 ## 尚未完成与远程边界
 
-- Web 凭据基础实现 commit `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 已正常 push；当前 bootstrap remediation 尚待 commit/push。该分支没有 PR，workflow 只监听 PR/main，因此基础实现 SHA 的 Actions 查询为空。
+- Web 凭据基础实现 `b19bdac9236f9b2f927166ebe30578ced3d9f53e` 与 bootstrap remediation `d26cdbe4f3f97057ce09d5d7a539ddbfe605d967` 已正常 push；该分支没有 PR，workflow 只监听 PR/main，因此 remediation 精确 SHA 的 Actions 查询为空。
 - PR 创建不在既有授权内，因此没有自行创建 PR，也没有把本地门禁冒充 CI；要完成远程门禁需用户明确授权创建 PR。
 - 真实 Provider 评测有意未运行；用户后续只需在可信 loopback Web Models 表单提供 Base URL、远端模型名与 Key，再选择固定/自定义 Benchmark 创建 Run。
 
@@ -119,5 +120,5 @@
 ## 最终 Git 状态
 
 ```text
-in_progress: local gates passed; bootstrap remediation commit/push pending; exact-SHA CI cannot trigger without a PR
+in_progress: local gates and bootstrap remediation push passed; exact-SHA CI cannot trigger without a PR
 ```
