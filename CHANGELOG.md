@@ -8,6 +8,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Added
 
+- Accepted ADR-0009 and started the tracked Phase 2 P2-05/P2-06/P2-07 plan for database-authoritative four-scope admission, per-HTTP-attempt reservation/settlement, bounded fair scheduling, non-secret append-only audit history, and a real PostgreSQL/Redis capacity baseline. This entry records design only; the implementation remains in progress.
 - Phase 0 governance, architecture decisions, protocols, roadmap, and repeatable work-log process.
 - FastAPI, SQLAlchemy, Alembic, SQLite, and Mock-adapter backend for the reproducible MVP evaluation flow.
 - React and TypeScript interface for models, Benchmarks, runs, result evidence, summary metrics, and the leaderboard.
@@ -85,6 +86,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Verification
 
+- Opened PR #1 for the trusted-local evaluation/Web credential/Run UX/SSE branch and obtained all four required GitHub Actions jobs for exact SHA `ab15862eab4870dda01fb079b44b509a7d737627` in run `33078921254`; this closes the previously documented no-PR/no-CI boundary for that SHA only.
 - Passed 205 backend non-infrastructure tests, five real PostgreSQL/Redis integration tests, 13 frontend tests, the isolated offline Mock smoke test, Ruff/ESLint/TypeScript checks, Vite production build, and SQLite/PostgreSQL Alembic upgrade/check/downgrade/upgrade gates.
 - Passed an isolated default-build Compose acceptance harness in all eight scenarios: topology/readiness, protocol-v1 baseline, API restart during execution, exact lease-owner SIGKILL and natural takeover, Redis stop/start with database reconciliation, pending cancellation, running cancellation plus duplicate delivery, and PostgreSQL `head -> 0001 -> head` protocol round-trip.
 - Verified final Redis consumer-group `pending=0` and `lag=0`, unchanged three-point canonical hashes for one 15-question baseline Run's protocol-v1 core fields and its 15 Responses, and cleanup with no project containers, volumes, or networks left behind. This hash is not a whole-database snapshot.

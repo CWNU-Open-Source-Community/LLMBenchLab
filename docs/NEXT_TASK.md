@@ -1,6 +1,6 @@
 # 下一任务：Phase 2 并发治理、审计与性能基线
 
-> 建议开始时间：当前 OpenAI-compatible 真 SSE 切片的功能提交已 push 且精确 SHA 门禁查询已记录后；开始前仍须确认其远程工作流边界
+> 状态：`in_progress`；PR #1 的前置精确 SHA `ab15862eab4870dda01fb079b44b509a7d737627` 已取得 4/4 远程 CI，ADR-0009 与执行计划已建立
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 前置状态：Phase 0–1 `completed`；Phase 2 `in_progress`
 
@@ -43,7 +43,7 @@ Web 的单次请求配置与 Run 可达性切片已交付：数字 `max_tokens` 
 
 1. 阅读 `README.md`、`AGENTS.md`、`docs/PROJECT_STATUS.md`、`docs/ROADMAP.md`、`docs/phases/PHASE-2-RELIABILITY.md`、ADR-0005、ADR-0007、ADR-0008、现有 lease/Worker/queue/metrics/credential/Adapter 实现和本工作日志。
 2. 检查 Git 状态，保护所有未提交工作；创建新的工作日志并列出阶段 commit、push 与远程 CI 边界。
-3. 先写新的 ADR，再写实现。ADR 必须明确配额事实来源、预留/结算/释放、重试与恢复、时钟、原子性、过载响应、公平性、审计保留和回滚语义。
+3. 已先接受 [ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)，再进入实现。该 ADR 明确配额事实来源、预留/结算/释放、重试与恢复、时钟、原子性、过载响应、公平性、审计保留和回滚语义；实现若偏离必须先更新决定与计划。
 4. 不得把 Redis 的瞬时计数当成预算或任务事实来源；若使用 Redis 加速，必须有数据库可恢复裁决和故障语义。
 
 ## 范围
@@ -84,7 +84,7 @@ Web 的单次请求配置与 Run 可达性切片已交付：数字 `max_tokens` 
 
 ## 验收标准
 
-- [ ] 新 ADR 在代码前接受，覆盖额度事实来源、原子预留/结算/释放、背压、公平、恢复、审计和回滚。
+- [x] ADR-0009 已在代码前接受，覆盖额度事实来源、原子预留/结算/释放、背压、公平、恢复、审计和回滚。
 - [ ] 在并发 API 提交和多 Worker 领取下，全局/Provider/Model/Run 上限都不会被突破；重启和租约接管后无永久占用。
 - [ ] rate/budget 超限具有稳定状态与 API 语义；已提交 Run 不因 Redis 故障或背压丢失。
 - [ ] retry、duplicate delivery、取消、dead-letter 和 commit-uncertain 场景不会重复结算本地 Token/费用证据。

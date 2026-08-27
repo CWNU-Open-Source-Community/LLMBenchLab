@@ -6,6 +6,7 @@
 - 核心决定：[ADR-0005 — Durable task execution](../decisions/ADR-0005-durable-task-execution.md)
 - 相关安全决定：[ADR-0007 — Web Provider credentials](../decisions/ADR-0007-web-provider-credentials.md)
 - 相关传输决定：[ADR-0008 — OpenAI-compatible SSE transport](../decisions/ADR-0008-openai-compatible-sse-transport.md)
+- 治理与审计决定：[ADR-0009 — Database governance, audit, and fair scheduling](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)
 
 ## 阶段目标
 
@@ -52,7 +53,7 @@
 | P2-02 PostgreSQL 迁移 | `foundation_delivered` | `0002` 与 `0003` 双数据库方言往返、真实 PG check、SQLite 六表单向导入及 credential binary 对账/回滚/并发证据已交付；keyring 独立迁移且无自动反向回迁 |
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、独立 Worker、数据库扫描、租约/心跳/fencing、幂等键与 ACK/no-op 语义已交付 |
 | P2-04 生命周期可靠性 | `foundation_delivered` | 恢复、取消、有限重试/退避、租约超时、dead-letter 和终态聚合已交付；OpenAI-compatible 真 SSE、完整终止校验与 JSON fallback 已加入；两条 dead-letter 路径都会先聚合 Response 证据，Provider 外部副作用仍为 at-least-once 边界 |
-| P2-05 并发治理 | `pending` | 新增的每题输出预算/读取超时只控制单次请求；Provider 限流、Token/费用硬预算、完整背压、公平调度和全局并发治理仍未完成 |
+| P2-05 并发治理 | `design_accepted` | ADR-0009 已固定数据库权威的四层 permit、逐 HTTP attempt 预留/结算、背压和 question-quantum 公平语义；实现、迁移和验收尚未完成 |
 | P2-06 可观测性 | `partial` | 应用 JSON 日志/correlation、健康/就绪、DB gauges 和首次 canary Run 快照已交付；resume canary 未独立追加审计事件，每题 transport request ID/返回 model/system fingerprint 未持久化，历史 counters、延迟、完整审计、全 Uvicorn/第三方日志覆盖与 Worker 主循环 liveness 未完成 |
 | P2-07 验证与运维 | `partial` | 真实故障、竞争、迁移/导入和 Compose 8/8 已交付；性能/容量基线、告警与完整 Runbook 未完成 |
 

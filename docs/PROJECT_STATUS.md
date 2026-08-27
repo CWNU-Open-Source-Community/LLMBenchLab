@@ -41,12 +41,12 @@
 
 - Phase 1 已固定为基线 commit `3db1e29`。
 - Phase 2 可靠任务执行基础已按 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 交付并经过真实 PostgreSQL/Redis 与进程故障验证；实现、验证和阶段边界记录在 [当前工作日志](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)。
-- Phase 2 总状态仍为 `in_progress`：P2-05 尚未实施；P2-06 和 P2-07 只有部分交付，不能称为完整可观测、生产 HA 或容量已验证。
+- Phase 2 总状态仍为 `in_progress`：[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md) 已接受并启动 P2-05/P2-06/P2-07 执行计划，但实现、迁移、负载证据和 Runbook 尚未交付；不能称为完整治理、完整可观测、生产 HA 或容量已验证。
 - [ADR-0006](decisions/ADR-0006-local-real-provider-evaluation.md) 按用户优先级批准可信本地正式数据/真实 Provider 提前切片；本地代码、固定数据源下载和 Mock-only 回归已通过，真实 Provider 调用留给持有 Key 的用户显式执行。该切片没有补齐 P2-05，也不代表 Phase 3 完成。
 - [ADR-0007](decisions/ADR-0007-web-provider-credentials.md) 已按用户明确要求接受 Web 直接输入 Key：write-only API/UI、AES-GCM `model_credentials`、API/Worker 共享 keyring、legacy environment 兼容、origin 变更重输 Key 和 active-Run 变更禁令均已通过完整本地门禁。用户随后暴露的 PyPy keyring 首次初始化问题也已修复、通过本地回归并正常 push；没有调用真实 Provider。它不改变 Phase 2 的 `in_progress` 状态。
 - Web 长推理预算/读取超时、`output_truncated` 诊断、全状态评测记录、逐题证据分页和响应式修复已在功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 中正常 push；完整本地门禁通过。该切片不改变 Phase 2/3 状态，自动化没有调用真实 Provider。
 - [ADR-0008](decisions/ADR-0008-openai-compatible-sse-transport.md) 已接受 OpenAI-compatible 真 SSE、空闲 read timeout、严格 `[DONE]`、独立资源上限和 protocol-v1 transport 重试边界。功能提交 `af345af1048eeddffd784fdca1da419df95da7e2` 已正常 push；本地门禁为后端 453 passed/6 skipped、前端 36 passed，以及 lint/type/build/Smoke/Alembic/lock/Compose/diff/秘密扫描全通过。修复后尚未调用用户真实 Provider。
-- 当前分支 `codex/complete-evaluation-workflow` 的 Web 凭据基础实现 `b19bdac9236f9b2f927166ebe30578ced3d9f53e`、前一文档证据 `d41517a0cc385da6931f83de672f24f841192a31`、bootstrap remediation `d26cdbe4f3f97057ce09d5d7a539ddbfe605d967`、Web Run UX 功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 与 SSE 功能提交 `af345af1048eeddffd784fdca1da419df95da7e2` 均已推送。工作流只由 PR 或 `main` push 触发；当前分支没有 PR，最新功能 SHA 的 Actions 查询与 PR 查询均为空。创建 PR 需用户明确授权，远程绿色前保持任务 `in_progress`。
+- 用户已授权并创建 [PR #1](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/1)。当前分支的 Web 凭据、bootstrap remediation、Web Run UX 与 SSE 提交均已包含在 PR 中；精确 SHA `ab15862eab4870dda01fb079b44b509a7d737627` 的 GitHub Actions run `33078921254` 四个必需 job 全部成功。该结论只覆盖此 SHA；后续 Phase 2 commits 仍须逐个 push 并等待各自精确 SHA 门禁。
 
 ## 尚未完成的功能
 
@@ -87,10 +87,10 @@
 | Web 凭据离线 Smoke | 通过 | `1 passed, 5 deselected`，全程 Mock 与隔离 SQLite |
 | Web 凭据静态/迁移/Compose | 通过 | Ruff/format、PostgreSQL Alembic upgrade/check、`uv lock --check`、Compose config、更新后的 8/8 故障验收、diff check 与高置信 secret scan 均通过；evidence `llmbenchlab-p2-60f3ccdac113` 已确认无残留容器/卷/网络 |
 | 标准数据真实源验证 | 通过 | 固定源下载并转换完整 MMLU-Pro 两个 profile（各 12,032 题）与 GPQA-Diamond（198 题）；另以 CLI `prepare --limit 2` 验证普通入口和可复现归档 |
-| Web Run UX / 长推理配置切片 | 已 push，远程未触发 | 功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；后端 `442 passed, 6 skipped`、前端 9 files / `36 passed`、lint/typecheck/build、Smoke `1 passed, 6 deselected`、lock/Compose config/diff 与 390–1280px 关键断点通过；精确 SHA 无 Actions run |
-| OpenAI-compatible 真 SSE / 空闲超时切片 | 已 push，远程未触发 | 功能 SHA `af345af1048eeddffd784fdca1da419df95da7e2`；Adapter 50 passed，最终 `make test` 后端 `453 passed, 6 skipped`、前端 9 files / `36 passed`；其精确 SHA Actions/PR 均为 `[]`；只使用 MockTransport/stub，修复后未调用真实 Provider |
+| Web Run UX / 长推理配置切片 | 已纳入远程绿色 PR SHA | 功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；后端 `442 passed, 6 skipped`、前端 9 files / `36 passed`、lint/typecheck/build、Smoke `1 passed, 6 deselected`、lock/Compose config/diff 与 390–1280px 关键断点通过；随后包含该提交的 PR HEAD `ab15862…` 取得 4/4 CI |
+| OpenAI-compatible 真 SSE / 空闲超时切片 | 已纳入远程绿色 PR SHA | 功能 SHA `af345af1048eeddffd784fdca1da419df95da7e2`；Adapter 50 passed，最终 `make test` 后端 `453 passed, 6 skipped`、前端 9 files / `36 passed`；随后包含该提交的 PR HEAD `ab15862…` 取得 4/4 CI；只使用 MockTransport/stub，修复后未调用真实 Provider |
 | 真实 Provider | 未运行（有意） | 本任务没有 API Key；自动化只用 Mock/MockTransport，真实调用及费用必须由用户显式确认后发生 |
-| 远程精确 SHA CI | 未触发 | 最新功能 SHA `af345af1048eeddffd784fdca1da419df95da7e2` 已正常 push；Actions 与 PR 查询均为空，workflow 仅监听 PR/main；未获授权创建 PR，本地通过不替代 CI |
+| 远程精确 SHA CI | 通过 | PR #1 的精确 HEAD `ab15862eab4870dda01fb079b44b509a7d737627` 对应 Actions run `33078921254`，后端、真实 PostgreSQL/Redis、真实 Compose 可靠性与前端 4/4 job 全部成功 |
 
 所有模型相关自动化路径均使用 Mock、MockTransport 或 stub fetch；基础设施用例只连接隔离的 PostgreSQL/Redis，没有调用真实 Provider，也不要求 Provider API Key。详细命令和结果见工作日志与 [TESTING.md](TESTING.md)。
 
@@ -108,6 +108,8 @@
 
 [2026-08-27-openai-compatible-sse-streaming.md](worklogs/2026-08-27-openai-compatible-sse-streaming.md)（OpenAI-compatible 真 SSE、空闲 read timeout、严格终止、资源/脱敏边界与 126 秒 524/499 诊断）
 
+[2026-08-27-phase-2-governance-audit-performance.md](worklogs/2026-08-27-phase-2-governance-audit-performance.md)（ADR-0009、P2-05/P2-06/P2-07 实施与远程门禁持续记录）
+
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 作为后续任务的唯一入口；在 Phase 2 保持 `in_progress` 的前提下，下一切片应优先收敛 P2-05，并为 P2-06/P2-07 的剩余验收留下可复核证据。
+[NEXT_TASK.md](NEXT_TASK.md) 仍是当前任务合同；ADR-0009 与执行计划已建立，下一实施切片是 0004 schema 和 P2-05 数据库治理 repository。Phase 2 在全部关键验收前保持 `in_progress`。
