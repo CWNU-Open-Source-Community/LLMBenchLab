@@ -1,6 +1,6 @@
 # LLMBenchLab Roadmap
 
-> 最后更新：2026-08-27
+> 最后更新：2026-08-28
 > 当前阶段：Phase 2 — 可靠性与任务执行；Phase 3 可信本地客观数据切片
 > 当前状态：Phase 0–1 `completed`；Phase 2–3 `in_progress`；Phase 4–6 `planned`
 
@@ -30,7 +30,7 @@
 | --- | --- | --- | --- | --- |
 | Phase 0 | 项目治理和架构 | 可执行的需求、架构、协议、ADR 与持续文档流程 | `completed` | [PHASE-0-GOVERNANCE.md](phases/PHASE-0-GOVERNANCE.md) |
 | Phase 1 | MVP 垂直链路 | Mock 模型到 Run、逐题结果与排行榜的离线闭环 | `completed` | [PHASE-1-MVP.md](phases/PHASE-1-MVP.md) |
-| Phase 2 | 可靠性与任务执行 | 可靠 Worker 基础与治理/审计候选门禁已交付；正式 SLO/运维闭环待完成 | `in_progress` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
+| Phase 2 | 可靠性与任务执行 | 可靠 Worker、治理/审计已交付；P2-01 单机资格已验证、仓库级收尾中；P2-06/P2-07 运维闭环待完成 | `in_progress` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
 | Phase 3 | 标准 Benchmark 与代码评测 | 已有 MMLU-Pro/GPQA 可信本地切片；IFEval、沙箱与完整插件体系待完成 | `in_progress` | [PHASE-3-BENCHMARKS.md](phases/PHASE-3-BENCHMARKS.md) |
 | Phase 4 | Judge、Arena 与长上下文 | 可校准 Judge、Pairwise Judge、个人 Arena 和长上下文评测 | `planned` | [PHASE-4-JUDGE-ARENA.md](phases/PHASE-4-JUDGE-ARENA.md) |
 | Phase 5 | Agent、私有与 Live Benchmark | 工具调用轨迹、隔离私有集和持续更新的 Live Benchmark | `planned` | [PHASE-5-AGENT-LIVE.md](phases/PHASE-5-AGENT-LIVE.md) |
@@ -184,7 +184,7 @@
 - materialized counter 只作 ledger 投影；counter、policy/hash 或 Run override 漂移 fail closed。confirmed pre-send release 按 ADR-0011 不消耗未发送 HTTP retry。
 - 有限 backlog、typed `429`、database not-before、question quantum、dispatch/failure 分离和跨 Model 公平排序。
 - typed audit、Run audit、task history/latency、Provider metadata、credential 非秘密事件和前端治理状态；Exporter/告警、retention archive 与 Worker progress/liveness 仍待完成。
-- enhanced Mock-only capacity/acceptance 和真实 PostgreSQL 竞争测试；精确候选 SHA 的最终运行已通过，正式 SLO/容量模型与 backup/restore 仍待完成。
+- enhanced Mock-only capacity/acceptance、真实 PostgreSQL 竞争测试，以及绑定 clean SHA 的正式多轮单机控制面资格；backup/restore 仍待完成。
 
 ### 非目标
 
@@ -201,13 +201,13 @@
 
 | ID | 状态 | 已交付 / 剩余范围 |
 | --- | --- | --- |
-| P2-01 一致性与容量设计 | 部分完成 | DB truth、lease/fencing、四层治理和 capacity 工具已实现；正式 SLO、容量模型、多轮统计和参数校准未完成 |
+| P2-01 一致性与容量设计 | 资格通过、收尾中 | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已实现；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；待证据文档提交自身 CI 后完成仓库级收尾 |
 | P2-02 PostgreSQL 迁移 | 切片已实现 | `0002`/`0003` 可靠性与凭据基础、`0004` 六类治理/审计表和 12 表 importer 已实现；本地及精确 SHA 远程 PG migration/check/integration 已通过，无自动反向回迁 |
 | P2-03 Queue/Worker | 可靠基础已交付 | Redis Streams 通知、独立 Worker、数据库扫描、租约、心跳、fencing 和重复消息 no-op 已交付 |
 | P2-04 生命周期可靠性 | 可靠基础已交付 | retry/取消/恢复/dead-letter/终态重算及三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；外部调用仍不保证 exactly-once |
 | P2-05 并发治理 | 切片已实现 | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序和完整性 fail-closed 已实现；真实 PG/capacity/acceptance/精确 SHA CI 候选门禁已通过 |
 | P2-06 可观测性 | 切片已实现 | typed audit/history、Run latency、Provider metadata、credential audit 和 UI 状态已实现；Exporter/告警、retention archive、Worker progress/liveness 与全日志源治理未完成 |
-| P2-07 验证与运维 | 切片已实现 | enhanced capacity/PG tests、精确候选 evidence 和运维/性能文档已交付；正式 SLO、backup/restore、告警响应与完整失败矩阵未完成 |
+| P2-07 验证与运维 | 切片已实现 | enhanced capacity/PG tests、正式 v2 单机资格、精确候选 evidence 和运维/性能文档已交付；backup/restore、告警响应与完整失败矩阵未完成 |
 
 ### 验收标准
 
@@ -216,8 +216,10 @@
 - `delivered/partial`：pending/running 取消有真实 Compose 证据；有限重试、超时和 dead-letter 有自动化状态机/Runner 证据，但尚未把所有失败组合都纳入完整生产式故障演练。
 - `delivered`：12 表 importer、四层治理、逐 attempt ledger、counter 重算 fail-closed、policy/override freeze、typed backpressure 和 finite fairness 已实现，并在精确候选 SHA 的真实 PG/capacity/acceptance 与远程 CI 通过。
 - `implemented/partial`：typed audit/history、Run DB-time latency、Provider metadata、credential audit 与 UI 状态已实现；Exporter/告警、retention archive、全日志源和 Worker progress/liveness 尚未实现。
-- `not_met`：正式 SLO/容量模型与 backup/restore 未完成；三个确定性 DB crash-seam 场景已通过完整 Compose acceptance，但不能替代生产恢复认证。
+- `delivered`：`P2-local-control-plane-v2` 在 clean SHA `b6a35fe…` 完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 和 `qualified` 容量模型；只限定记录的 Mock-only 单机拓扑。
+- `not_met`：backup/restore 仍未完成；三个确定性 DB crash-seam 场景与正式恢复时长目标不能替代生产恢复认证。
 - `delivered`：治理实现 SHA `665244e…` 已 push；本地 enhanced capacity、9/9 acceptance 与远程 run `33099260233` 4/4 均通过。
+- `delivered`：P2-01 v2 实现 SHA `b6a35fe…` 已 push；本地 aggregate SHA-256 `a76d167b…d0d9` 为 23/23，远程 run `33146681285` 4/4 成功。
 - `delivered`：既有 API、离线 Mock Smoke 和 `llmbenchlab-protocol-v1` 评分/聚合回归继续通过，没有调用真实 Provider。
 
 ### 风险
@@ -226,18 +228,18 @@
 - 数据库与队列状态分裂；明确数据库为事实来源，并以可重放调度事件修复。
 - Worker 在 Provider 响应后、本地提交前崩溃仍可能重复上游调用或计费；不得把本地幂等描述为 Provider exactly-once。
 - materialized counter、policy 或 override 漂移可能绕过治理；当前实现从 ledger/冻结事实重算并 fail closed，精确候选真实 PostgreSQL gate 已通过，后续仍需持续回归和生产规模校准。
-- Mock capacity 不能外推真实 Provider 或生产 SLA；正式 SLO/容量模型必须记录环境、变异和支持边界。
+- Mock 单机资格不能外推真实 Provider、其他硬件、多主机 HA 或生产 SLA；任何 profile/环境/Worker/连接参数变化都必须重新设计或测量。
 
 ### 交付物
 
 - 已交付基础：PostgreSQL/SQLite migration、Redis/Worker/lease/fencing/recovery、六服务 Compose 与历史故障证据。
 - 已交付候选切片：`0004`、12 表 importer、四层治理/ledger/backpressure/fairness、typed audit/history/Provider/credential evidence、UI 状态、enhanced capacity/PG tests 与运维文档。
-- 治理候选门禁：最终全量/真实 PG/capacity/acceptance、三条 crash seam、独立 commit/push、精确 SHA 4/4 CI 已完成。
-- 阶段正式剩余：SLO/容量模型、Exporter/告警、retention archive、Worker progress/liveness、backup/restore 与完整故障矩阵。
+- 治理候选门禁已完成；P2-01 的 v2 多轮资格、实现 commit/push 与实现 SHA 4/4 CI 已完成，证据文档提交自身的精确 SHA CI 是最后仓库级收尾门禁。
+- 阶段正式剩余：Exporter/告警、retention archive、Worker progress/liveness、backup/restore 与完整故障矩阵。
 
 ### 状态
 
-`in_progress`。可靠执行基础和 P2-05/P2-06/P2-07 的治理/审计/容量切片已取得精确候选 SHA 的真实 infrastructure/capacity/acceptance 和远程 CI 门禁，但正式 SLO/Exporter/告警/retention/backup/Worker-progress 等验收仍缺失。不得把 Phase 2、生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once 标记为完成。
+`in_progress`。可靠执行基础、P2-05 治理、P2-06/P2-07 已有切片和 P2-01 v2 单机控制面资格均取得可复核证据与精确 SHA 远程门禁，但 Exporter/告警/retention/backup/Worker-progress 等阶段验收仍缺失。不得把 Phase 2、生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once 标记为完成。
 
 ## 6. Phase 3：标准 Benchmark 与代码评测
 

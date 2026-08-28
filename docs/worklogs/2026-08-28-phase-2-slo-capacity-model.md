@@ -85,7 +85,7 @@
 - 扩充 `phase2_capacity.py`：显式 timing/backoff/pool 参数与容器内 Settings 回读、稳定 image/resource 指纹、匿名延迟样本、吞吐 wall time、每 cell ledger delta、恢复 UTC facts、pause→fence→SIGKILL、重复 delivery 前后 hash 与完整 ledger projection 对账。
 - Compose 显式映射 pool、Worker retry/backoff、Redis block 等资格参数；`db_run_snapshot` 增加 active/send-started attempt 计数以确定性命中故障 seam。
 - 单元测试覆盖统计、CLI、strict JSON/path、吞吐/恢复重算、资源/配置漂移、账本投影、child/validator 失败留证、核心 run-suite 编排、Git override、进程组信号、环境 allowlist 和秘密 canary。
-- 提交前对抗性终审额外修正真实 producer/consumer 合同：capacity evidence 现在保留 Demo `slug/schema_version`；非默认合法 workload 的最终 Run/Response/reservation/audit 计数由 `runs_per_phase/backlog_limit` 推导，正式 wrapper 仍锁定 18/270/271。
+- 提交前对抗性终审额外修正真实 producer/consumer 合同：capacity evidence 现在保留 Demo `slug/schema_version`；非默认合法 workload 的最终 Run/Response/reservation/audit 计数由 `runs_per_phase/backlog_limit` 推导，默认 v1 仍为 18/270/271，正式 v2 锁定 22/330/331。
 - 容量公式不再误用 Mock 固定为 1ms 的兼容 `Response.question_latency_ms`，而是显式使用 `0.08s × quantum 5 = 0.4s` 的 Mock slice 服务预算；所有扫描/接管公式统一并记录 `delta_db=1s`。lease fault 在 pause 后任一路径异常都会 best-effort unpause，避免普通失败留下冻结 Worker。
 - 第一次 clean-SHA warm-up 暴露 producer 先用未舍入 wall time 算吞吐、再分别把两者舍入到 6 位，validator 无法从序列化事实精确复算。producer 现先冻结 6 位 wall time，再由它计算 6 位吞吐；validator 要求与 `round(completed_questions / wall_duration, 6)` 精确一致，并增加真实边界回归。
 - 第二次 clean-SHA suite 暴露 Docker Compose v5 会把随机 project/service labels 写入 image config，导致相同 RootFS 的完整 image ID 跨 trial 变化。新增 accepted ADR-0013：child 保留 raw ID，aggregate 改锁定 RootFS layers 与只过滤这两个动态 labels 后 Config 的 content SHA；Compose version、代码、依赖、执行配置或其他 label 漂移仍会 fail closed。
@@ -93,10 +93,11 @@
 - 新增 accepted ADR-0014：v2 把 warmed pause 与 cold stop/start backlog 拆成两个正式 AND measurement；warmed 保持 `3/5/8s`，cold 使用在新样本前冻结、由既有模型导出的 `6/8/10s`，两者都要求恰好两个 distinct validated Worker claim。formal child 固定变为 22 Run/330 Response/331 reservation；capacity cleanup 还将安全删除本项目唯一、无 alias/引用的 backend build tag，任何残留 fail closed。
 - 实现 `P2-local-control-plane-v2` producer/consumer：默认 `capacity-v1` 仍为原三个 measurement，formal profile 固定四个 cell、完整 18 项运行参数、1 warm-up + 恰好 5 measured、22/330/331 对账和每轮唯一项目镜像清理。Run admission、measurement、cooperative scheduling、Worker claim、分段 timing 和 fairness 的 Run/Model/Event 身份都做交叉校验；fairness 每 Run 固定 `3 claim / 2 yield / 1 terminal`，使用数据库 UTC 严格 `<` 重算先后关系，aggregate 只保留匿名结论。
 - 镜像 cleanup 只在通用 `down -v` 和本项目容器/volume/network 清空后执行；候选必须绑定 down 前实际 backend image ID、exact project/service label、唯一内部 tag、零容器引用，且只执行不带 force 的 exact-tag 删除。reference/rm 超时及所有失败路径使用固定错误，不把 raw image ID、tag、inspect Config 或 stderr 写入 failure。
+- 收尾同步 README、Performance、Testing、Operations、Architecture、Security、Deployment、Changelog、Project Status、Roadmap、Phase 2、NEXT_TASK、本计划与本日志；只发布 aggregate 相对路径/hash 和匿名结果，不复制 raw child、内部对象 ID、宿主指纹或日志，Phase 2 继续保持 `in_progress`。
 
 ## 实际验证
 
-- `cd backend && uv run pytest -q tests/test_phase2_capacity_script.py tests/test_phase2_slo_script.py`：237 passed。
+- `cd backend && uv run pytest -q tests/test_phase2_capacity_script.py tests/test_phase2_slo_script.py`：实现冻结与证据文档收尾后两次均为 237 passed。
 - `cd backend && uv run ruff check ...` 与 `ruff format --check ...`：通过。
 - `python3 -I scripts/phase2_capacity.py --self-check-only`、`python3 -I scripts/phase2_slo.py --self-check-only`：通过。
 - `python3 -m py_compile scripts/phase2_capacity.py scripts/phase2_slo.py scripts/phase2_acceptance.py`：通过。
@@ -121,11 +122,17 @@
 - 最新树再次执行默认 `make phase2-capacity` 通过，保持 v1 三个 measurement/18 Run 合同：`.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-b2795bc22e2b/evidence.json`，SHA-256 `323c81dd86a408039a17034ab4166cd9ff2db83ba2e93efbc7ee00dc51454c7b`；本项目容器/volume/network/image 现场均为 0。该轮仍为 `dirty=true` 兼容性回归，不是资格样本。
 - 最新树再次执行 `make phase2-acceptance` 为 9/9 通过：`.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-81de75fbbcf8/evidence.json`，SHA-256 `86f5126addfa553af016353ced33495e2502384f55afd743ba6fa1b296ff7bd8`；本项目容器/volume/network 现场为 0。通用 acceptance cleanup 按既有边界保留 2 个本地 build-cache image；ADR-0014 的 exact image 删除只属于 capacity trial，不据此把 acceptance 扩大为镜像删除工具。
 - `git diff --check`：通过。
+- 证据文档收尾检查 14 个 Markdown、129 个相对链接，缺失 0；陈旧 v1/“v2 未运行”口径、冲突标记和新增行私钥/Provider token/Bearer/带凭据 DSN/本机绝对路径/UUID/raw image ID 扫描均为 0。
 - 过程中的两条非产品失败已如实保留：曾在 `frontend/` 误执行根目录 `make smoke`；默认本地 SQLite 的 Alembic marker/schema 与 head 漂移，因此未修改用户 DB，改用临时空 SQLite 验证通过。
 - 提交前曾把整个历史 `phase2_acceptance.py` 额外纳入 backend 的现代化 Ruff 规则，得到 98 个既存风格告警；该脚本不在项目 `make lint` 的 Ruff 文件集内，本切片也不机械重写其无关代码。其窄范围 SQL 增量已由 `py_compile`、脚本单测和真实 9/9 acceptance 验证；新增/主要改动的 capacity/SLO 脚本及测试单独 Ruff/format check 通过。
+- v2 实现已形成 commit `b6a35fef1dd069ebb54b69955058915c722aa34d`，普通 push 到 `origin/codex/complete-evaluation-workflow`；GitHub Actions [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 对该精确 SHA 的 Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build 与 Real Compose acceptance 4/4 全部成功。
+- 在上述 clean SHA 上执行正式 `make phase2-slo`：UTC `2026-08-28T06:07:22.284581+00:00` 至 `06:21:21.681539+00:00`，1 个 warm-up + 恰好 5 个 measured、`discarded_trials=0`，本 invocation 未丢轮。aggregate 为 `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T060722Z-87d7a8af7f91/evidence.json`，SHA-256 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`，状态 `passed`，23/23 SLO 全部通过，capacity model 为 `qualified`。
+- 六个 child 的字节 SHA 与 aggregate 引用 6/6 匹配；四个 source/Compose hash 与 commit blob 4/4 匹配。每个 child 精确为 22 Runs/330 Responses/330 QuestionExecutions/331 reservations（330 actual + 1 conservative），零题错误、projection/duplicate/PEL/lag 漂移为零；cleanup 都是 image `1/1/0/0` 且本项目容器/volume/network/image 实时复核为零。aggregate 与六个 child 的私钥、Provider token、Authorization/Bearer、带密码 DSN 和测试秘密 marker 扫描均为零；aggregate 不含 Run/Worker/container/model/event/image/lease ID、PID、hostname、命令或绝对路径。
+- 关键统计均由 raw wall/sample 重算一致：single/multi/warmed/cold 吞吐 LCB 分别为 `6.800965771/11.603002589/9.486195092/9.324904535 q/s`，配对双/单 Worker ratio LCB 为 `1.628400356`；warmed/cold drain 最大 `6.253076/6.350613s`，kill-fence/lease-expiry/Redis-created→claim 最大恢复 `33.752306/4.031426/1.052824s`。每个 cell 的 5 轮 measured 共 300 题、观测错误为 0，对应 Bernoulli 近似下单侧 95% 描述性上界 `0.009936081944`，不能表述为错误率为零或生产可用性。容量模型给出 `8.122101812 q/s`、`0.541473454 Run/s` 和无新流量时 `5.171075292s` 排空估计；连接边界 `30 <= 80`。这些数字只适用于固定 Mock-only 单机 profile，不是生产/真实 Provider/HA/费用或 exactly-once 结论。
+- 历史 v1 aggregate `f993c11ff1a9f55921b5d7ea14974b0e3ca280f75427095c771ef3f5964ae3b2` 继续保留为 15/18、`failed/not_qualified`；v2 没有复用其任何 trial，也没有删除或重跑 measured-02 来改写 v1 结果。
 
 ## 已知问题与下一步
 
-- 按 ADR-0014 实现 v2 双 backlog、distinct Worker claim 与 capacity-only 镜像 cleanup；形成新 commit/push/精确 SHA CI 后，必须从新的 warm-up 开始完整执行 v2 1+5，不能复用 v1 trial。当前不得声称 P2-01 完成。
+- P2-01 的实现、clean-SHA 远程 CI 与正式 v2 1+5 已完成；后续纯文档收尾 commit 不改变脚本/Compose，也不冒充新的性能取证 SHA。仓库级交付以该文档提交普通 push 后的精确 SHA 4/4 CI 为最终门禁。
 - 本地 evidence 能证明单次 invocation 未丢轮，不能证明不存在已删除的更早 suite；正式记录必须披露本次所有资格尝试。
 - P2-06/P2-07 等正式 closure 仍未完成，Phase 2 保持 `in_progress`。

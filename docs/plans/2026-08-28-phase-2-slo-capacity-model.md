@@ -64,12 +64,12 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 5. [completed] 在精确干净实现 SHA 上运行 v1 真实多轮资格实验。
    - Files/modules: gitignored `.pytest_cache/artifacts/phase2-slo/` 与逐轮 capacity artifacts
    - Validation: 1 轮 warm-up + 5 轮 measured 全部保留；六个 child 硬门禁通过，但 aggregate 15/18 SLO，通过合同正确判为 `unqualified`。不得选择或重跑单轮改写结论。
-6. [in_progress] 冻结并实现 v2 双 backlog 资格合同。
+6. [completed] 冻结并实现 v2 双 backlog 资格合同。
    - Files/modules: ADR-0014、`phase2_capacity.py`、`phase2_slo.py` 及两套脚本测试
    - Validation: 默认 capacity 保持兼容；formal v2 固定 warmed `3/5/8` 与 cold `6/8/10` 两个 AND 门禁、两个 distinct claim Worker、22/330/331 对账、capacity-only 安全镜像 cleanup。
-7. [pending] 提交/push v2 实现，等待精确 SHA CI，并从零执行 v2 1+5。
-   - Validation: 新 clean SHA 的所有必需 CI job 成功；全新 warm-up + 5 measured 不复用 v1 样本；所有 SLO/invariant/cleanup 通过并复核 evidence SHA-256。
-8. [pending] 收敛文档、提交并等待最终精确 SHA CI。
+7. [completed] 提交/push v2 实现，等待精确 SHA CI，并从零执行 v2 1+5。
+   - Validation: clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 run `33146681285` 4/4；全新 1 warm-up + 5 measured 未复用 v1 样本，23/23 SLO、每轮 invariant/cleanup 与 aggregate SHA-256 复核全部通过。
+8. [in_progress] 收敛文档、提交并等待最终精确 SHA CI。
    - Files/modules: README、Performance、Testing、Operations、CHANGELOG、PROJECT_STATUS、Roadmap、Phase 2、NEXT_TASK、本计划与工作日志
    - Validation: 文档只引用实际 evidence；Phase 2 仍 `in_progress`；最终 commit push 后 GitHub Actions 必需 job 对该精确 SHA 全绿。
 
@@ -98,9 +98,9 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 | Alembic metadata | 独立临时 SQLite `alembic upgrade head && alembic check` | 无未迁移 schema diff | 已通过；未改本地默认数据库 |
 | Compose 配置 | `docker compose config --quiet` | exit 0 | 已通过 |
 | harness 自检 | `python3 -I scripts/phase2_slo.py --self-check-only` | 固定合同与安全边界通过 | 已通过 |
-| 真实多轮资格 | `make phase2-slo` | 1 warm-up + 5 measured，所有 SLO/invariant/cleanup 通过 | v1 第三次从零完成 1+5；六个 child 硬门禁通过，但 measured-02 cold burst 使 aggregate 仅 15/18，最终 `unqualified`；v2 尚未运行 |
+| 真实多轮资格 | `make phase2-slo` | 1 warm-up + 5 measured，所有 SLO/invariant/cleanup 通过 | v1 保持 15/18 `unqualified`；v2 在 `b6a35fe…` 从零完成 1+5、23/23、逐轮 22/330/330/331 与 cleanup 全通过，capacity model `qualified` |
 | diff/secret | `git diff --check`、staged secret scan | 无无关改动、秘密或 artifact | `git diff --check` 与 staged scan 已通过；仅命中明确的测试 canary/假 DSN |
-| 远程门禁 | `gh run view <run-id>` | 精确最终 SHA 的必需 job 全成功 | `d5a1bd3` run `33139542534`、`c909f24` run `33139960008`、`dfa67ab` run `33141140969` 均为 4/4 success；v2 实现 SHA 尚未形成 |
+| 远程门禁 | `gh run view <run-id>` | 精确实现 SHA 的必需 job 全成功 | v1 过程 SHA 的 run 均保留；v2 `b6a35fe…` run `33146681285` 4/4 success；纯文档收尾提交独立受自身精确 SHA CI 门禁约束 |
 
 ## Rollback
 
@@ -108,18 +108,18 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 
 ## Documentation updates
 
-- [ ] README / 用户操作说明
-- [ ] Performance / Testing / Operations / Deployment（按实际影响）
-- [ ] Architecture / Security / ADR（安全边界不变时只交叉引用）
-- [ ] CHANGELOG、PROJECT_STATUS、Roadmap、Phase 2、NEXT_TASK、工作日志
+- [x] README / 用户操作说明
+- [x] Performance / Testing / Operations / Deployment（按实际影响）
+- [x] Architecture / Security / ADR（ADR 已在实现提交接受；收尾文档只同步事实）
+- [x] CHANGELOG、PROJECT_STATUS、Roadmap、Phase 2、NEXT_TASK、工作日志
 
 ## Completion evidence
 
-- Changed files: 待完成后填写。
-- Commands run: 待完成后填写实际命令、退出码和测试数。
-- Acceptance evidence: 待记录精确 SHA 的多轮 aggregate path/SHA-256 与逐轮 capacity evidence。
-- Not run: 待完成后填写。
-- Known issues: P2-06/P2-07 仍未完成，Phase 2 保持 `in_progress`。
+- Changed files: 实现提交包含 capacity/SLO producer、consumer、两套测试、ADR-0014 及计划/日志；后续纯文档提交只同步已验证结果，不改变取证代码、配置或 Compose。
+- Commands run: 定向脚本测试 `237 passed`；`make lint`、`make test`（后端 829 passed/29 skipped，前端 38 passed）、`make smoke`、前端 build、Alembic 临时库 check、Compose config、默认 capacity 与 9/9 acceptance 均通过。
+- Acceptance evidence: `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T060722Z-87d7a8af7f91/evidence.json`，SHA-256 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`，绑定 clean `b6a35fe…`，1+5、23/23、`qualified`。
+- Not run: 未调用真实 Provider；未在 GitHub-hosted runner 执行绝对性能资格；未把后续纯文档提交当作新的性能取证 SHA。
+- Known issues: P2-06/P2-07 仍未完成，Phase 2 保持 `in_progress`；纯文档 commit/push 的精确 SHA CI 是本计划最后门禁，且不替代 `b6a35fe…` 的性能证据。
 
 ## Decision and discovery log
 
@@ -132,3 +132,4 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 | 2026-08-28 | discovery | 第二次 suite 的 warm-up 通过，但 Compose v5 为每个隔离 project 写入 project/service image labels，使完整 image ID 跨轮变化；RootFS layers 与只过滤这两个动态 labels 后的 config SHA 实际一致。 | 新增 ADR-0013；raw image ID 仅审计，跨轮锁定 RootFS+稳定 Config（含 Compose version）的 content SHA，保留第二份失败 evidence并再次整套重跑。 |
 | 2026-08-28 | discovery | `dfa67ab` 的 v1 从零完成 1+5，六个 child 硬门禁均通过，但 measured-02 cold burst queue/execution/E2E p95 超过 `3/5/8s`，aggregate 仅 15/18。 | v1 保持 `unqualified`；保留 aggregate SHA `f993c11f…e3b2`，不删样本、不只重跑失败轮。 |
 | 2026-08-28 | decision | v1 把 cold stop/start 与 steady backlog 混在一个 cell，且未证明两个 Worker 都 claim。 | 新增 ADR-0014/v2：warmed `3/5/8` 与 cold `6/8/10` 都是 AND 门禁，要求两个 distinct Worker、22/330/331 对账和项目镜像安全清理；新 SHA 全新 1+5。 |
+| 2026-08-28 | validation | clean `b6a35fe…` 的 v2 从零完成 1 warm-up + 5 measured，23/23 SLO、六轮 hard invariant 与 exact-project cleanup 全通过；aggregate SHA-256 `a76d167b…d0d9`。 | P2-01 实现与正式资格已完成；仓库级 closeout 待证据文档提交自身精确 SHA CI。结论仅限固定 Mock-only 单机 profile，v1 失败历史继续保留，Phase 2 仍 `in_progress`。 |

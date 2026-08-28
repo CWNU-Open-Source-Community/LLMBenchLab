@@ -157,13 +157,15 @@ Web stored 流程如下：
 
 ### 4.1 Phase 2 SLO evidence 安全边界
 
-`make phase2-slo` 的 `P2-local-control-plane-v1` 是完全 Mock-only 的本地控制面资格，不是读取现有模型配置的通用压测。wrapper 只给 child 继承运行本地 Git/Docker 所需的环境 allowlist，移除已知 Provider credential 变量；child validator 还要求 Model 为 Mock、没有 `api_key_env` 或自定义 `base_url`，并拒绝真实 Provider、非有限 policy、脏工作树和跨轮配置/环境漂移。不能通过把真实 Key 改成其他变量名来绕开此边界；资格进程本来就不应在含 Provider credential 的 shell 中运行。
+`make phase2-slo` 的当前正式 profile 是 `P2-local-control-plane-v2`，aggregate schema 为 `llmbenchlab-phase2-slo-evidence-v2`。它是完全 Mock-only、单主机/单故障域的本地控制面资格，不是读取现有模型配置的通用压测。四个 measurement 固定为 seed-balanced 单/双 Worker baseline，随后是不可拆分的 warmed pause 与 cold stop/start backlog；两个 burst 的 raw child 都先以 durable Run/Worker/claim 身份、分段时间和容器事实完成闭环验证，aggregate 才投影匿名计数与时长。wrapper 只给 child 继承运行本地 Git/Docker 所需的环境 allowlist，移除已知 Provider credential 变量；child validator 还要求 Model 为 Mock、没有 `api_key_env` 或自定义 `base_url`，并拒绝真实 Provider、非有限 policy、脏工作树和跨轮配置/环境漂移。不能通过把真实 Key 改成其他变量名来绕开此边界；资格进程本来就不应在含 Provider credential 的 shell 中运行。
 
-raw child 与 aggregate 都写入 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`，不提交、不自动上传。aggregate 使用严格 allowlist，只保存精确 commit、脚本/Compose SHA-256、稳定配置/环境指纹、child 相对路径/hash、脱敏统计/判定、独立 ledger→scope/minute projection 结果和 cleanup 摘要；不复制 child stdout/log、DSN、URL、环境变量、题目、Prompt/Response、keyring/envelope 或 Provider 数据。读取 child evidence 时还限制文件大小、UTF-8/strict JSON、重复键、NaN/Infinity、路径逃逸、symlink 和读取期置换。
+raw child 与 aggregate 都写入 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`，不提交、不自动上传。v2 aggregate 使用严格 allowlist，只保存精确 commit、脚本/Compose SHA-256、稳定配置/环境指纹、child 相对路径/hash、匿名 Worker 参与计数、脱敏 timing/统计/判定、独立 ledger→scope/minute projection 结果和 cleanup 摘要；不复制 raw Run/Model/Worker/container/audit ID、child stdout/log、DSN、URL、环境变量、题目、Prompt/Response、keyring/envelope 或 Provider 数据。读取 child evidence 时还限制文件大小、UTF-8/strict JSON、重复键、NaN/Infinity、路径逃逸、symlink 和读取期置换。
 
-allowlist 只减少聚合面，不等于 artifact 无敏感性。raw child 仍含 Run/容器 ID、数据 hash、资源与运维计数；aggregate 的 commit/hash、主机指纹、SLI 和故障结果也可能暴露内部拓扑或性能。两者都应按内部运维证据保护，公开前人工复核，不把整个 artifact 根、数据库、Compose 展开配置或 `.env` 上传为 CI artifact。Git 忽略不是加密、访问控制、保留策略或安全删除。
+allowlist 只减少聚合面，不等于 artifact 无敏感性。raw child 仍含 Run/Model/Worker/container ID、durable event 时间、数据 hash、资源与运维计数，禁止作为公开附件；aggregate 的主机/环境/配置指纹、内嵌 trial child 路径、SLI 和故障结果也可能暴露内部拓扑或性能，公开状态不得原样复制这些字段。公开记录可以给出仓库内 Git 忽略的 aggregate 相对路径和内容 SHA-256，便于本地操作者定位同一证据，但只摘录经人工复核的精确实现 commit、匿名统计/判定和明确支持边界；不得复制 aggregate 内的 child 路径或环境明细。两类 artifact 都应按内部运维证据保护，不把整个 artifact 根、数据库、Compose 展开配置或 `.env` 上传为 CI artifact。Git 忽略不是加密、访问控制、保留策略或安全删除。
 
-每个 child 位于独立进程组和唯一、正则约束的 Compose project。超时或中断时 wrapper 先发送终止信号，并给 child 最多 420 秒执行 scoped `down -v --remove-orphans` 和零容器/volume/network 复核，之后才只针对该进程组升级终止；该窗口不是允许清理其他项目的授权。失败 evidence 会保留。它能证明一次 invocation 内记录了所有计划轮，不能证明操作者未删除更早的 suite，也不是 WORM、签名 provenance 或生产 SLA 证据。
+每个 child 位于独立进程组和唯一、正则约束的 Compose project。超时或中断时 wrapper 先发送终止信号，并给 child 最多 420 秒执行 scoped `down -v --remove-orphans`、零容器/volume/network 复核和 v2 的唯一项目 backend image 安全清理，之后才只针对该进程组升级终止；该窗口不是允许清理其他项目、共享 tag 或其他 Docker cache 的授权。失败 evidence 会保留。它能证明一次 invocation 内记录了所有计划轮，不能证明操作者未删除更早的 suite，也不是 WORM、签名 provenance 或生产 SLA 证据。
+
+历史 `P2-local-control-plane-v1` 在 clean `dfa67abb1a9a0418a7e3337c179f816e3c69f121` 上只通过 15/18 项 SLO，保持 `unqualified`，不得用 v2 结果追认或覆盖。当前 v2 在 clean `b6a35fef1dd069ebb54b69955058915c722aa34d` 上完成一个 warm-up 和恰好五个 measured trial，23/23 项 SLO 与每轮 hard invariant/cleanup 均通过；可公开的 aggregate 内容 SHA-256 为 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`。该事实仍只证明固定 Mock 单机 profile，不是 Provider 性能、生产 SLA、HA、安全认证或 Phase 2 整体完成证明。
 
 ## 5. `base_url` 与 SSRF
 

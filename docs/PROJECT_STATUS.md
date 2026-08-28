@@ -6,7 +6,7 @@
 
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
-- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础与治理/审计候选门禁已交付；正式 SLO/运维闭环仍有缺口）
+- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计已交付；P2-01 单机资格已验证、仓库级收尾中；P2-06/P2-07 运维闭环仍有缺口）
 - Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（仅可信本地 MMLU-Pro/GPQA-Diamond 客观题提前切片）
 - Phase 4–6：`planned`
 
@@ -14,7 +14,7 @@
 
 `0.1.0` development baseline，REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`；尚未发布正式 Release。
 
-公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`，PR [#1](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/1)。治理实现候选 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 已普通 push；GitHub Actions [run `33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 的 Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build 与 Real Compose acceptance 四个必需 job 均成功。后续文档收尾提交仍必须等待其自身精确 SHA 全绿。
+公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`，PR [#2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)。P2-01 v2 实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 已普通 push；GitHub Actions [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 的 Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build 与 Real Compose acceptance 四个必需 job 均成功。纯文档收尾提交同样独立受精确 SHA CI 门禁约束，且不会改变性能证据绑定的实现 SHA。
 
 ## 已交付基线
 
@@ -39,10 +39,10 @@
 - enhanced capacity 脚本已加入有限 policy、显式 Token/费用边界、sub-15 question quantum、并发 backlog `202/429`、跨 Model 公平、双 Worker、Worker/Redis fault 与 ledger/audit 对账；真实 PostgreSQL 测试代码已加入四层 RPM/TPM/lifetime budget、backlog、settlement/reconcile race 和 audit replay。
 - acceptance harness 已加入三条确定性数据库 seam injection：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复。它们明确不是“精确时刻 SIGKILL”声明；精确候选 SHA 的完整 Compose acceptance 已 9/9 通过。
 - 精确 SHA `665244e…` 的增强 capacity 使用有限 policy、PostgreSQL 16、Redis 7 与两个 Worker 完成：并发 backlog 精确为 4 个 `202` + 2 个 typed `429`，cooperative yield 与跨 Model 公平顺序均有 durable audit 证据，最终 18 Runs/270 Responses/271 ledger/1229 audit 对账且无 active/reserved/overdrawn 漂移。
+- P2-01 的 `P2-local-control-plane-v2` 已在干净 SHA `b6a35fe…` 从零执行 1 次 warm-up + 恰好 5 次 measured trial，本次 invocation 的 `discarded_trials=0`；四个 cell、23/23 SLO 与每轮 hard invariant 全部通过，容量模型为 `qualified`。aggregate SHA-256 为 `a76d167b…d0d9`，六轮均精确完成 22 Runs/330 Responses/330 QuestionExecutions/331 reservations，并清理本项目容器、卷、网络和唯一 build image。历史 v1 aggregate `f993c11f…e3b2` 继续保持 `failed/not_qualified`。
 
 ## 仍未完成
 
-- P2-01：正式 SLO、容量模型、多轮统计、置信/变异和 lease/heartbeat/scan/backlog 参数校准。
 - P2-06：受控 metrics exporter、告警规则/响应、audit retention archive/restore、Worker DB-time progress/liveness、全日志源治理；现有 dependency probe 不能证明主循环正在推进。
 - P2-07：PostgreSQL backup/restore、数据库与 keyring 配对恢复、audit archive/Redis 重建、剩余故障矩阵和完整运维演练。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
@@ -64,18 +64,19 @@
 
 | 验证 | 实际结果 | 当前结论 |
 | --- | --- | --- |
-| 治理候选远程 CI | `665244e…` run `33099260233` 4/4 | 精确实现 SHA 全绿；PR #1 仍 open，未合并 |
+| P2-01 实现远程 CI | `b6a35fe…` run `33146681285` 4/4 | 精确实现 SHA 全绿；PR #2 仍 open，未合并 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
-| 最新本地 `make test` | 后端 `604 passed, 29 skipped`；前端 `38 passed` | 文档收尾前重跑通过 |
+| 最新本地 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现冻结树通过 |
 | 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 本地通过；同一实现 SHA 的远程 integration 亦成功 |
 | 最新本地 `make smoke` | `1 passed, 7 deselected`，仅 Mock | 本地冻结树通过；没有调用真实 Provider |
 | 定向治理/API/Worker | 目标套件零失败；早期独立审计 `218 passed`；完整性边界集合 `18 passed` | 已被最终全量、真实 integration 与精确候选 evidence 补充 |
 | SQLite/PostgreSQL migration | 隔离 SQLite 与真实 PostgreSQL prepare/upgrade/downgrade guard/upgrade/check 通过 | 候选与远程 integration 覆盖 |
 | 增强 capacity | 精确 `665244e…`，evidence SHA-256 `40deadeb…0588` | passed；Mock-only，cleanup 容器/卷/网络为空，不是生产 SLA |
 | 完整 acceptance | 精确 `665244e…`，9/9，evidence SHA-256 `ab311665…ddec` | passed；含三条 deterministic DB seam，cleanup 为空 |
+| 正式 v2 单机资格 | 精确 `b6a35fe…`，1+5、23/23，aggregate SHA-256 `a76d167b…d0d9` | passed/qualified；Mock-only 单机控制面，不是生产或真实 Provider SLA |
 | 真实 Provider | 未运行（有意） | 所有自动化只使用 Mock/Stub/MockTransport |
 
-详细命令与限制见 [当前工作日志](worklogs/2026-08-27-phase-2-governance-audit-performance.md) 和 [TESTING.md](TESTING.md)。
+详细命令与限制见 [当前工作日志](worklogs/2026-08-28-phase-2-slo-capacity-model.md) 和 [TESTING.md](TESTING.md)。
 
 ## 最近工作日志
 
@@ -85,7 +86,8 @@
 - [Web Run UX 与生成预算](worklogs/2026-08-27-web-run-ux-and-generation-budgets.md)
 - [OpenAI-compatible SSE](worklogs/2026-08-27-openai-compatible-sse-streaming.md)
 - [Phase 2 治理、审计与性能](worklogs/2026-08-27-phase-2-governance-audit-performance.md)
+- [Phase 2 正式 SLO 与容量模型](worklogs/2026-08-28-phase-2-slo-capacity-model.md)
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 是当前合同：治理/审计候选的真实 PostgreSQL integration、enhanced capacity/acceptance、三条 crash seam、实现 commit/push 与精确 SHA CI 已完成；下一步继续正式 SLO/容量模型、Exporter/告警、retention archive、backup/restore 与 Worker progress/liveness。Phase 2 在这些阶段级验收完成前保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 是当前合同：治理/审计候选已交付，P2-01 v2 已完成独立实现提交、正式本机证据和实现 SHA CI；其仓库级收尾仍以本次文档提交自身的精确 SHA CI 为最后门禁。后续工程范围是 P2-06 的 Exporter/告警/retention/Worker progress，以及 P2-07 的 backup/restore 和剩余故障演练；Phase 2 继续保持 `in_progress`。

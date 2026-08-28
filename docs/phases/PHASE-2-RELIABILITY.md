@@ -9,10 +9,13 @@
 - 治理与审计：[ADR-0009](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)
 - 交付边界修正：[ADR-0010](../decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)
 - pre-send retry 修正：[ADR-0011](../decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)
+- 单机资格：[ADR-0012](../decisions/ADR-0012-single-host-slo-capacity-qualification.md)
+- 镜像指纹修正：[ADR-0013](../decisions/ADR-0013-stable-image-content-fingerprint.md)
+- 双 backlog 资格：[ADR-0014](../decisions/ADR-0014-dual-backlog-slo-profile.md)
 
 ## 阶段目标
 
-把单进程 SQLite MVP 升级为以 PostgreSQL 为共享事实来源、Redis Streams 为可丢失/可重复通知层、独立 Worker 为唯一常规执行入口的可靠任务系统。在数据库时间、租约/fencing、逐题幂等、可恢复治理和 typed audit 保护下维持 `llmbenchlab-protocol-v1` 证据。本阶段不承诺 Provider exactly-once、生产 HA、无限横向扩展或未经正式测量的 SLA。
+把单进程 SQLite MVP 升级为以 PostgreSQL 为共享事实来源、Redis Streams 为可丢失/可重复通知层、独立 Worker 为唯一常规执行入口的可靠任务系统。在数据库时间、租约/fencing、逐题幂等、可恢复治理和 typed audit 保护下维持 `llmbenchlab-protocol-v1` 证据。本阶段不承诺 Provider exactly-once、生产 HA、无限横向扩展；已完成的 Mock-only 单机资格也不是生产或真实 Provider SLA。
 
 ## 当前功能范围
 
@@ -25,14 +28,14 @@
 - 有限 backlog、typed `429`、database not-before、question quantum、dispatch/failure 分离和跨 Model due ordering。
 - typed audit、分页 Run audit、task history counters、基于 Run 数据库时间戳的 queue/execution/end-to-end latency、严格规范化 Provider metadata 和非秘密 credential audit。
 - Run Detail 展示 managed/delayed/exhausted、治理原因和明确 UTC not-before；旧 Run 与可信本地 CLI 明确为 `legacy_unmanaged`。
-- 真实 PostgreSQL 竞争测试及 Mock-only enhanced capacity/acceptance 工具；精确实现 SHA 的完整 capacity、9/9 acceptance 与远程 4/4 CI 已通过。
+- 真实 PostgreSQL 竞争测试及 Mock-only enhanced capacity/acceptance；精确实现 SHA 的完整 capacity、9/9 acceptance、`P2-local-control-plane-v2` 多轮单机资格与远程 4/4 CI 已通过。
 
 ## 非目标
 
 - 不新增标准 Benchmark、代码沙箱、Judge、Arena、Agent、认证、多租户或公共部署。
 - 不把本地 ledger/Response 幂等描述为 Provider 请求或账单 exactly-once。
 - 不把 fixed-minute limiter 描述为平滑 token bucket，不把 Mock 容量描述为真实 Provider 或生产 SLA。
-- 本治理切片不直接交付正式 SLO、Prometheus/OTel Exporter、告警规则、audit retention archive、备份恢复认证或 Worker 主循环进展探针。
+- 单机资格不交付生产 SLA、Prometheus/OTel Exporter、告警规则、audit retention archive、备份恢复认证或 Worker 主循环进展探针。
 - 不改变题目、评分分母、聚合、排行榜隔离或 protocol-v1 语义。
 
 ## 支持边界与不变量
@@ -55,13 +58,13 @@
 
 | ID | 状态 | 已交付与剩余范围 |
 | --- | --- | --- |
-| P2-01 一致性与容量设计 | `partial` | DB truth、lease/fencing、四层治理、容量脚本结构已交付；正式 SLO、容量模型、多轮统计与参数校准未完成 |
+| P2-01 一致性与容量设计 | `qualification_passed_closeout_pending` | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已交付；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；待证据文档提交自身 CI 后完成仓库级收尾 |
 | P2-02 PostgreSQL 迁移 | `slice_delivered` | `0002`/`0003` 可靠性与凭据基础、`0004` 治理/审计 schema、12 表 importer 与双方言测试已实现；本地及精确 SHA 远程真实 PG migration/check/integration 已通过，无自动反向回迁 |
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；Worker 主循环 progress/liveness 事实仍未交付 |
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
 | P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
 | P2-06 可观测性 | `slice_delivered` | DB gauges、typed audit/history、Run latency、Provider metadata、credential audit 和 UI 状态已实现；Exporter/告警、retention archive、Worker progress/liveness、全日志源治理仍未完成 |
-| P2-07 验证与运维 | `slice_delivered` | enhanced capacity/PG tests、Operations/Performance/Deployment 与精确候选 evidence 已交付；正式 SLO、backup/restore、完整失败矩阵与告警响应仍未完成 |
+| P2-07 验证与运维 | `slice_delivered` | enhanced capacity/PG tests、正式 v2 单机资格、Operations/Performance/Deployment 与精确 evidence 已交付；backup/restore、完整失败矩阵与告警响应仍未完成 |
 
 `slice_delivered` 表示该垂直切片及其候选门禁已交付，不表示整个阶段完成。Phase 2 必须保持 `in_progress`。
 
@@ -74,7 +77,7 @@
 - [x] **治理候选门禁**：精确 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 的真实 PostgreSQL integration、增强 capacity、9/9 acceptance、全量 lint/test/smoke/migration/Compose 与远程 CI 均通过。
 - [x] **crash seam 验收**：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复三条 deterministic DB seam injection 在完整 Compose acceptance 通过；它们不冒充精确时刻 `SIGKILL`。
 - [x] **远程实现门禁**：GitHub Actions run [`33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 对精确实现 SHA 4/4 成功。
-- [ ] **P2-01 正式闭环未通过**：没有正式 SLO/容量模型、多轮统计或生产参数校准。
+- [x] **P2-01 单机资格**：clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 与 `qualified` 容量模型；aggregate SHA-256 `a76d167b…d0d9`。该结论只适用于固定 Mock 单机 profile。
 - [ ] **P2-06 正式闭环未通过**：没有 exporter/告警、audit retention archive 或 Worker progress/liveness；现有 dependency probe 不能证明主循环正在推进。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
@@ -83,7 +86,7 @@
 | 验证 | 实际结果 | 限制 |
 | --- | --- | --- |
 | `make lint` | 最新本地冻结树通过 | 同一实现 SHA 远程 lint/test 通过 |
-| 最新本地 `make test` | 后端 `604 passed, 29 skipped`；前端 `38 passed` | 文档收尾前重跑通过 |
+| 最新本地 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现冻结树通过 |
 | 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 本地通过；同一实现 SHA 远程 integration 通过 |
 | `make smoke` | `1 passed, 7 deselected`，仅 Mock | 最新本地冻结树通过；未调用真实 Provider |
 | 定向治理/API/Worker | 目标套件零失败；独立审计记录 `218 passed`；完整性边界集合 `18 passed` | 已由最终全量、真实 integration 与候选 evidence 补充 |
@@ -91,7 +94,8 @@
 | Compose config | `docker compose config --quiet` exit 0 | 不等于服务/容量 acceptance |
 | enhanced capacity | `665244e…` 上通过；evidence SHA-256 `40deadeb…0588` | 有限 policy、4×202/2×429、yield/fairness/fault/reconciliation；Mock-only 非 SLA |
 | full Compose acceptance | `665244e…` 上 9/9；evidence SHA-256 `ab311665…ddec` | 三条 deterministic seam 与 cleanup 均通过 |
-| 远程 CI | run `33099260233` 4/4 | 精确实现 SHA 全绿；PR #1 未合并 |
+| 正式 v2 单机资格 | `b6a35fe…` 上 1+5、23/23；aggregate SHA-256 `a76d167b…d0d9` | 每轮 22/330/330/331、hard invariant 与 exact-project cleanup 通过；Mock-only 非生产 SLA |
+| 远程 CI | run `33146681285` 4/4 | 精确 v2 实现 SHA 全绿；PR #2 未合并 |
 | 设计/计时修复远程 CI | SHA `1cd19c51ed309316047a18ed3b2a308647af495d`，run `33081854406`，4/4 | 不包含当前治理实现 |
 
 所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
@@ -108,18 +112,18 @@
 
 | 风险 | 已有控制 | 剩余工作 |
 | --- | --- | --- |
-| 限额并发突破 | canonical scope、固定锁序、DB transaction、ledger 重算及精确候选真实 PG integration | 正式规模参数校准与持续回归 |
+| 限额并发突破 | canonical scope、固定锁序、DB transaction、ledger 重算、真实 PG integration 与 v2 多轮资格 | 超出固定单机 profile 时重新测量并持续回归 |
 | Provider 调用/费用重复 | send-start marker、保守结算、本地幂等及三条 crash seam acceptance | 外部 exactly-once 不可承诺 |
-| 长 Run 饥饿 | finite quantum、due ordering、dispatch/failure 分离及精确候选跨 Model capacity evidence | 多轮/更大规模正式容量模型 |
+| 长 Run 饥饿 | finite quantum、due ordering、dispatch/failure 分离及 v2 每轮公平性硬门禁 | 更大规模或不同 Worker 拓扑需重新建模 |
 | Worker 停滞不可见 | dependency probe、typed current gauges | DB-time progress/liveness、exporter 与 alert |
 | 审计增长/泄密 | 固定 allowlist、无正文/URL/Key、pagination | retention archive/restore 和 cardinality 运行边界 |
-| 容量结论过度外推 | Mock-only、环境/config/evidence 记录 | 正式 SLO/容量模型、多轮测量，不冒充 Provider/生产 SLA |
+| 容量结论过度外推 | Mock-only、环境/config/evidence 指纹、1+5 多轮和明确支持 profile | 不冒充 Provider/生产 SLA；环境或 profile 变化必须重新资格 |
 | 灾难恢复失败 | 12 表 importer、迁移 guard、独立 keyring 边界 | PostgreSQL backup/restore、keyring 配对和 audit archive 演练 |
 
 ## 交付物与下一任务
 
-已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 API/Architecture/Security/Testing/Deployment/Operations/Performance 与状态文档。实现 SHA `665244e…` 已通过真实 integration/capacity/acceptance、三条 crash seam 与远程 4/4 CI。下一步按 [NEXT_TASK.md](../NEXT_TASK.md) 继续正式 SLO、Exporter/告警、retention archive、Worker progress/liveness 和 backup/restore。
+已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 P2-01 v2 多轮资格。治理 SHA `665244e…` 已通过真实 integration/capacity/acceptance；SLO SHA `b6a35fe…` 已通过 23/23 本地资格与远程 4/4 CI。下一步按 [NEXT_TASK.md](../NEXT_TASK.md) 继续 Exporter/告警、retention archive、Worker progress/liveness 和 backup/restore。
 
 ## 状态
 
-`in_progress`。P2-05/P2-06/P2-07 的治理/审计/容量切片及候选级真实证据、远程门禁已经交付，但正式 SLO/Exporter/告警/retention/backup/Worker-progress 等阶段验收仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+`in_progress`。P2-01 的实现/正式资格已通过但仓库级收尾仍待证据文档 SHA CI；P2-05 已交付，P2-06/P2-07 也已有治理/审计/容量切片和远程门禁，但 Exporter/告警/retention/backup/Worker-progress 等阶段验收仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。

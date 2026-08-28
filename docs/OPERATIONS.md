@@ -205,21 +205,23 @@ docker compose up -d --no-deps --scale worker=1 worker
 
 ### 6.3 固定单机资格与扩缩容门禁
 
-`P2-local-control-plane-v1` 只限定一台可信主机、一个 API、PostgreSQL 16、Redis 7 和两个 Worker 的 Mock 控制面。计划用该 profile 支持扩容或发布决策时，先确认精确 commit 工作树完全干净、主机至少 8 logical CPU/8,000,000,000 bytes RAM、Docker 至少 8 CPU/4,000,000,000 bytes memory、PostgreSQL `max_connections >= 100`，并停止其他会争用 CPU、内存、Docker 或数据库的负载。不得注入真实 Provider Key；该 qualification 不测网络模型。
+`P2-local-control-plane-v2` 只限定一台可信主机、一个 API、PostgreSQL 16、Redis 7 和两个 Worker 的 Mock 控制面。计划用该 profile 支持扩容或发布决策时，先确认精确 commit 工作树完全干净、主机至少 8 logical CPU/8,000,000,000 bytes RAM、Docker 至少 8 CPU/4,000,000,000 bytes memory、PostgreSQL `max_connections >= 100`，并停止其他会争用 CPU、内存、Docker 或数据库的负载。不得注入真实 Provider Key；该 qualification 不测网络模型，也不证明 HA、生产 SLO/SLA 或灾难恢复。
 
 Compose profile 固定每进程 `pool_size=5`、`max_overflow=5`，因此一个 API 加两个 Worker 的应用连接上界为 `(1 + 2) × (5 + 5) = 30`；在 PostgreSQL 100 连接门槛下至少另留 20 个连接给迁移、探针和运维。Worker 固定 `lease/heartbeat/poll=30/10/1s`、`max_attempts=3`、retry backoff `base/cap=1/30s`，不能把日常 `phase2-capacity` 的快速 `6/2/0.15s` 故障参数当作正式恢复时间证据。
 
-执行并保留 aggregate 与每个 child 的 SHA-256：
+执行并在内部保留 aggregate 与每个 child 的 SHA-256：
 
 ```bash
 make phase2-slo
 ```
 
-该命令串行运行 1 次 warm-up 和 5 次 measured trial。只有所有轮都满足预登记吞吐/延迟/scale/recovery 门槛，且独立 ledger→scope/minute projection、唯一性、公平性、fault、Redis PEL/lag 和 cleanup 硬门禁全部为零漂移，容量模型才会输出 `qualified`。吞吐由 `completed_questions / wall_duration_seconds` 重算；双/单 Worker scale 必须使用同一 trial 的配对 ratio，不能从不同运行挑选最优值拼接。失败 suite 原样保留，不删除异常轮或仅重跑失败 cell。
+该命令串行运行 1 次 warm-up 和恰好 5 次 measured trial。每轮固定单 Worker、双 Worker、warmed pause burst 和 cold start burst 四个 cell；两个 burst 都是 AND 门禁，并由 durable audit 证明两个已验证 Worker 参与。aggregate 的 23 项 SLO 由 22 项吞吐/变异/scale/p95/drain/recovery 判定和 1 项 `hard_correctness_and_cleanup` 组成；后一项要求独立 ledger→scope/minute projection、精确 22 Runs/330 Responses/330 QuestionExecutions/331 reservations、唯一性、公平性、fault、Redis PEL/lag 和 cleanup 全部通过。只有 23 项都成功，容量模型才会输出 `qualified`。吞吐由 `completed_questions / wall_duration_seconds` 重算；双/单 Worker scale 必须使用同一 trial 的配对 ratio，不能从不同运行挑选最优值拼接。失败 suite 原样保留，不删除异常轮或仅重跑失败 cell。
 
-合格容量模型使用双 Worker吞吐 one-sided 95% LCB `mu_lcb`、安全系数 `0.70`、15 题/Run 和 ledger 实际 Provider attempt/题估计安全 Run 到达率；如果任一 SLO 失败或 LCB 非正，输出为 `not_qualified`，不得人工套公式产生容量数字。模型仍只适用于相同 Mock 数据、硬件、容器资源和 commit。扩到第三个 Worker、改变 pool/retry/lease、切换真实 Provider 或把服务移到多主机都必须重新设计/测量，不能沿用该结论。
+正式 v2 已在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1+5，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；同 SHA 的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功。双 Worker one-sided 95% LCB 11.603003 q/s 乘 0.70 得到 8.122102 q/s，再按 15 题/Run 得到 0.541473 Run/s；估计无新流量 backlog drain 为 5.171075 秒。应用连接上界仍为 30，低于 PostgreSQL 运维预留后的 80。任一 SLO 失败或 LCB 非正时必须输出 `not_qualified`，不得人工套公式产生容量数字；扩到第三个 Worker、改变 pool/retry/lease、切换真实 Provider 或移到多主机都必须重新设计和测量。
 
-raw 与 aggregate evidence 都在 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`；不得提交或默认上传。aggregate 虽只保留 allowlist，仍包含 commit/hash、资源指纹、SLI 和运维结果，应按内部证据保护。child 超时/中断后有 420 秒 scoped cleanup 窗口；命令返回后仍应核对 artifact 中容器、volume、network 全部为 0。GitHub-hosted CI 只验证 validator/统计/失败路径，不是绝对性能复测；正式记录还必须关联同一精确 SHA 的 required CI。
+raw 与 aggregate evidence 都在 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`；不得提交或默认上传。正式 v2 aggregate 为 `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T060722Z-87d7a8af7f91/evidence.json`，SHA-256 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`。公开记录只使用该 aggregate 相对路径/hash 和匿名结果；不得发布 raw child 路径、内部 Run/Worker/容器/模型/事件/镜像/lease 标识、宿主指纹或原始日志。child 超时/中断后有 420 秒 scoped cleanup 窗口；v2 每轮仅在本项目容器、volume、network 已为空，且镜像 exact project、唯一 tag、无共享 alias/容器引用时，才非强制删除自己的 build image。正式六轮和 suite 后 live 复核的本项目容器、volume、network、image 都为 0；禁止用 `--force`、通配、`image prune` 或 `compose down --rmi all` 扩大删除范围。
+
+历史 `P2-local-control-plane-v1` 在 clean `dfa67abb1a9a0418a7e3337c179f816e3c69f121` 完成 1+5，但 aggregate `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T041254Z-5fde74882caf/evidence.json`（SHA-256 `f993c11ff1a9f55921b5d7ea14974b0e3ca280f75427095c771ef3f5964ae3b2`）只有 15/18 SLO，永久为 `failed/not_qualified`；对应 [CI run 33141140969](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33141140969) 4/4 也不能改变本地资格失败。v1 当时清理了项目容器、volume、network，但保留六个 build-cache image；不得追写为全资源零残留、删除失败轮或复用样本。
 
 ## 7. Redis 故障与恢复
 
