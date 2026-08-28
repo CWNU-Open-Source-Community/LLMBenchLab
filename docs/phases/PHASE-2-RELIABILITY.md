@@ -58,7 +58,7 @@
 
 | ID | 状态 | 已交付与剩余范围 |
 | --- | --- | --- |
-| P2-01 一致性与容量设计 | `qualification_passed_closeout_pending` | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已交付；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；待证据文档提交自身 CI 后完成仓库级收尾 |
+| P2-01 一致性与容量设计 | `completed` | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已交付；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；证据文档 commit `875f13a…` 已 push，精确 SHA CI 4/4 成功 |
 | P2-02 PostgreSQL 迁移 | `slice_delivered` | `0002`/`0003` 可靠性与凭据基础、`0004` 治理/审计 schema、12 表 importer 与双方言测试已实现；本地及精确 SHA 远程真实 PG migration/check/integration 已通过，无自动反向回迁 |
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；Worker 主循环 progress/liveness 事实仍未交付 |
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
@@ -77,7 +77,7 @@
 - [x] **治理候选门禁**：精确 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 的真实 PostgreSQL integration、增强 capacity、9/9 acceptance、全量 lint/test/smoke/migration/Compose 与远程 CI 均通过。
 - [x] **crash seam 验收**：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复三条 deterministic DB seam injection 在完整 Compose acceptance 通过；它们不冒充精确时刻 `SIGKILL`。
 - [x] **远程实现门禁**：GitHub Actions run [`33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 对精确实现 SHA 4/4 成功。
-- [x] **P2-01 单机资格**：clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 与 `qualified` 容量模型；aggregate SHA-256 `a76d167b…d0d9`。该结论只适用于固定 Mock 单机 profile。
+- [x] **P2-01 完成**：clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 与 `qualified` 容量模型；aggregate SHA-256 `a76d167b…d0d9`。证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 已普通 push，[GitHub Actions run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 对该精确 SHA 4/4 成功。结论只适用于固定 Mock 单机 profile。
 - [ ] **P2-06 正式闭环未通过**：没有 exporter/告警、audit retention archive 或 Worker progress/liveness；现有 dependency probe 不能证明主循环正在推进。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
@@ -126,4 +126,4 @@
 
 ## 状态
 
-`in_progress`。P2-01 的实现/正式资格已通过但仓库级收尾仍待证据文档 SHA CI；P2-05 已交付，P2-06/P2-07 也已有治理/审计/容量切片和远程门禁，但 Exporter/告警/retention/backup/Worker-progress 等阶段验收仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+`in_progress`。P2-01 已完成，P2-05 已交付，P2-06/P2-07 也已有治理/审计/容量切片和远程门禁，但 Exporter/告警/retention/backup/Worker-progress 等阶段验收仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。

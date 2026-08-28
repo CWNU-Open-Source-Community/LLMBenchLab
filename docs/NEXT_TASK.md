@@ -1,6 +1,6 @@
 # 下一任务：Phase 2 可观测性、保留与恢复闭环
 
-> 状态：`blocked_on_closeout_ci`；治理/审计已交付，P2-01 实现/正式资格已通过，P2-06/P2-07 等待证据文档提交的精确 SHA CI 后再开始
+> 状态：`ready`；治理/审计与 P2-01 已交付，Phase 2 仍保持 `in_progress`，现在可以开始 P2-06/P2-07
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[ADR-0012](decisions/ADR-0012-single-host-slo-capacity-qualification.md)、[ADR-0013](decisions/ADR-0013-stable-image-content-fingerprint.md)、[ADR-0014](decisions/ADR-0014-dual-backlog-slo-profile.md)
 
@@ -8,7 +8,7 @@
 
 Phase 2 治理/审计垂直切片已经作为实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 提交并 push：Alembic `20260827_0004`、六类治理/审计表与 12 表 importer、global/provider/model/run 四层 per-attempt 治理、固定窗口 RPM/TPM 和 lifetime request/Token/USD budget、policy/hash 与 Run override 冻结、materialized counter/ledger 漂移 fail-closed、confirmed pre-send retry generation、有限 question quantum/backlog、公平排序、typed audit/history、Provider metadata、credential audit、前端治理状态与真实 PostgreSQL 竞争测试。P2-01 随后在独立实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 交付 ADR-0012～0014、v2 四 cell 多轮资格、恢复/连接模型和 exact-project cleanup。
 
-治理 SHA 的增强 capacity evidence SHA-256 为 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`；完整 acceptance 9/9，evidence SHA-256 为 `ab311665ff0cb834efdd648cd634f943a4cbc5b8b00728ac8597a288a877ddec`。P2-01 冻结树的本地门禁为后端 `829 passed, 29 skipped`、前端 `38 passed`，lint、Mock smoke、前端 build、Alembic 与 Compose config 均通过；`P2-local-control-plane-v2` 在 clean SHA 上完成 1 warm-up + 恰好 5 measured、23/23 SLO 和逐轮 hard invariant/cleanup，aggregate SHA-256 为 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`。GitHub Actions [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 对同一实现 SHA 4/4 成功。先完成证据文档提交的精确 SHA 4/4 CI，再把本文件状态改为 `ready` 并开始 P2-06/P2-07；不得重复候选或资格工作，也不得跳到 Phase 3。
+治理 SHA 的增强 capacity evidence SHA-256 为 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`；完整 acceptance 9/9，evidence SHA-256 为 `ab311665ff0cb834efdd648cd634f943a4cbc5b8b00728ac8597a288a877ddec`。P2-01 冻结树的本地门禁为后端 `829 passed, 29 skipped`、前端 `38 passed`，lint、Mock smoke、前端 build、Alembic 与 Compose config 均通过；`P2-local-control-plane-v2` 在 clean SHA 上完成 1 warm-up + 恰好 5 measured、23/23 SLO 和逐轮 hard invariant/cleanup，aggregate SHA-256 为 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`。GitHub Actions [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 对同一实现 SHA 4/4 成功；证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 也已 push，[run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 对该精确 SHA 4/4 成功。P2-01 已完成，现在直接继续 P2-06/P2-07；不得重复候选或资格工作，也不得跳到 Phase 3。
 
 ## 已完成的候选门禁合同
 
@@ -77,15 +77,15 @@ git diff --check
 - 等待该精确 commit SHA 的四个 GitHub Actions 必需 job 全部成功。任何失败都读取日志、修复、创建新 commit、push 并等待新 SHA；不能用本地通过替代远程绿色。
 - commit/SHA、branch、Actions URL、job 结论、capacity/acceptance artifact path 与 SHA-256、命令计数和清理结果已补入 Changelog、Project Status、Phase 2、计划与工作日志。
 
-### 5. P2-01 单机控制面资格（实现与正式证据已完成，仓库级收尾中）
+### 5. P2-01 单机控制面资格（已完成）
 
 - 历史 v1 clean-SHA 1+5 aggregate 只通过 15/18，继续永久记录为 `failed/not_qualified`；未删除 measured-02，也未只重跑失败 cell。
 - ADR-0014 在任何 v2 样本前冻结 warmed `3/5/8s` 与 cold `6/8/10s` 两个 AND backlog 门禁、两个 distinct validated Worker、22/330/330/331 对账和 project-image cleanup。
 - clean SHA `b6a35fe…` 的全新 v2 invocation 保留 1 warm-up + 5 measured，23/23 SLO 全部通过，容量模型为 `qualified`。该结论只适用于 evidence 记录的 Mock-only 单机 profile，不是生产、真实 Provider、HA、费用或 exactly-once 证明。
 
-## 排队中的下一工程任务：Phase 2 正式闭环
+## 当前工程任务：Phase 2 正式闭环
 
-治理切片已交付，P2-01 的实现与正式证据也已取得精确 SHA 绿色；证据文档提交仍须通过自身精确 SHA CI。该门禁成功前不得开始下列工程范围；门禁成功并将本文件改回 `ready` 后，按 P2-06、P2-07 推进，全部完成后 Phase 2 才能评估是否改为 `completed`。
+治理切片与 P2-01 已交付，证据文档 commit `875f13a…` 的精确 SHA CI 也已 4/4 成功。现在按 P2-06、P2-07 推进；下列范围全部完成后，Phase 2 才能评估是否改为 `completed`。
 
 ### P2-06：Exporter、告警、retention 与 Worker progress
 
@@ -115,12 +115,12 @@ git diff --check
 
 ## Definition of Done
 
-- 已完成/收尾切片：治理/审计已交付；P2-01 已有独立实现 commit、实际 evidence、secret/diff/cleanup 审计和实现 SHA 4/4 CI，证据文档提交自身的精确 SHA CI 是最后仓库级门禁；v1 失败与 v2 通过事实同时保留。
+- 已完成切片：治理/审计与 P2-01 已交付；P2-01 已有独立实现 commit、实际 evidence、secret/diff/cleanup 审计和实现 SHA 4/4 CI，证据文档 commit `875f13a…` 自身的精确 SHA CI 也已 4/4 成功；v1 失败与 v2 通过事实同时保留。
 - Phase 2 整体：除上述切片外，Exporter/告警、audit retention archive、Worker progress/liveness、备份恢复和剩余故障矩阵均实现并验证；所有 Phase 2 验收项有可复核证据。
 - 任一关键项未运行或失败时，Phase 2 必须保持 `in_progress`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
 
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-先确认 P2-01 证据文档提交的精确 SHA 已通过 GitHub Actions 4/4；未全绿时只完成该收尾，不得开始新工程。门禁成功并把 docs/NEXT_TASK.md 状态改为 `ready` 后，执行“Phase 2 可观测性、保留与恢复闭环”：治理/审计候选 `665244e095905083b606b8e98e946ed1a02dc0fc` 与 P2-01 v2 实现 `b6a35fef1dd069ebb54b69955058915c722aa34d` 的实际 evidence 和实现 SHA CI 已完成，不要重复实现、重跑碰绿或改写 v1/v2 证据。建立新的工作日志与执行计划，交付受控 exporter/告警、低基数标签、Worker DB-time progress/liveness、audit retention archive/restore；再演练 PostgreSQL 与数据库外 keyring 配对 backup/restore、Redis 重建和剩余故障矩阵。自动化只能用 Mock/Stub，不得调用真实 Provider；保持 protocol-v1、ledger/DB truth、write-only Key 和 fail-closed 边界。每个独立切片都须测试、提交、push 并等待精确 SHA CI；正式闭环未全部满足前 Phase 2 保持 in_progress，不得跳到 Phase 3 或宣称生产 HA/Provider exactly-once。
+请执行 docs/NEXT_TASK.md 的“Phase 2 可观测性、保留与恢复闭环”。治理/审计候选 `665244e095905083b606b8e98e946ed1a02dc0fc`、P2-01 v2 实现 `b6a35fef1dd069ebb54b69955058915c722aa34d` 与证据文档 `875f13a253c40b7573d45c6287385e60f2bb8f04` 的实际 evidence 和精确 SHA CI 已完成，不要重复实现、重跑碰绿或改写 v1/v2 证据。建立新的工作日志与执行计划，交付受控 exporter/告警、低基数标签、Worker DB-time progress/liveness、audit retention archive/restore；再演练 PostgreSQL 与数据库外 keyring 配对 backup/restore、Redis 重建和剩余故障矩阵。自动化只能用 Mock/Stub，不得调用真实 Provider；保持 protocol-v1、ledger/DB truth、write-only Key 和 fail-closed 边界。每个独立切片都须测试、提交、push 并等待精确 SHA CI；正式闭环未全部满足前 Phase 2 保持 in_progress，不得跳到 Phase 3 或宣称生产 HA/Provider exactly-once。
 ```

@@ -10,7 +10,7 @@
 - 关联任务：[NEXT_TASK — P2-01](../NEXT_TASK.md)
 - 执行计划：[Phase 2 正式 SLO 与容量模型执行计划](../plans/2026-08-28-phase-2-slo-capacity-model.md)
 - 架构决定：[ADR-0012](../decisions/ADR-0012-single-host-slo-capacity-qualification.md)、[ADR-0013](../decisions/ADR-0013-stable-image-content-fingerprint.md)、[ADR-0014](../decisions/ADR-0014-dual-backlog-slo-profile.md)
-- 当前状态：`in_progress`
+- 当前状态：`completed`
 
 ## 目标
 
@@ -18,7 +18,7 @@
 
 ## 背景
 
-治理/审计候选实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 已有单轮 enhanced capacity、9/9 acceptance、真实 PostgreSQL/Redis integration 与远程 4/4 CI。现有 capacity evidence 明确只是一次观测，不定义 SLO，也没有跨轮变异。`docs/NEXT_TASK.md` 把 P2-01 列为正式 Phase 2 closure 的首项，要求定义受支持拓扑、容量假设、多轮统计和 lease/heartbeat/scan/backoff/backlog/Worker 边界。
+本任务启动时，治理/审计候选实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 已有单轮 enhanced capacity、9/9 acceptance、真实 PostgreSQL/Redis integration 与远程 4/4 CI。既有 capacity evidence 明确只是一次观测，不定义 SLO，也没有跨轮变异；当时 `docs/NEXT_TASK.md` 把 P2-01 列为正式 Phase 2 closure 的首项，要求定义受支持拓扑、容量假设、多轮统计和 lease/heartbeat/scan/backoff/backlog/Worker 边界。
 
 ## 范围
 
@@ -130,9 +130,10 @@
 - 六个 child 的字节 SHA 与 aggregate 引用 6/6 匹配；四个 source/Compose hash 与 commit blob 4/4 匹配。每个 child 精确为 22 Runs/330 Responses/330 QuestionExecutions/331 reservations（330 actual + 1 conservative），零题错误、projection/duplicate/PEL/lag 漂移为零；cleanup 都是 image `1/1/0/0` 且本项目容器/volume/network/image 实时复核为零。aggregate 与六个 child 的私钥、Provider token、Authorization/Bearer、带密码 DSN 和测试秘密 marker 扫描均为零；aggregate 不含 Run/Worker/container/model/event/image/lease ID、PID、hostname、命令或绝对路径。
 - 关键统计均由 raw wall/sample 重算一致：single/multi/warmed/cold 吞吐 LCB 分别为 `6.800965771/11.603002589/9.486195092/9.324904535 q/s`，配对双/单 Worker ratio LCB 为 `1.628400356`；warmed/cold drain 最大 `6.253076/6.350613s`，kill-fence/lease-expiry/Redis-created→claim 最大恢复 `33.752306/4.031426/1.052824s`。每个 cell 的 5 轮 measured 共 300 题、观测错误为 0，对应 Bernoulli 近似下单侧 95% 描述性上界 `0.009936081944`，不能表述为错误率为零或生产可用性。容量模型给出 `8.122101812 q/s`、`0.541473454 Run/s` 和无新流量时 `5.171075292s` 排空估计；连接边界 `30 <= 80`。这些数字只适用于固定 Mock-only 单机 profile，不是生产/真实 Provider/HA/费用或 exactly-once 结论。
 - 历史 v1 aggregate `f993c11ff1a9f55921b5d7ea14974b0e3ca280f75427095c771ef3f5964ae3b2` 继续保留为 15/18、`failed/not_qualified`；v2 没有复用其任何 trial，也没有删除或重跑 measured-02 来改写 v1 结果。
+- 证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 已普通 push 到 `origin/codex/complete-evaluation-workflow`；[GitHub Actions run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 对该精确 SHA 的 Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build 与 Real Compose acceptance 4/4 全部成功。P2-01 仓库级收尾完成。
 
 ## 已知问题与下一步
 
-- P2-01 的实现、clean-SHA 远程 CI 与正式 v2 1+5 已完成；后续纯文档收尾 commit 不改变脚本/Compose，也不冒充新的性能取证 SHA。仓库级交付以该文档提交普通 push 后的精确 SHA 4/4 CI 为最终门禁。
+- P2-01 的实现、clean-SHA 远程 CI、正式 v2 1+5 和证据文档精确 SHA CI 均已完成；证据文档 commit 没有改变脚本/Compose，也不冒充新的性能取证 SHA。
 - 本地 evidence 能证明单次 invocation 未丢轮，不能证明不存在已删除的更早 suite；正式记录必须披露本次所有资格尝试。
 - P2-06/P2-07 等正式 closure 仍未完成，Phase 2 保持 `in_progress`。

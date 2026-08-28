@@ -30,7 +30,7 @@
 | --- | --- | --- | --- | --- |
 | Phase 0 | 项目治理和架构 | 可执行的需求、架构、协议、ADR 与持续文档流程 | `completed` | [PHASE-0-GOVERNANCE.md](phases/PHASE-0-GOVERNANCE.md) |
 | Phase 1 | MVP 垂直链路 | Mock 模型到 Run、逐题结果与排行榜的离线闭环 | `completed` | [PHASE-1-MVP.md](phases/PHASE-1-MVP.md) |
-| Phase 2 | 可靠性与任务执行 | 可靠 Worker、治理/审计已交付；P2-01 单机资格已验证、仓库级收尾中；P2-06/P2-07 运维闭环待完成 | `in_progress` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
+| Phase 2 | 可靠性与任务执行 | 可靠 Worker、治理/审计与 P2-01 单机资格已交付；P2-06/P2-07 运维闭环待完成 | `in_progress` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
 | Phase 3 | 标准 Benchmark 与代码评测 | 已有 MMLU-Pro/GPQA 可信本地切片；IFEval、沙箱与完整插件体系待完成 | `in_progress` | [PHASE-3-BENCHMARKS.md](phases/PHASE-3-BENCHMARKS.md) |
 | Phase 4 | Judge、Arena 与长上下文 | 可校准 Judge、Pairwise Judge、个人 Arena 和长上下文评测 | `planned` | [PHASE-4-JUDGE-ARENA.md](phases/PHASE-4-JUDGE-ARENA.md) |
 | Phase 5 | Agent、私有与 Live Benchmark | 工具调用轨迹、隔离私有集和持续更新的 Live Benchmark | `planned` | [PHASE-5-AGENT-LIVE.md](phases/PHASE-5-AGENT-LIVE.md) |
@@ -201,7 +201,7 @@
 
 | ID | 状态 | 已交付 / 剩余范围 |
 | --- | --- | --- |
-| P2-01 一致性与容量设计 | 资格通过、收尾中 | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已实现；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；待证据文档提交自身 CI 后完成仓库级收尾 |
+| P2-01 一致性与容量设计 | 已交付 | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已实现；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；证据文档 `875f13a…` 的精确 SHA CI 4/4 成功 |
 | P2-02 PostgreSQL 迁移 | 切片已实现 | `0002`/`0003` 可靠性与凭据基础、`0004` 六类治理/审计表和 12 表 importer 已实现；本地及精确 SHA 远程 PG migration/check/integration 已通过，无自动反向回迁 |
 | P2-03 Queue/Worker | 可靠基础已交付 | Redis Streams 通知、独立 Worker、数据库扫描、租约、心跳、fencing 和重复消息 no-op 已交付 |
 | P2-04 生命周期可靠性 | 可靠基础已交付 | retry/取消/恢复/dead-letter/终态重算及三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；外部调用仍不保证 exactly-once |
@@ -219,7 +219,7 @@
 - `delivered`：`P2-local-control-plane-v2` 在 clean SHA `b6a35fe…` 完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 和 `qualified` 容量模型；只限定记录的 Mock-only 单机拓扑。
 - `not_met`：backup/restore 仍未完成；三个确定性 DB crash-seam 场景与正式恢复时长目标不能替代生产恢复认证。
 - `delivered`：治理实现 SHA `665244e…` 已 push；本地 enhanced capacity、9/9 acceptance 与远程 run `33099260233` 4/4 均通过。
-- `delivered`：P2-01 v2 实现 SHA `b6a35fe…` 已 push；本地 aggregate SHA-256 `a76d167b…d0d9` 为 23/23，远程 run `33146681285` 4/4 成功。
+- `delivered`：P2-01 v2 实现 SHA `b6a35fe…` 已 push；本地 aggregate SHA-256 `a76d167b…d0d9` 为 23/23，实现 run `33146681285` 4/4 成功；证据文档 commit `875f13a…` 已 push，收尾 run `33150080341` 4/4 成功。
 - `delivered`：既有 API、离线 Mock Smoke 和 `llmbenchlab-protocol-v1` 评分/聚合回归继续通过，没有调用真实 Provider。
 
 ### 风险
@@ -234,7 +234,7 @@
 
 - 已交付基础：PostgreSQL/SQLite migration、Redis/Worker/lease/fencing/recovery、六服务 Compose 与历史故障证据。
 - 已交付候选切片：`0004`、12 表 importer、四层治理/ledger/backpressure/fairness、typed audit/history/Provider/credential evidence、UI 状态、enhanced capacity/PG tests 与运维文档。
-- 治理候选门禁已完成；P2-01 的 v2 多轮资格、实现 commit/push 与实现 SHA 4/4 CI 已完成，证据文档提交自身的精确 SHA CI 是最后仓库级收尾门禁。
+- 治理候选门禁已完成；P2-01 的 v2 多轮资格、实现 commit/push、实现 SHA 4/4 CI 与证据文档精确 SHA 4/4 CI 也已完成，P2-01 仓库级收尾完成。
 - 阶段正式剩余：Exporter/告警、retention archive、Worker progress/liveness、backup/restore 与完整故障矩阵。
 
 ### 状态

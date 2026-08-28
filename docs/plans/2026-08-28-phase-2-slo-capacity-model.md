@@ -1,7 +1,7 @@
 # Phase 2 正式 SLO 与容量模型执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed
 - Created: 2026-08-28
 - Updated: 2026-08-28
 - Related phase: [Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
@@ -10,7 +10,7 @@
 
 ## Context
 
-Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 已通过单轮 Mock-only enhanced capacity、9/9 acceptance、真实 PostgreSQL/Redis integration 和远程 4/4 CI，但当前文档正确地把这些称为观测基线而非正式 SLO。P2-01 仍需把支持拓扑、性能/正确性目标、多轮统计、容量公式和参数边界变成可执行合同。
+本计划启动时，Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 已通过单轮 Mock-only enhanced capacity、9/9 acceptance、真实 PostgreSQL/Redis integration 和远程 4/4 CI，但当时文档正确地把这些称为观测基线而非正式 SLO；P2-01 仍需把支持拓扑、性能/正确性目标、多轮统计、容量公式和参数边界变成可执行合同。
 
 本计划只交付 P2-01。Exporter/告警/retention/Worker progress 与 backup/restore 分别留给后续 P2-06/P2-07 独立切片，因此整个 Phase 2 仍为 `in_progress`。
 
@@ -69,9 +69,9 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
    - Validation: 默认 capacity 保持兼容；formal v2 固定 warmed `3/5/8` 与 cold `6/8/10` 两个 AND 门禁、两个 distinct claim Worker、22/330/331 对账、capacity-only 安全镜像 cleanup。
 7. [completed] 提交/push v2 实现，等待精确 SHA CI，并从零执行 v2 1+5。
    - Validation: clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 run `33146681285` 4/4；全新 1 warm-up + 5 measured 未复用 v1 样本，23/23 SLO、每轮 invariant/cleanup 与 aggregate SHA-256 复核全部通过。
-8. [in_progress] 收敛文档、提交并等待最终精确 SHA CI。
-   - Files/modules: README、Performance、Testing、Operations、CHANGELOG、PROJECT_STATUS、Roadmap、Phase 2、NEXT_TASK、本计划与工作日志
-   - Validation: 文档只引用实际 evidence；Phase 2 仍 `in_progress`；最终 commit push 后 GitHub Actions 必需 job 对该精确 SHA 全绿。
+8. [completed] 收敛文档、提交并等待最终精确 SHA CI。
+   - Files/modules: README、Performance、Testing、Operations、Architecture、Security、Deployment、CHANGELOG、PROJECT_STATUS、Roadmap、Phase 2、NEXT_TASK、本计划与工作日志
+   - Validation: 证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 已普通 push；GitHub Actions run `33150080341` 对该精确 SHA 的四个必需 job 全部成功；Phase 2 仍 `in_progress`。
 
 ## Risks
 
@@ -100,7 +100,7 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 | harness 自检 | `python3 -I scripts/phase2_slo.py --self-check-only` | 固定合同与安全边界通过 | 已通过 |
 | 真实多轮资格 | `make phase2-slo` | 1 warm-up + 5 measured，所有 SLO/invariant/cleanup 通过 | v1 保持 15/18 `unqualified`；v2 在 `b6a35fe…` 从零完成 1+5、23/23、逐轮 22/330/330/331 与 cleanup 全通过，capacity model `qualified` |
 | diff/secret | `git diff --check`、staged secret scan | 无无关改动、秘密或 artifact | `git diff --check` 与 staged scan 已通过；仅命中明确的测试 canary/假 DSN |
-| 远程门禁 | `gh run view <run-id>` | 精确实现 SHA 的必需 job 全成功 | v1 过程 SHA 的 run 均保留；v2 `b6a35fe…` run `33146681285` 4/4 success；纯文档收尾提交独立受自身精确 SHA CI 门禁约束 |
+| 远程门禁 | `gh run view <run-id>` | 精确实现与证据文档 SHA 的必需 job 全成功 | v1 过程 SHA 的 run 均保留；v2 `b6a35fe…` run `33146681285` 4/4 success；证据文档 `875f13a…` run `33150080341` 4/4 success |
 
 ## Rollback
 
@@ -115,11 +115,11 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 
 ## Completion evidence
 
-- Changed files: 实现提交包含 capacity/SLO producer、consumer、两套测试、ADR-0014 及计划/日志；后续纯文档提交只同步已验证结果，不改变取证代码、配置或 Compose。
+- Changed files: 实现提交包含 capacity/SLO producer、consumer、两套测试、ADR-0014 及计划/日志；证据文档 commit `875f13a…` 只同步已验证结果，没有改变取证代码、配置或 Compose。
 - Commands run: 定向脚本测试 `237 passed`；`make lint`、`make test`（后端 829 passed/29 skipped，前端 38 passed）、`make smoke`、前端 build、Alembic 临时库 check、Compose config、默认 capacity 与 9/9 acceptance 均通过。
 - Acceptance evidence: `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T060722Z-87d7a8af7f91/evidence.json`，SHA-256 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`，绑定 clean `b6a35fe…`，1+5、23/23、`qualified`。
-- Not run: 未调用真实 Provider；未在 GitHub-hosted runner 执行绝对性能资格；未把后续纯文档提交当作新的性能取证 SHA。
-- Known issues: P2-06/P2-07 仍未完成，Phase 2 保持 `in_progress`；纯文档 commit/push 的精确 SHA CI 是本计划最后门禁，且不替代 `b6a35fe…` 的性能证据。
+- Not run: 未调用真实 Provider；未在 GitHub-hosted runner 执行绝对性能资格；未把证据文档 commit 当作新的性能取证 SHA。
+- Known issues: P2-06/P2-07 仍未完成，Phase 2 保持 `in_progress`；证据文档 commit 的精确 SHA CI 已通过，且不替代 `b6a35fe…` 的性能证据。
 
 ## Decision and discovery log
 
@@ -133,3 +133,4 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 | 2026-08-28 | discovery | `dfa67ab` 的 v1 从零完成 1+5，六个 child 硬门禁均通过，但 measured-02 cold burst queue/execution/E2E p95 超过 `3/5/8s`，aggregate 仅 15/18。 | v1 保持 `unqualified`；保留 aggregate SHA `f993c11f…e3b2`，不删样本、不只重跑失败轮。 |
 | 2026-08-28 | decision | v1 把 cold stop/start 与 steady backlog 混在一个 cell，且未证明两个 Worker 都 claim。 | 新增 ADR-0014/v2：warmed `3/5/8` 与 cold `6/8/10` 都是 AND 门禁，要求两个 distinct Worker、22/330/331 对账和项目镜像安全清理；新 SHA 全新 1+5。 |
 | 2026-08-28 | validation | clean `b6a35fe…` 的 v2 从零完成 1 warm-up + 5 measured，23/23 SLO、六轮 hard invariant 与 exact-project cleanup 全通过；aggregate SHA-256 `a76d167b…d0d9`。 | P2-01 实现与正式资格已完成；仓库级 closeout 待证据文档提交自身精确 SHA CI。结论仅限固定 Mock-only 单机 profile，v1 失败历史继续保留，Phase 2 仍 `in_progress`。 |
+| 2026-08-28 | validation | 证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 已普通 push；GitHub Actions run `33150080341` 对该精确 SHA 4/4 成功。 | 步骤 8 与 P2-01 仓库级收尾完成；下一任务可开始 P2-06/P2-07，Phase 2 仍 `in_progress`。 |

@@ -6,7 +6,7 @@
 
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
-- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计已交付；P2-01 单机资格已验证、仓库级收尾中；P2-06/P2-07 运维闭环仍有缺口）
+- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计与 P2-01 单机资格已完整交付；P2-06/P2-07 运维闭环仍有缺口）
 - Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（仅可信本地 MMLU-Pro/GPQA-Diamond 客观题提前切片）
 - Phase 4–6：`planned`
 
@@ -14,7 +14,7 @@
 
 `0.1.0` development baseline，REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`；尚未发布正式 Release。
 
-公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`，PR [#2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)。P2-01 v2 实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 已普通 push；GitHub Actions [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 的 Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build 与 Real Compose acceptance 四个必需 job 均成功。纯文档收尾提交同样独立受精确 SHA CI 门禁约束，且不会改变性能证据绑定的实现 SHA。
+公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`，PR [#2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)。P2-01 v2 实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 已普通 push，GitHub Actions [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 的四个必需 job 均成功；证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 也已普通 push，其精确 SHA 的 [run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 4/4 成功。后者完成仓库级收尾，不改变性能证据绑定的实现 SHA。
 
 ## 已交付基线
 
@@ -65,6 +65,7 @@
 | 验证 | 实际结果 | 当前结论 |
 | --- | --- | --- |
 | P2-01 实现远程 CI | `b6a35fe…` run `33146681285` 4/4 | 精确实现 SHA 全绿；PR #2 仍 open，未合并 |
+| P2-01 证据文档收尾 CI | `875f13a…` run `33150080341` 4/4 | 精确文档 SHA 全绿；P2-01 仓库级收尾完成 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | 最新本地 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现冻结树通过 |
 | 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 本地通过；同一实现 SHA 的远程 integration 亦成功 |
@@ -90,4 +91,4 @@
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 是当前合同：治理/审计候选已交付，P2-01 v2 已完成独立实现提交、正式本机证据和实现 SHA CI；其仓库级收尾仍以本次文档提交自身的精确 SHA CI 为最后门禁。后续工程范围是 P2-06 的 Exporter/告警/retention/Worker progress，以及 P2-07 的 backup/restore 和剩余故障演练；Phase 2 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 是当前合同：治理/审计候选已交付，P2-01 v2 也已完成独立实现提交、正式本机证据、实现 SHA CI 和证据文档 SHA CI；下一工程范围是 P2-06 的 Exporter/告警/retention/Worker progress，以及 P2-07 的 backup/restore 和剩余故障演练；Phase 2 继续保持 `in_progress`。
