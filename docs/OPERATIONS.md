@@ -203,6 +203,24 @@ docker compose up -d --no-deps --scale worker=1 worker
 
 强制 SIGKILL 只用于隔离故障演练，不是正常缩容手段。当前真实基线证明一个实际 lease owner 被杀后 peer 可恢复 15 条唯一 Mock Response；该结果不是恢复时间 SLA。
 
+### 6.3 固定单机资格与扩缩容门禁
+
+`P2-local-control-plane-v1` 只限定一台可信主机、一个 API、PostgreSQL 16、Redis 7 和两个 Worker 的 Mock 控制面。计划用该 profile 支持扩容或发布决策时，先确认精确 commit 工作树完全干净、主机至少 8 logical CPU/8,000,000,000 bytes RAM、Docker 至少 8 CPU/4,000,000,000 bytes memory、PostgreSQL `max_connections >= 100`，并停止其他会争用 CPU、内存、Docker 或数据库的负载。不得注入真实 Provider Key；该 qualification 不测网络模型。
+
+Compose profile 固定每进程 `pool_size=5`、`max_overflow=5`，因此一个 API 加两个 Worker 的应用连接上界为 `(1 + 2) × (5 + 5) = 30`；在 PostgreSQL 100 连接门槛下至少另留 20 个连接给迁移、探针和运维。Worker 固定 `lease/heartbeat/poll=30/10/1s`、`max_attempts=3`、retry backoff `base/cap=1/30s`，不能把日常 `phase2-capacity` 的快速 `6/2/0.15s` 故障参数当作正式恢复时间证据。
+
+执行并保留 aggregate 与每个 child 的 SHA-256：
+
+```bash
+make phase2-slo
+```
+
+该命令串行运行 1 次 warm-up 和 5 次 measured trial。只有所有轮都满足预登记吞吐/延迟/scale/recovery 门槛，且独立 ledger→scope/minute projection、唯一性、公平性、fault、Redis PEL/lag 和 cleanup 硬门禁全部为零漂移，容量模型才会输出 `qualified`。吞吐由 `completed_questions / wall_duration_seconds` 重算；双/单 Worker scale 必须使用同一 trial 的配对 ratio，不能从不同运行挑选最优值拼接。失败 suite 原样保留，不删除异常轮或仅重跑失败 cell。
+
+合格容量模型使用双 Worker吞吐 one-sided 95% LCB `mu_lcb`、安全系数 `0.70`、15 题/Run 和 ledger 实际 Provider attempt/题估计安全 Run 到达率；如果任一 SLO 失败或 LCB 非正，输出为 `not_qualified`，不得人工套公式产生容量数字。模型仍只适用于相同 Mock 数据、硬件、容器资源和 commit。扩到第三个 Worker、改变 pool/retry/lease、切换真实 Provider 或把服务移到多主机都必须重新设计/测量，不能沿用该结论。
+
+raw 与 aggregate evidence 都在 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`；不得提交或默认上传。aggregate 虽只保留 allowlist，仍包含 commit/hash、资源指纹、SLI 和运维结果，应按内部证据保护。child 超时/中断后有 420 秒 scoped cleanup 窗口；命令返回后仍应核对 artifact 中容器、volume、network 全部为 0。GitHub-hosted CI 只验证 validator/统计/失败路径，不是绝对性能复测；正式记录还必须关联同一精确 SHA 的 required CI。
+
 ## 7. Redis 故障与恢复
 
 Redis 不可用时的正确状态是：

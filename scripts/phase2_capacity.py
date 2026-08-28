@@ -17,6 +17,7 @@ import concurrent.futures
 import contextlib
 import hashlib
 import json
+import math
 import os
 import platform
 import signal
@@ -32,7 +33,7 @@ SCRIPT_DIRECTORY = Path(__file__).resolve().parent
 if str(SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
-from phase2_acceptance import (
+from phase2_acceptance import (  # noqa: E402
     RUN_SNAPSHOT_FIELDS,
     TASK_MESSAGE_VERSION,
     TASK_STREAM,
@@ -54,6 +55,389 @@ RUN_INPUT_TOKEN_RESERVATION = 256
 RUN_LIFETIME_REQUEST_BUDGET = 100
 RUN_LIFETIME_TOKEN_BUDGET = 100_000
 RUN_LIFETIME_COST_BUDGET_USD = "100.00000000"
+DATABASE_POOL_SIZE = 5
+DATABASE_MAX_OVERFLOW = 5
+DATABASE_POOL_TIMEOUT_SECONDS = 2.0
+READINESS_DATABASE_TIMEOUT_SECONDS = 2.0
+WORKER_MAX_ATTEMPTS = 3
+WORKER_RETRY_BACKOFF_BASE_SECONDS = 1.0
+WORKER_RETRY_BACKOFF_CAP_SECONDS = 30.0
+WORKER_SHUTDOWN_GRACE_SECONDS = 30.0
+REDIS_BLOCK_MILLISECONDS = 1000
+REDIS_OPERATION_TIMEOUT_SECONDS = 1.0
+PROVIDER_CREDENTIAL_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "LLMBENCHLAB_DEMO_API_KEY",
+    "LLMBENCHLAB_REAL_API_KEY",
+    "TEST_PROVIDER_KEY",
+)
+
+
+def reconciliation_expectations(
+    *, runs_per_phase: int, backlog_limit: int
+) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """Derive terminal ledger counts from the accepted capacity workload."""
+
+    completed_runs = 2 * runs_per_phase + 2 * backlog_limit + 2
+    settled_actual = completed_runs * DEMO_QUESTIONS_PER_RUN
+    reservations = settled_actual + 1
+    return (
+        {
+            "policies": 2,
+            "active_policies": 1,
+            "runs": completed_runs,
+            "responses": settled_actual,
+            "distinct_run_question_responses": settled_actual,
+            "question_executions": settled_actual,
+            "reservations": reservations,
+            "failed_attempt_count": 1,
+            "question_error_count": 0,
+        },
+        {
+            "settled_actual": settled_actual,
+            "settled_conservative": 1,
+        },
+        {
+            "provider_attempt_reserved": reservations,
+            "provider_attempt_send_started": reservations,
+            "provider_attempt_settled": reservations,
+        },
+    )
+
+
+(
+    EXPECTED_RECONCILIATION_COUNTS,
+    EXPECTED_RESERVATION_STATES,
+    EXPECTED_PROVIDER_ATTEMPT_AUDIT_COUNTS,
+) = reconciliation_expectations(runs_per_phase=4, backlog_limit=4)
+RECONCILIATION_ZERO_FIELDS = (
+    "active_reservations",
+    "scope_active_reservations",
+    "scope_reserved_requests",
+    "scope_reserved_input_tokens",
+    "scope_reserved_output_tokens",
+    "minute_reserved_requests",
+    "minute_reserved_input_tokens",
+    "minute_reserved_output_tokens",
+    "overdrawn_scopes",
+    "duplicate_operation_keys",
+    "duplicate_response_questions",
+    "duplicate_audit_event_keys",
+    "active_runs",
+    "missing_scope_projection_rows",
+    "extra_scope_projection_rows",
+    "scope_projection_field_drift",
+    "missing_minute_projection_rows",
+    "extra_minute_projection_rows",
+    "minute_projection_field_drift",
+)
+
+# This deliberately mirrors GovernanceRepository._scope_fact_source() and
+# _scope_fact_aggregates(). The acceptance query remains independent of the ORM
+# projection so a bug in projection maintenance cannot validate itself.
+GOVERNANCE_RECONCILIATION_SQL = """
+WITH scope_facts AS MATERIALIZED (
+  SELECT
+    scope_ids.scope_id,
+    reservation.policy_id,
+    reservation.window_start,
+    reservation.state,
+    reservation.reserved_input_tokens,
+    reservation.reserved_output_tokens,
+    reservation.reserved_cost_usd,
+    reservation.actual_input_tokens,
+    reservation.actual_output_tokens,
+    reservation.actual_cost_usd
+  FROM provider_call_reservations AS reservation
+  CROSS JOIN LATERAL (
+    VALUES
+      (reservation.global_scope_id),
+      (reservation.provider_scope_id),
+      (reservation.model_scope_id),
+      (reservation.run_scope_id)
+  ) AS scope_ids(scope_id)
+  WHERE scope_ids.scope_id IS NOT NULL
+),
+derived_scopes AS MATERIALIZED (
+  SELECT
+    scope_id,
+    count(*) FILTER (WHERE state IN ('reserved', 'send_started'))
+      AS active_reservations,
+    count(*) FILTER (WHERE state = 'reserved') AS reserved_requests,
+    count(*) FILTER (
+      WHERE state IN ('send_started', 'settled_actual', 'settled_conservative')
+    ) AS consumed_requests,
+    COALESCE(sum(reserved_input_tokens) FILTER (
+      WHERE state IN ('reserved', 'send_started')
+    ), 0) AS reserved_input_tokens,
+    COALESCE(sum(reserved_output_tokens) FILTER (
+      WHERE state IN ('reserved', 'send_started')
+    ), 0) AS reserved_output_tokens,
+    COALESCE(sum(reserved_cost_usd) FILTER (
+      WHERE state IN ('reserved', 'send_started')
+    ), 0) AS reserved_cost_usd,
+    COALESCE(sum(actual_input_tokens) FILTER (
+      WHERE state IN ('settled_actual', 'settled_conservative')
+    ), 0) AS consumed_input_tokens,
+    COALESCE(sum(actual_output_tokens) FILTER (
+      WHERE state IN ('settled_actual', 'settled_conservative')
+    ), 0) AS consumed_output_tokens,
+    COALESCE(sum(actual_cost_usd) FILTER (
+      WHERE state IN ('settled_actual', 'settled_conservative')
+    ), 0) AS consumed_cost_usd,
+    COALESCE(bool_or(
+      state IN ('settled_actual', 'settled_conservative')
+      AND (
+        (
+          reserved_input_tokens IS NOT NULL
+          AND actual_input_tokens IS NOT NULL
+          AND actual_input_tokens > reserved_input_tokens
+        )
+        OR (
+          reserved_output_tokens IS NOT NULL
+          AND actual_output_tokens IS NOT NULL
+          AND actual_output_tokens > reserved_output_tokens
+        )
+        OR (
+          reserved_cost_usd IS NOT NULL
+          AND actual_cost_usd IS NOT NULL
+          AND actual_cost_usd > reserved_cost_usd
+        )
+      )
+    ), false) AS overdrawn
+  FROM scope_facts
+  GROUP BY scope_id
+),
+derived_minutes AS MATERIALIZED (
+  SELECT
+    scope_id,
+    policy_id,
+    window_start,
+    count(*) FILTER (WHERE state = 'reserved') AS reserved_requests,
+    count(*) FILTER (
+      WHERE state IN ('send_started', 'settled_actual', 'settled_conservative')
+    ) AS consumed_requests,
+    COALESCE(sum(reserved_input_tokens) FILTER (
+      WHERE state IN ('reserved', 'send_started')
+    ), 0) AS reserved_input_tokens,
+    COALESCE(sum(reserved_output_tokens) FILTER (
+      WHERE state IN ('reserved', 'send_started')
+    ), 0) AS reserved_output_tokens,
+    COALESCE(sum(actual_input_tokens) FILTER (
+      WHERE state IN ('settled_actual', 'settled_conservative')
+    ), 0) AS consumed_input_tokens,
+    COALESCE(sum(actual_output_tokens) FILTER (
+      WHERE state IN ('settled_actual', 'settled_conservative')
+    ), 0) AS consumed_output_tokens
+  FROM scope_facts
+  GROUP BY scope_id, policy_id, window_start
+)
+SELECT json_build_object(
+  'policies', (SELECT count(*) FROM governance_policies),
+  'active_policies', (SELECT count(*) FROM governance_policies WHERE is_active),
+  'runs', (SELECT count(*) FROM evaluation_runs),
+  'responses', (SELECT count(*) FROM evaluation_responses),
+  'distinct_run_question_responses', (
+    SELECT count(*) FROM (
+      SELECT run_id, question_id FROM evaluation_responses GROUP BY run_id, question_id
+    ) distinct_responses
+  ),
+  'duplicate_response_questions', (
+    SELECT count(*) FROM (
+      SELECT run_id, question_id FROM evaluation_responses
+      GROUP BY run_id, question_id HAVING count(*) > 1
+    ) duplicates
+  ),
+  'question_executions', (SELECT count(*) FROM question_executions),
+  'reservations', (SELECT count(*) FROM provider_call_reservations),
+  'reservation_states', COALESCE((
+    SELECT json_object_agg(state, count) FROM (
+      SELECT state, count(*) AS count
+      FROM provider_call_reservations GROUP BY state ORDER BY state
+    ) states
+  ), '{}'::json),
+  'active_reservations', (
+    SELECT count(*) FROM provider_call_reservations
+    WHERE state IN ('reserved', 'send_started')
+  ),
+  'scope_active_reservations', (
+    SELECT COALESCE(sum(active_reservations), 0) FROM governance_scopes
+  ),
+  'scope_reserved_requests', (
+    SELECT COALESCE(sum(reserved_requests), 0) FROM governance_scopes
+  ),
+  'scope_reserved_input_tokens', (
+    SELECT COALESCE(sum(reserved_input_tokens), 0) FROM governance_scopes
+  ),
+  'scope_reserved_output_tokens', (
+    SELECT COALESCE(sum(reserved_output_tokens), 0) FROM governance_scopes
+  ),
+  'minute_reserved_requests', (
+    SELECT COALESCE(sum(reserved_requests), 0) FROM governance_minute_buckets
+  ),
+  'minute_reserved_input_tokens', (
+    SELECT COALESCE(sum(reserved_input_tokens), 0) FROM governance_minute_buckets
+  ),
+  'minute_reserved_output_tokens', (
+    SELECT COALESCE(sum(reserved_output_tokens), 0) FROM governance_minute_buckets
+  ),
+  'overdrawn_scopes', (SELECT count(*) FROM governance_scopes WHERE overdrawn),
+  'missing_scope_projection_rows', (
+    SELECT count(*) FROM derived_scopes AS derived
+    LEFT JOIN governance_scopes AS materialized ON materialized.id = derived.scope_id
+    WHERE materialized.id IS NULL
+  ),
+  'extra_scope_projection_rows', (
+    SELECT count(*) FROM governance_scopes AS materialized
+    LEFT JOIN derived_scopes AS derived ON derived.scope_id = materialized.id
+    WHERE derived.scope_id IS NULL
+  ),
+  'scope_projection_field_drift', (
+    SELECT count(*) FROM governance_scopes AS materialized
+    JOIN derived_scopes AS derived ON derived.scope_id = materialized.id
+    WHERE
+      materialized.active_reservations IS DISTINCT FROM derived.active_reservations
+      OR materialized.reserved_requests IS DISTINCT FROM derived.reserved_requests
+      OR materialized.consumed_requests IS DISTINCT FROM derived.consumed_requests
+      OR materialized.reserved_input_tokens IS DISTINCT FROM derived.reserved_input_tokens
+      OR materialized.reserved_output_tokens IS DISTINCT FROM derived.reserved_output_tokens
+      OR materialized.reserved_cost_usd IS DISTINCT FROM derived.reserved_cost_usd
+      OR materialized.consumed_input_tokens IS DISTINCT FROM derived.consumed_input_tokens
+      OR materialized.consumed_output_tokens IS DISTINCT FROM derived.consumed_output_tokens
+      OR materialized.consumed_cost_usd IS DISTINCT FROM derived.consumed_cost_usd
+      OR materialized.overdrawn IS DISTINCT FROM derived.overdrawn
+  ),
+  'missing_minute_projection_rows', (
+    SELECT count(*) FROM derived_minutes AS derived
+    LEFT JOIN governance_minute_buckets AS materialized
+      ON materialized.scope_id = derived.scope_id
+      AND materialized.policy_id = derived.policy_id
+      AND materialized.window_start = derived.window_start
+    WHERE materialized.id IS NULL
+  ),
+  'extra_minute_projection_rows', (
+    SELECT count(*) FROM governance_minute_buckets AS materialized
+    LEFT JOIN derived_minutes AS derived
+      ON derived.scope_id = materialized.scope_id
+      AND derived.policy_id = materialized.policy_id
+      AND derived.window_start = materialized.window_start
+    WHERE derived.scope_id IS NULL
+  ),
+  'minute_projection_field_drift', (
+    SELECT count(*) FROM governance_minute_buckets AS materialized
+    JOIN derived_minutes AS derived
+      ON derived.scope_id = materialized.scope_id
+      AND derived.policy_id = materialized.policy_id
+      AND derived.window_start = materialized.window_start
+    WHERE
+      materialized.reserved_requests IS DISTINCT FROM derived.reserved_requests
+      OR materialized.consumed_requests IS DISTINCT FROM derived.consumed_requests
+      OR materialized.reserved_input_tokens IS DISTINCT FROM derived.reserved_input_tokens
+      OR materialized.reserved_output_tokens IS DISTINCT FROM derived.reserved_output_tokens
+      OR materialized.consumed_input_tokens IS DISTINCT FROM derived.consumed_input_tokens
+      OR materialized.consumed_output_tokens IS DISTINCT FROM derived.consumed_output_tokens
+  ),
+  'duplicate_operation_keys', (
+    SELECT count(*) FROM (
+      SELECT operation_key FROM provider_call_reservations
+      GROUP BY operation_key HAVING count(*) > 1
+    ) duplicates
+  ),
+  'audit_events', (SELECT count(*) FROM audit_events),
+  'audit_event_types', COALESCE((
+    SELECT json_object_agg(event_type, count) FROM (
+      SELECT event_type, count(*) AS count
+      FROM audit_events GROUP BY event_type ORDER BY event_type
+    ) types
+  ), '{}'::json),
+  'duplicate_audit_event_keys', (
+    SELECT count(*) FROM (
+      SELECT event_key FROM audit_events GROUP BY event_key HAVING count(*) > 1
+    ) duplicates
+  ),
+  'active_runs', (
+    SELECT count(*) FROM evaluation_runs WHERE status IN ('pending', 'running')
+  ),
+  'failed_attempt_count', (
+    SELECT COALESCE(sum(failed_attempt_count), 0) FROM evaluation_runs
+  ),
+  'question_error_count', (
+    SELECT count(*) FROM evaluation_responses WHERE error_type IS NOT NULL
+  )
+)::text;
+"""
+
+
+def _reconciliation_integer(
+    snapshot: dict[str, Any],
+    field: str,
+    *,
+    context: str = "reconciliation",
+) -> int:
+    value = snapshot.get(field)
+    if type(value) is not int:
+        raise AcceptanceFailure(f"{context}.{field} must be an integer")
+    return value
+
+
+def validate_governance_reconciliation_snapshot(
+    snapshot: dict[str, Any],
+    *,
+    expected_counts: dict[str, int] | None = None,
+    expected_reservation_states: dict[str, int] | None = None,
+    expected_provider_attempt_audit_counts: dict[str, int] | None = None,
+) -> None:
+    """Enforce the configured workload's ledger and projection invariants."""
+
+    expected_counts = expected_counts or EXPECTED_RECONCILIATION_COUNTS
+    expected_reservation_states = expected_reservation_states or EXPECTED_RESERVATION_STATES
+    expected_provider_attempt_audit_counts = (
+        expected_provider_attempt_audit_counts or EXPECTED_PROVIDER_ATTEMPT_AUDIT_COUNTS
+    )
+
+    for field in RECONCILIATION_ZERO_FIELDS:
+        value = _reconciliation_integer(snapshot, field)
+        if value != 0:
+            raise AcceptanceFailure(f"governance reconciliation drift: {field}={value}")
+
+    for field, expected in expected_counts.items():
+        value = _reconciliation_integer(snapshot, field)
+        if value != expected:
+            raise AcceptanceFailure(
+                f"governance reconciliation count drift: {field}={value}, expected={expected}"
+            )
+
+    if snapshot["distinct_run_question_responses"] != snapshot["responses"]:
+        raise AcceptanceFailure("Response run/question cardinality drift")
+
+    reservation_states = snapshot.get("reservation_states")
+    if not isinstance(reservation_states, dict):
+        raise AcceptanceFailure("reconciliation.reservation_states must be an object")
+    for state in reservation_states:
+        _reconciliation_integer(
+            reservation_states,
+            state,
+            context="reconciliation.reservation_states",
+        )
+    if reservation_states != expected_reservation_states:
+        raise AcceptanceFailure("Provider reservation terminal-state counts drift")
+
+    audit_event_types = snapshot.get("audit_event_types")
+    if not isinstance(audit_event_types, dict):
+        raise AcceptanceFailure("reconciliation.audit_event_types must be an object")
+    for event_type, expected in expected_provider_attempt_audit_counts.items():
+        observed = _reconciliation_integer(
+            audit_event_types,
+            event_type,
+            context="reconciliation.audit_event_types",
+        )
+        if observed != expected:
+            raise AcceptanceFailure(
+                f"Provider attempt audit count drift: {event_type}={observed}, expected={expected}"
+            )
+
+    if _reconciliation_integer(snapshot, "audit_events") <= 0:
+        raise AcceptanceFailure("capacity evidence did not produce typed audit events")
 
 
 def finite_capacity_policy(
@@ -249,6 +633,37 @@ def distribution(values: Sequence[float]) -> dict[str, int | float | None]:
     }
 
 
+def nonnegative_utc_elapsed_seconds(started_at: str, finished_at: str) -> float:
+    """Return a finite non-negative duration derived from two UTC facts."""
+
+    seconds = (parse_datetime(finished_at) - parse_datetime(started_at)).total_seconds()
+    if not math.isfinite(seconds) or seconds < 0:
+        raise ValueError("UTC duration must be finite and non-negative")
+    return round(seconds, 6)
+
+
+def first_claim_at_or_after(
+    audit_events: Sequence[dict[str, Any]],
+    not_before: str,
+) -> dict[str, Any]:
+    """Return the first typed claim whose durable occurrence is not before a DB fact."""
+
+    threshold = parse_datetime(not_before)
+    candidates = [
+        event
+        for event in audit_events
+        if event.get("event_type") == "run_claimed"
+        and isinstance(event.get("occurred_at"), str)
+        and parse_datetime(str(event["occurred_at"])) >= threshold
+    ]
+    if not candidates:
+        raise ValueError("no typed run_claimed event occurred at or after the threshold")
+    return min(
+        candidates,
+        key=lambda event: (parse_datetime(str(event["occurred_at"])), str(event.get("id") or "")),
+    )
+
+
 def validate_arguments(args: argparse.Namespace) -> None:
     if args.workers < 2:
         raise ValueError("--workers must be at least 2")
@@ -272,6 +687,26 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--mock-delay-seconds must be between 0.01 and 10")
     if not 30 <= args.timeout_seconds <= 3600:
         raise ValueError("--timeout-seconds must be between 30 and 3600")
+    if not 3 <= args.lease_seconds <= 3600:
+        raise ValueError("--lease-seconds must be between 3 and 3600")
+    if not 1 <= args.heartbeat_seconds <= 1200:
+        raise ValueError("--heartbeat-seconds must be between 1 and 1200")
+    if args.heartbeat_seconds * 2 > args.lease_seconds:
+        raise ValueError("--heartbeat-seconds must be at most half --lease-seconds")
+    if not 0.05 <= args.worker_poll_seconds <= 60:
+        raise ValueError("--worker-poll-seconds must be between 0.05 and 60")
+    if not 1 <= args.worker_max_attempts <= 20:
+        raise ValueError("--worker-max-attempts must be between 1 and 20")
+    if not 0 <= args.retry_backoff_base_seconds <= 3600:
+        raise ValueError("--retry-backoff-base-seconds must be between 0 and 3600")
+    if not args.retry_backoff_base_seconds <= args.retry_backoff_cap_seconds <= 86_400:
+        raise ValueError("--retry-backoff-cap-seconds must be between the base delay and 86400")
+    if not 50 <= args.redis_block_milliseconds <= 60_000:
+        raise ValueError("--redis-block-milliseconds must be between 50 and 60000")
+    if not 0 < args.redis_operation_timeout_seconds <= 30:
+        raise ValueError("--redis-operation-timeout-seconds must be between 0 and 30")
+    if not 0 <= args.worker_shutdown_grace_seconds <= 3600:
+        raise ValueError("--worker-shutdown-grace-seconds must be between 0 and 3600")
 
 
 class Phase2Capacity(Phase2Acceptance):
@@ -288,13 +723,47 @@ class Phase2Capacity(Phase2Acceptance):
         self.question_quantum = int(args.question_quantum)
         self.mock_delay_seconds = float(args.mock_delay_seconds)
         self.timeout_seconds = float(args.timeout_seconds)
+        self.lease_seconds = float(args.lease_seconds)
+        self.heartbeat_seconds = float(args.heartbeat_seconds)
+        self.worker_poll_seconds = float(args.worker_poll_seconds)
+        self.worker_max_attempts = int(args.worker_max_attempts)
+        self.retry_backoff_base_seconds = float(args.retry_backoff_base_seconds)
+        self.retry_backoff_cap_seconds = float(args.retry_backoff_cap_seconds)
+        self.redis_block_milliseconds = int(args.redis_block_milliseconds)
+        self.redis_operation_timeout_seconds = float(args.redis_operation_timeout_seconds)
+        self.worker_shutdown_grace_seconds = float(args.worker_shutdown_grace_seconds)
+        self.measurement_order = str(args.measurement_order)
         self.low_volume_model_id: str | None = None
         self.policy_document: dict[str, Any] | None = None
         self.env["LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS"] = str(self.mock_delay_seconds)
-        for inherited_key in (
-            "LLMBENCHLAB_REAL_API_KEY",
-            "TEST_PROVIDER_KEY",
-        ):
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_LEASE_SECONDS"] = str(self.lease_seconds)
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS"] = str(self.heartbeat_seconds)
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_POLL_SECONDS"] = str(self.worker_poll_seconds)
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_MAX_ATTEMPTS"] = str(self.worker_max_attempts)
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_BASE_SECONDS"] = str(
+            self.retry_backoff_base_seconds
+        )
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_CAP_SECONDS"] = str(
+            self.retry_backoff_cap_seconds
+        )
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_SHUTDOWN_GRACE_SECONDS"] = str(
+            self.worker_shutdown_grace_seconds
+        )
+        self.env["LLMBENCHLAB_COMPOSE_REDIS_BLOCK_MILLISECONDS"] = str(
+            self.redis_block_milliseconds
+        )
+        self.env["LLMBENCHLAB_COMPOSE_REDIS_OPERATION_TIMEOUT_SECONDS"] = str(
+            self.redis_operation_timeout_seconds
+        )
+        self.env["LLMBENCHLAB_COMPOSE_DATABASE_POOL_SIZE"] = str(DATABASE_POOL_SIZE)
+        self.env["LLMBENCHLAB_COMPOSE_DATABASE_MAX_OVERFLOW"] = str(DATABASE_MAX_OVERFLOW)
+        self.env["LLMBENCHLAB_COMPOSE_DATABASE_POOL_TIMEOUT_SECONDS"] = str(
+            DATABASE_POOL_TIMEOUT_SECONDS
+        )
+        self.env["LLMBENCHLAB_COMPOSE_READINESS_DATABASE_TIMEOUT_SECONDS"] = str(
+            READINESS_DATABASE_TIMEOUT_SECONDS
+        )
+        for inherited_key in PROVIDER_CREDENTIAL_ENV_KEYS:
             self.env.pop(inherited_key, None)
 
         self.artifact_dir = (
@@ -334,9 +803,20 @@ class Phase2Capacity(Phase2Acceptance):
                 "run_input_token_reservation": RUN_INPUT_TOKEN_RESERVATION,
                 "mock_generation_delay_seconds": self.mock_delay_seconds,
                 "timeout_seconds": self.timeout_seconds,
-                "lease_seconds": 6,
-                "heartbeat_seconds": 2,
-                "worker_poll_seconds": 0.15,
+                "lease_seconds": self.lease_seconds,
+                "heartbeat_seconds": self.heartbeat_seconds,
+                "worker_poll_seconds": self.worker_poll_seconds,
+                "worker_max_attempts": self.worker_max_attempts,
+                "retry_backoff_base_seconds": self.retry_backoff_base_seconds,
+                "retry_backoff_cap_seconds": self.retry_backoff_cap_seconds,
+                "worker_shutdown_grace_seconds": self.worker_shutdown_grace_seconds,
+                "redis_block_milliseconds": self.redis_block_milliseconds,
+                "redis_operation_timeout_seconds": self.redis_operation_timeout_seconds,
+                "measurement_order": self.measurement_order,
+                "database_pool_size": DATABASE_POOL_SIZE,
+                "database_max_overflow": DATABASE_MAX_OVERFLOW,
+                "database_pool_timeout_seconds": DATABASE_POOL_TIMEOUT_SECONDS,
+                "readiness_database_timeout_seconds": READINESS_DATABASE_TIMEOUT_SECONDS,
             },
             "environment": {},
             "data": {},
@@ -373,6 +853,7 @@ class Phase2Capacity(Phase2Acceptance):
                 ),
                 "local_admission_not_provider_sla": True,
                 "capacity_evidence_schema": EVIDENCE_SCHEMA,
+                "real_provider_credentials_removed": list(PROVIDER_CREDENTIAL_ENV_KEYS),
             }
         )
         return review
@@ -464,6 +945,7 @@ class Phase2Capacity(Phase2Acceptance):
                 {
                     "container_id": container_id,
                     "service": service,
+                    "image_id": inspected.get("Image"),
                     "memory_limit_bytes": int(limits.get("Memory") or 0),
                     "memory_swap_limit_bytes": int(limits.get("MemorySwap") or 0),
                     "nano_cpus": int(limits.get("NanoCpus") or 0),
@@ -473,6 +955,80 @@ class Phase2Capacity(Phase2Acceptance):
                 }
             )
         return resources
+
+    def runtime_settings(self) -> dict[str, int | float]:
+        """Read back the qualification-sensitive Settings inside the API container."""
+
+        fields = (
+            "database_pool_size",
+            "database_max_overflow",
+            "database_pool_timeout_seconds",
+            "readiness_database_timeout_seconds",
+            "worker_lease_seconds",
+            "worker_heartbeat_seconds",
+            "worker_poll_seconds",
+            "worker_max_attempts",
+            "worker_retry_backoff_base_seconds",
+            "worker_retry_backoff_cap_seconds",
+            "worker_shutdown_grace_seconds",
+            "redis_block_milliseconds",
+            "redis_operation_timeout_seconds",
+        )
+        source = (
+            "import json; from app.core.config import get_settings; "
+            "s=get_settings(); print(json.dumps({k:getattr(s,k) for k in "
+            + repr(fields)
+            + "}, sort_keys=True))"
+        )
+        completed = self.compose(
+            "exec",
+            "-T",
+            "api",
+            "python",
+            "-c",
+            source,
+            timeout=30,
+            record=False,
+        )
+        try:
+            observed = json.loads(completed.stdout.strip())
+        except json.JSONDecodeError as exc:
+            raise AcceptanceFailure("runtime Settings read-back was not valid JSON") from exc
+        expected: dict[str, int | float] = {
+            "database_pool_size": DATABASE_POOL_SIZE,
+            "database_max_overflow": DATABASE_MAX_OVERFLOW,
+            "database_pool_timeout_seconds": DATABASE_POOL_TIMEOUT_SECONDS,
+            "readiness_database_timeout_seconds": READINESS_DATABASE_TIMEOUT_SECONDS,
+            "worker_lease_seconds": self.lease_seconds,
+            "worker_heartbeat_seconds": self.heartbeat_seconds,
+            "worker_poll_seconds": self.worker_poll_seconds,
+            "worker_max_attempts": self.worker_max_attempts,
+            "worker_retry_backoff_base_seconds": self.retry_backoff_base_seconds,
+            "worker_retry_backoff_cap_seconds": self.retry_backoff_cap_seconds,
+            "worker_shutdown_grace_seconds": self.worker_shutdown_grace_seconds,
+            "redis_block_milliseconds": self.redis_block_milliseconds,
+            "redis_operation_timeout_seconds": self.redis_operation_timeout_seconds,
+        }
+        self.require(set(observed) == set(expected), "runtime Settings field set drift", observed)
+        for field, expected_value in expected.items():
+            actual = observed[field]
+            matches = (
+                isinstance(expected_value, int)
+                and not isinstance(expected_value, bool)
+                and actual == expected_value
+                and not isinstance(actual, bool)
+            ) or (
+                isinstance(expected_value, float)
+                and not isinstance(actual, bool)
+                and isinstance(actual, (int, float))
+                and math.isclose(float(actual), expected_value, rel_tol=0, abs_tol=1e-12)
+            )
+            self.require(
+                matches,
+                "runtime Settings did not match the qualification profile",
+                {"field": field, "expected": expected_value, "actual": actual},
+            )
+        return observed
 
     def apply_capacity_policy(self) -> dict[str, Any]:
         requested = finite_capacity_policy(
@@ -560,6 +1116,7 @@ class Phase2Capacity(Phase2Acceptance):
         low_volume_model = self.create_mock_capacity_model("Low Volume")
         self.low_volume_model_id = low_volume_model["id"]
         postgres_version = self.psql("SHOW server_version;").stdout.strip()
+        postgres_max_connections = int(self.psql("SHOW max_connections;").stdout.strip())
         redis_info = self.redis_cli("INFO", "server").stdout.splitlines()
         redis_version = next(
             (
@@ -569,10 +1126,13 @@ class Phase2Capacity(Phase2Acceptance):
             ),
             "unknown",
         )
+        runtime_settings = self.runtime_settings()
         self.evidence["environment"] = {
             **self.host_environment(),
             "postgres_version": postgres_version,
+            "postgres_max_connections": postgres_max_connections,
             "redis_version": redis_version,
+            "runtime_settings": runtime_settings,
             "container_limits": {
                 "postgres": self.container_resources("postgres"),
                 "redis": self.container_resources("redis"),
@@ -712,6 +1272,13 @@ SELECT json_build_object(
   'connections', (
     SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()
   ),
+  'provider_reservations', (SELECT count(*) FROM provider_call_reservations),
+  'settled_actual_reservations', (
+    SELECT count(*) FROM provider_call_reservations WHERE state = 'settled_actual'
+  ),
+  'settled_conservative_reservations', (
+    SELECT count(*) FROM provider_call_reservations WHERE state = 'settled_conservative'
+  ),
   'xact_commit', s.xact_commit,
   'xact_rollback', s.xact_rollback,
   'blks_read', s.blks_read,
@@ -817,6 +1384,40 @@ WHERE s.datname = current_database();
             "finite question quantum did not produce cooperative scheduling evidence",
             scheduling,
         )
+        queue_distribution: dict[str, Any] = {
+            **distribution(queue_latencies),
+            "samples": [round(value, 6) for value in queue_latencies],
+        }
+        execution_distribution: dict[str, Any] = {
+            **distribution(execution_latencies),
+            "samples": [round(value, 6) for value in execution_latencies],
+        }
+        end_to_end_distribution: dict[str, Any] = {
+            **distribution(end_to_end_latencies),
+            "samples": [round(value, 6) for value in end_to_end_latencies],
+        }
+        question_distribution: dict[str, Any] = {
+            **distribution(question_latencies),
+            "samples": [round(value, 6) for value in question_latencies],
+        }
+        attempt_delta = {
+            field: int(database_after.get(field) or 0) - int(database_before.get(field) or 0)
+            for field in (
+                "provider_reservations",
+                "settled_actual_reservations",
+                "settled_conservative_reservations",
+            )
+        }
+        self.require(
+            attempt_delta
+            == {
+                "provider_reservations": total_questions,
+                "settled_actual_reservations": total_questions,
+                "settled_conservative_reservations": 0,
+            },
+            "measurement Provider-attempt ledger delta was not exactly one actual per question",
+            attempt_delta,
+        )
         return {
             "name": name,
             "workers": workers,
@@ -836,17 +1437,23 @@ WHERE s.datname = current_database();
                 "completed_questions": total_questions,
             },
             "latency_seconds": {
-                "queue": distribution(queue_latencies),
-                "execution": distribution(execution_latencies),
-                "end_to_end": distribution(end_to_end_latencies),
+                "queue": queue_distribution,
+                "execution": execution_distribution,
+                "end_to_end": end_to_end_distribution,
             },
-            "question_latency_ms": distribution(question_latencies),
+            "question_latency_ms": question_distribution,
             "errors_and_retries": {
                 "terminal_statuses": terminal_statuses,
                 "question_errors": question_errors,
                 "failed_attempt_count": failure_retries,
                 "lease_acquisitions": sum(int(run["attempt_count"]) for run in final_runs),
                 "dispatches": sum(int(run.get("dispatch_count") or 0) for run in final_runs),
+            },
+            "provider_attempts": {
+                **attempt_delta,
+                "attempts_per_completed_question": (
+                    attempt_delta["provider_reservations"] / total_questions
+                ),
             },
             "cooperative_scheduling": scheduling,
             "response_count": response_count,
@@ -957,9 +1564,11 @@ WHERE s.datname = current_database();
             "database backlog gauge did not reach the exact configured limit",
             backlog_metrics,
         )
+        drain_started = time.monotonic()
         self.start_validated_containers(stopped_workers, expected_service="worker")
         worker_state = self.wait_service_healthy("worker", count=self.worker_count, timeout=120)
         final_runs, metrics = self.wait_runs_terminal(run_ids)
+        backlog_drain_seconds = round(time.monotonic() - drain_started, 6)
         self.require(
             {run["id"] for run in final_runs} == set(run_ids)
             and all(
@@ -1010,6 +1619,7 @@ WHERE s.datname = current_database();
                 "typed_rejections": submissions["rejected"],
                 "accepted_run_ids": run_ids,
                 "accepted_runs_preserved": {run["id"] for run in final_runs} == set(run_ids),
+                "backlog_drain_seconds": backlog_drain_seconds,
                 "backlog_at_configured_limit": backlog_metrics,
                 "backlog_after_drain": drained_metrics,
                 "worker_state_after_restart": worker_state,
@@ -1165,31 +1775,91 @@ WHERE s.datname = current_database();
         return result
 
     def lease_expiry_fault(self) -> dict[str, Any]:
+        workers_by_hostname = {
+            str(worker["hostname"]): worker for worker in self.service_metas("worker")
+        }
+        self.require(
+            len(workers_by_hostname) == self.worker_count,
+            "lease fault could not pre-cache the Worker container map",
+            list(workers_by_hostname),
+        )
         created = self.create_capacity_run()
         self.require(created["status_code"] == 202, "lease fault Run was not admitted", created)
         run_id = created["payload"]["id"]
-        partial = self.wait_run(
-            run_id,
-            "partial Mock evidence before capacity Worker SIGKILL",
-            lambda run: (
-                run["status"] == "running"
-                and 0 < run["completed_questions"] < run["total_questions"]
-            ),
-            timeout=self.timeout_seconds,
-        )
-        owner = str(partial["lease_owner"])
-        owner_parts = owner.split(":")
-        self.require(len(owner_parts) >= 4, "unexpected Worker lease owner", owner)
-        candidates = [
-            worker
-            for worker in self.service_metas("worker")
-            if worker["hostname"] == owner_parts[1]
-        ]
-        self.require(len(candidates) == 1, "could not map lease owner to Worker", candidates)
-        victim = candidates[0]
-        before_ids = {response["id"] for response in self.responses(run_id)["items"]}
-        self.run_command(["docker", "kill", "--signal", "KILL", victim["id"]], timeout=30)
+        deadline = time.monotonic() + self.timeout_seconds
+        frozen: dict[str, Any] | None = None
+        victim: dict[str, Any] | None = None
+        paused_container_id: str | None = None
+        try:
+            while time.monotonic() < deadline:
+                observed = self.wait_for(
+                    "active Mock lease before capacity Worker pause",
+                    lambda: self.db_run_snapshot(run_id),
+                    lambda run: (
+                        run["status"] == "running"
+                        and run.get("lease_owner") is not None
+                        and int(run.get("send_started_provider_attempts") or 0) == 1
+                        and int(run.get("response_count") or 0) < DEMO_QUESTIONS_PER_RUN
+                    ),
+                    timeout=max(0.1, deadline - time.monotonic()),
+                    interval=0.02,
+                )
+                owner = str(observed["lease_owner"])
+                owner_parts = owner.split(":")
+                self.require(len(owner_parts) >= 4, "unexpected Worker lease owner", owner)
+                candidate = workers_by_hostname.get(owner_parts[1])
+                self.require(candidate is not None, "could not map lease owner to Worker", owner)
+                paused_container_id = str(candidate["id"])
+                self.run_command(["docker", "pause", paused_container_id], timeout=20)
+                fenced = self.db_run_snapshot(run_id)
+                if (
+                    fenced["status"] == "running"
+                    and fenced.get("lease_owner") == owner
+                    and fenced.get("lease_token") == observed.get("lease_token")
+                    and fenced.get("lease_expires_at") is not None
+                    and int(fenced.get("send_started_provider_attempts") or 0) == 1
+                ):
+                    frozen = fenced
+                    victim = candidate
+                    break
+                unpaused = self.run_command(
+                    ["docker", "unpause", paused_container_id], timeout=20, check=False
+                )
+                self.require(
+                    unpaused.returncode == 0,
+                    "could not unpause an unstable Worker lease candidate",
+                    {"container_id": paused_container_id, "returncode": unpaused.returncode},
+                )
+                paused_container_id = None
+            self.require(
+                frozen is not None and victim is not None,
+                "could not freeze a stable Worker lease before SIGKILL",
+            )
+            owner = str(frozen["lease_owner"])
+            before_ids = set(frozen["response_ids"])
+            kill_fence_database_at = str(frozen["database_now"])
+            old_lease_expires_at = str(frozen["lease_expires_at"])
+            self.run_command(["docker", "kill", "--signal", "KILL", victim["id"]], timeout=30)
+            paused_container_id = None
+        finally:
+            if paused_container_id is not None:
+                with contextlib.suppress(Exception):
+                    self.run_command(
+                        ["docker", "unpause", paused_container_id],
+                        timeout=20,
+                        check=False,
+                    )
         killed = self.container_meta(victim["id"])
+        self.require(killed["status"] == "exited", "SIGKILL victim did not exit", killed)
+        self.require(killed["exit_code"] != 0, "SIGKILL victim exited successfully", killed)
+        post_kill_database = self.db_run_snapshot(run_id)
+        self.require(
+            post_kill_database["status"] == "running"
+            and post_kill_database["lease_owner"] == owner
+            and post_kill_database["lease_expires_at"] is not None,
+            "SIGKILL did not preserve the durable lease until natural expiry",
+            post_kill_database,
+        )
         final_runs, metrics = self.wait_runs_terminal([run_id], timeout=self.timeout_seconds)
         final = final_runs[0]
         self.require(final["status"] == "completed", "lease expiry Run did not recover", final)
@@ -1205,6 +1875,26 @@ WHERE s.datname = current_database();
             len(responses) == len({response["question_id"] for response in responses}) == 15,
             "lease recovery produced duplicate or missing Response evidence",
         )
+        audit_events = self.run_audit_events(run_id)
+        try:
+            reclaim = first_claim_at_or_after(audit_events, old_lease_expires_at)
+            kill_fence_to_reclaim_seconds = nonnegative_utc_elapsed_seconds(
+                kill_fence_database_at,
+                str(reclaim["occurred_at"]),
+            )
+            lease_expiry_to_reclaim_seconds = nonnegative_utc_elapsed_seconds(
+                old_lease_expires_at,
+                str(reclaim["occurred_at"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AcceptanceFailure(
+                "typed lease recovery timing was missing or not non-negative"
+            ) from exc
+        self.require(
+            int(reclaim.get("lease_token") or 0) > int(frozen.get("lease_token") or 0),
+            "first post-expiry claim did not advance the durable lease token",
+            reclaim,
+        )
         self.start_validated_containers([killed], expected_service="worker")
         worker_state = self.wait_service_healthy("worker", count=self.worker_count, timeout=120)
         fault = {
@@ -1212,9 +1902,20 @@ WHERE s.datname = current_database();
             "run_id": run_id,
             "victim": victim,
             "victim_after_kill": killed,
-            "partial_completed_questions": partial["completed_questions"],
+            "partial_completed_questions": frozen["response_count"],
             "preserved_response_ids": sorted(before_ids),
-            "terminal": {field: final.get(field) for field in RUN_SNAPSHOT_FIELDS},
+            "post_kill_database": post_kill_database,
+            "timing": {
+                "kill_fence_database_at": kill_fence_database_at,
+                "old_lease_expires_at": old_lease_expires_at,
+                "reclaim_occurred_at": reclaim["occurred_at"],
+                "kill_fence_to_reclaim_seconds": kill_fence_to_reclaim_seconds,
+                "lease_expiry_to_reclaim_seconds": lease_expiry_to_reclaim_seconds,
+            },
+            "terminal": {
+                **{field: final.get(field) for field in RUN_SNAPSHOT_FIELDS},
+                "failed_attempt_count": final.get("failed_attempt_count"),
+            },
             "task_metrics": metrics,
             "worker_state_after_restart": worker_state,
         }
@@ -1251,6 +1952,24 @@ WHERE s.datname = current_database();
             "database scan did not complete Run while Redis was unavailable",
             final,
         )
+        try:
+            run_created_at = str(pending["created_at"])
+            first_claim = first_claim_at_or_after(
+                self.run_audit_events(run_id),
+                run_created_at,
+            )
+            run_created_to_claim_seconds = nonnegative_utc_elapsed_seconds(
+                run_created_at,
+                str(first_claim["occurred_at"]),
+            )
+            run_created_to_terminal_seconds = nonnegative_utc_elapsed_seconds(
+                run_created_at,
+                str(final["finished_at"]),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AcceptanceFailure(
+                "typed Redis-outage recovery timing was missing or not non-negative"
+            ) from exc
         redis_stopped = self.service_metas("redis", include_stopped=True)[0]
         self.require(redis_stopped["status"] == "exited", "Redis recovered before DB scan")
         self.compose("start", "redis", timeout=60)
@@ -1264,6 +1983,13 @@ WHERE s.datname = current_database();
             "pending_last_error": pending.get("last_error"),
             "workers_while_redis_stopped": workers_degraded,
             "terminal_status": final["status"],
+            "timing": {
+                "run_created_at": run_created_at,
+                "first_claim_occurred_at": first_claim["occurred_at"],
+                "terminal_at": final["finished_at"],
+                "run_created_to_claim_seconds": run_created_to_claim_seconds,
+                "run_created_to_terminal_seconds": run_created_to_terminal_seconds,
+            },
             "task_metrics": metrics,
             "redis_after_start": redis_healthy,
             "ready_after_start": ready["payload"],
@@ -1298,6 +2024,8 @@ WHERE s.datname = current_database();
             "run_id": run_id,
             "duplicate_message_id": duplicate_id,
             "snapshot_sha256": before["sha256"],
+            "before_snapshot_sha256": before["sha256"],
+            "after_snapshot_sha256": after["sha256"],
             "queue_after_ack": queue,
         }
         self.evidence["faults"].append(fault)
@@ -1305,111 +2033,22 @@ WHERE s.datname = current_database();
         return fault
 
     def governance_reconciliation(self) -> dict[str, Any]:
-        raw = self.psql(
-            """
-SELECT json_build_object(
-  'policies', (SELECT count(*) FROM governance_policies),
-  'active_policies', (SELECT count(*) FROM governance_policies WHERE is_active),
-  'runs', (SELECT count(*) FROM evaluation_runs),
-  'responses', (SELECT count(*) FROM evaluation_responses),
-  'question_executions', (SELECT count(*) FROM question_executions),
-  'reservations', (SELECT count(*) FROM provider_call_reservations),
-  'reservation_states', COALESCE((
-    SELECT json_object_agg(state, count) FROM (
-      SELECT state, count(*) AS count
-      FROM provider_call_reservations GROUP BY state ORDER BY state
-    ) states
-  ), '{}'::json),
-  'active_reservations', (
-    SELECT count(*) FROM provider_call_reservations
-    WHERE state IN ('reserved', 'send_started')
-  ),
-  'scope_active_reservations', (
-    SELECT COALESCE(sum(active_reservations), 0) FROM governance_scopes
-  ),
-  'scope_reserved_requests', (
-    SELECT COALESCE(sum(reserved_requests), 0) FROM governance_scopes
-  ),
-  'scope_reserved_input_tokens', (
-    SELECT COALESCE(sum(reserved_input_tokens), 0) FROM governance_scopes
-  ),
-  'scope_reserved_output_tokens', (
-    SELECT COALESCE(sum(reserved_output_tokens), 0) FROM governance_scopes
-  ),
-  'minute_reserved_requests', (
-    SELECT COALESCE(sum(reserved_requests), 0) FROM governance_minute_buckets
-  ),
-  'minute_reserved_input_tokens', (
-    SELECT COALESCE(sum(reserved_input_tokens), 0) FROM governance_minute_buckets
-  ),
-  'minute_reserved_output_tokens', (
-    SELECT COALESCE(sum(reserved_output_tokens), 0) FROM governance_minute_buckets
-  ),
-  'overdrawn_scopes', (SELECT count(*) FROM governance_scopes WHERE overdrawn),
-  'duplicate_operation_keys', (
-    SELECT count(*) FROM (
-      SELECT operation_key FROM provider_call_reservations
-      GROUP BY operation_key HAVING count(*) > 1
-    ) duplicates
-  ),
-  'audit_events', (SELECT count(*) FROM audit_events),
-  'audit_event_types', COALESCE((
-    SELECT json_object_agg(event_type, count) FROM (
-      SELECT event_type, count(*) AS count
-      FROM audit_events GROUP BY event_type ORDER BY event_type
-    ) types
-  ), '{}'::json),
-  'duplicate_audit_event_keys', (
-    SELECT count(*) FROM (
-      SELECT event_key FROM audit_events GROUP BY event_key HAVING count(*) > 1
-    ) duplicates
-  ),
-  'active_runs', (
-    SELECT count(*) FROM evaluation_runs WHERE status IN ('pending', 'running')
-  ),
-  'failed_attempt_count', (
-    SELECT COALESCE(sum(failed_attempt_count), 0) FROM evaluation_runs
-  ),
-  'question_error_count', (
-    SELECT count(*) FROM evaluation_responses WHERE error_type IS NOT NULL
-  )
-)::text;
-"""
-        ).stdout.strip()
+        raw = self.psql(GOVERNANCE_RECONCILIATION_SQL).stdout.strip()
         try:
             snapshot = json.loads(raw)
         except json.JSONDecodeError as exc:
             raise AcceptanceFailure("governance reconciliation was not valid JSON") from exc
-        for field in (
-            "active_reservations",
-            "scope_active_reservations",
-            "scope_reserved_requests",
-            "scope_reserved_input_tokens",
-            "scope_reserved_output_tokens",
-            "minute_reserved_requests",
-            "minute_reserved_input_tokens",
-            "minute_reserved_output_tokens",
-            "overdrawn_scopes",
-            "duplicate_operation_keys",
-            "duplicate_audit_event_keys",
-            "active_runs",
-        ):
-            self.require(
-                int(snapshot[field]) == 0,
-                "governance reconciliation drift",
-                {
-                    "field": field,
-                    "value": snapshot[field],
-                },
-            )
-        self.require(
-            int(snapshot["reservations"]) >= int(snapshot["responses"]) > 0,
-            "Mock capacity evidence did not traverse the Provider attempt ledger",
-            snapshot,
+        if not isinstance(snapshot, dict):
+            raise AcceptanceFailure("governance reconciliation must be a JSON object")
+        expected_counts, expected_states, expected_audit_counts = reconciliation_expectations(
+            runs_per_phase=self.runs_per_phase,
+            backlog_limit=self.backlog_limit,
         )
-        self.require(
-            int(snapshot["audit_events"]) > 0,
-            "capacity evidence did not produce typed audit events",
+        validate_governance_reconciliation_snapshot(
+            snapshot,
+            expected_counts=expected_counts,
+            expected_reservation_states=expected_states,
+            expected_provider_attempt_audit_counts=expected_audit_counts,
         )
         return snapshot
 
@@ -1418,10 +2057,22 @@ SELECT json_build_object(
         self.write_evidence()
         self.setup_stack()
         self.topology_and_data()
-        one_worker = self.run_measurement_phase("single_worker_reference", workers=1)
-        scaled = self.run_measurement_phase(
-            "configured_multi_worker_baseline", workers=self.worker_count
+        measurement_cells = {
+            "single_worker_reference": 1,
+            "configured_multi_worker_baseline": self.worker_count,
+        }
+        ordered_names = (
+            ("single_worker_reference", "configured_multi_worker_baseline")
+            if self.measurement_order == "single_then_multi"
+            else ("configured_multi_worker_baseline", "single_worker_reference")
         )
+        measured = {
+            name: self.run_measurement_phase(name, workers=measurement_cells[name])
+            for name in ordered_names
+        }
+        one_worker = measured["single_worker_reference"]
+        scaled = measured["configured_multi_worker_baseline"]
+        self.scale_workers(self.worker_count)
         burst = self.bounded_queue_burst()
         fairness = self.model_fairness_scenario()
         self.lease_expiry_fault()
@@ -1458,6 +2109,40 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--question-quantum", type=int, default=5)
     parser.add_argument("--mock-delay-seconds", type=float, default=0.08)
     parser.add_argument("--timeout-seconds", type=float, default=180)
+    parser.add_argument("--lease-seconds", type=float, default=6)
+    parser.add_argument("--heartbeat-seconds", type=float, default=2)
+    parser.add_argument("--worker-poll-seconds", type=float, default=0.15)
+    parser.add_argument("--worker-max-attempts", type=int, default=WORKER_MAX_ATTEMPTS)
+    parser.add_argument(
+        "--retry-backoff-base-seconds",
+        type=float,
+        default=WORKER_RETRY_BACKOFF_BASE_SECONDS,
+    )
+    parser.add_argument(
+        "--retry-backoff-cap-seconds",
+        type=float,
+        default=WORKER_RETRY_BACKOFF_CAP_SECONDS,
+    )
+    parser.add_argument(
+        "--worker-shutdown-grace-seconds",
+        type=float,
+        default=WORKER_SHUTDOWN_GRACE_SECONDS,
+    )
+    parser.add_argument(
+        "--redis-block-milliseconds",
+        type=int,
+        default=REDIS_BLOCK_MILLISECONDS,
+    )
+    parser.add_argument(
+        "--redis-operation-timeout-seconds",
+        type=float,
+        default=REDIS_OPERATION_TIMEOUT_SECONDS,
+    )
+    parser.add_argument(
+        "--measurement-order",
+        choices=("single_then_multi", "multi_then_single"),
+        default="single_then_multi",
+    )
     parser.add_argument(
         "--artifacts-root",
         type=Path,
@@ -1506,7 +2191,7 @@ def main(argv: Sequence[str]) -> int:
             "traceback": redact_text(traceback.format_exc()),
         }
         print(f"Phase 2 capacity failed: {redact_text(str(exc))}", file=sys.stderr)
-    except BaseException as exc:  # noqa: BLE001 - retain evidence for fatal harness failures.
+    except BaseException as exc:
         harness.evidence["status"] = "failed"
         harness.evidence["failure"] = {
             "type": type(exc).__name__,
@@ -1519,14 +2204,14 @@ def main(argv: Sequence[str]) -> int:
         if not args.self_check_only:
             try:
                 harness.collect_diagnostics()
-            except BaseException as exc:  # noqa: BLE001 - diagnostics must not skip cleanup.
+            except BaseException as exc:
                 harness.evidence["diagnostics_error"] = redact_text(str(exc))
                 if exit_code == 0:
                     harness.evidence["status"] = "failed"
                     exit_code = 1
             try:
                 cleanup_error = harness.cleanup()
-            except BaseException as exc:  # noqa: BLE001 - convert cleanup failure to evidence.
+            except BaseException as exc:
                 cleanup_error = f"cleanup raised {type(exc).__name__}: {redact_text(str(exc))}"
             if cleanup_error is not None:
                 harness.evidence["status"] = "failed"
@@ -1535,7 +2220,7 @@ def main(argv: Sequence[str]) -> int:
             harness.evidence["finished_at"] = utc_now()
             try:
                 harness.write_evidence()
-            except BaseException as exc:  # noqa: BLE001 - final evidence write is best effort.
+            except BaseException as exc:
                 print(f"Could not write capacity evidence: {exc}", file=sys.stderr)
                 exit_code = 1
 

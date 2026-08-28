@@ -1,7 +1,7 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help setup dev backend worker frontend test lint format smoke migrate phase2-acceptance phase2-capacity docker-up docker-down
+.PHONY: help setup dev backend worker frontend test lint format smoke migrate phase2-acceptance phase2-capacity phase2-slo docker-up docker-down
 
 help:
 	@echo "LLMBenchLab developer commands:"
@@ -17,6 +17,7 @@ help:
 	@echo "  make migrate      Apply all Alembic migrations"
 	@echo "  make phase2-acceptance  Run isolated real-Compose reliability fault tests"
 	@echo "  make phase2-capacity    Run bounded two-Worker Mock capacity baseline"
+	@echo "  make phase2-slo         Run the multi-trial single-host Mock qualification"
 	@echo "  make docker-up    Build and start the Compose stack"
 	@echo "  make docker-down  Stop the Compose stack"
 
@@ -75,6 +76,9 @@ phase2-acceptance:
 
 phase2-capacity:
 	@python3 scripts/phase2_capacity.py
+
+phase2-slo:
+	@python3 -I scripts/phase2_slo.py
 
 docker-up:
 	@./scripts/bootstrap_credential_keyring.sh

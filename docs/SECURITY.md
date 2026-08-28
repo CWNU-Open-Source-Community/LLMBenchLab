@@ -155,6 +155,16 @@ Web stored 流程如下：
 
 脱敏降低偶发泄漏，不是数据访问控制；已经被未授权方读取的秘密必须轮换。
 
+### 4.1 Phase 2 SLO evidence 安全边界
+
+`make phase2-slo` 的 `P2-local-control-plane-v1` 是完全 Mock-only 的本地控制面资格，不是读取现有模型配置的通用压测。wrapper 只给 child 继承运行本地 Git/Docker 所需的环境 allowlist，移除已知 Provider credential 变量；child validator 还要求 Model 为 Mock、没有 `api_key_env` 或自定义 `base_url`，并拒绝真实 Provider、非有限 policy、脏工作树和跨轮配置/环境漂移。不能通过把真实 Key 改成其他变量名来绕开此边界；资格进程本来就不应在含 Provider credential 的 shell 中运行。
+
+raw child 与 aggregate 都写入 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`，不提交、不自动上传。aggregate 使用严格 allowlist，只保存精确 commit、脚本/Compose SHA-256、稳定配置/环境指纹、child 相对路径/hash、脱敏统计/判定、独立 ledger→scope/minute projection 结果和 cleanup 摘要；不复制 child stdout/log、DSN、URL、环境变量、题目、Prompt/Response、keyring/envelope 或 Provider 数据。读取 child evidence 时还限制文件大小、UTF-8/strict JSON、重复键、NaN/Infinity、路径逃逸、symlink 和读取期置换。
+
+allowlist 只减少聚合面，不等于 artifact 无敏感性。raw child 仍含 Run/容器 ID、数据 hash、资源与运维计数；aggregate 的 commit/hash、主机指纹、SLI 和故障结果也可能暴露内部拓扑或性能。两者都应按内部运维证据保护，公开前人工复核，不把整个 artifact 根、数据库、Compose 展开配置或 `.env` 上传为 CI artifact。Git 忽略不是加密、访问控制、保留策略或安全删除。
+
+每个 child 位于独立进程组和唯一、正则约束的 Compose project。超时或中断时 wrapper 先发送终止信号，并给 child 最多 420 秒执行 scoped `down -v --remove-orphans` 和零容器/volume/network 复核，之后才只针对该进程组升级终止；该窗口不是允许清理其他项目的授权。失败 evidence 会保留。它能证明一次 invocation 内记录了所有计划轮，不能证明操作者未删除更早的 suite，也不是 WORM、签名 provenance 或生产 SLA 证据。
+
 ## 5. `base_url` 与 SSRF
 
 `openai_compatible` 允许用户配置 `base_url`，Adapter 会调用其 Chat Completions 路径。这是当前最高优先级的公开部署阻断项。

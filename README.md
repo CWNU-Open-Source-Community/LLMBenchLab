@@ -306,6 +306,7 @@ make test       # 完整 pytest + Vitest
 make smoke      # 纯离线 Mock 垂直链路
 make phase2-acceptance  # 隔离 Compose 中的真实故障验收
 make phase2-capacity    # PostgreSQL 16/Redis 7/双 Worker Mock 容量基线
+make phase2-slo         # clean commit 上的固定单机控制面资格套件
 ```
 
 前端 production build 是独立门槛：
@@ -315,7 +316,7 @@ cd frontend
 npm run build
 ```
 
-测试策略的关键约束：自动化和 CI 不配置 Provider Key，不调用真实或付费 API；OpenAI-compatible 协议测试使用进程内 `httpx.MockTransport`；Smoke 在隔离 SQLite 中证明 API 不执行任务、再由独立 WorkerService 完成 Mock Run；真实 PostgreSQL/Redis Compose 验收覆盖并发领取、治理/ledger 对账、API/Worker/Redis 故障、取消、租约过期、三条确定性数据库 crash seam 与 0004 安全回滚。候选 `665244e…` 的增强容量证据已验证有限 policy 读回、精确 4×`202`+2×`429`、cooperative yield 与高/低流量 Mock Model 公平顺序；1/2 Worker 与 burst 吞吐分别为 7.306981/13.396740/8.585309 题/秒。前端 API 使用 stub/mock。完整测试矩阵与 evidence hash 见 [`docs/TESTING.md`](docs/TESTING.md) 和 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
+测试策略的关键约束：自动化和 CI 不配置 Provider Key，不调用真实或付费 API；OpenAI-compatible 协议测试使用进程内 `httpx.MockTransport`；Smoke 在隔离 SQLite 中证明 API 不执行任务、再由独立 WorkerService 完成 Mock Run；真实 PostgreSQL/Redis Compose 验收覆盖并发领取、治理/ledger 对账、API/Worker/Redis 故障、取消、租约过期、三条确定性数据库 crash seam 与 0004 安全回滚。候选 `665244e…` 的增强容量证据已验证有限 policy 读回、精确 4×`202`+2×`429`、cooperative yield 与高/低流量 Mock Model 公平顺序；1/2 Worker 与 burst 吞吐分别为 7.306981/13.396740/8.585309 题/秒。`make phase2-slo` 在精确 clean commit 上固定 `P2-local-control-plane-v1`：1 次 warm-up 后串行保留 5 次 measured trial，使用 PostgreSQL 16、Redis 7、两个 Worker、`lease/heartbeat/poll=30/10/1s`、retry `max/base/cap=3/1/30s` 和数据库 pool/overflow `5/5`。wrapper 会按 `completed_questions / wall_duration_seconds` 重算吞吐、使用同 trial 的双/单 Worker 配对 scale，并把独立 ledger→scope/minute projection 对账作为硬门禁。raw/aggregate evidence 都留在 Git 忽略目录；入口存在不等于已有通过结果，也不是生产或真实 Provider SLA。共享 GitHub-hosted runner 只验证 validator、统计和失败路径，不执行绝对性能门禁。前端 API 使用 stub/mock。完整测试矩阵与 evidence hash 见 [`docs/TESTING.md`](docs/TESTING.md) 和 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
 
 ## Docker Compose
 

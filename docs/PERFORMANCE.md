@@ -2,7 +2,7 @@
 
 ## 1. 结论与边界
 
-Phase 2 现有一条绑定 clean commit `665244e095905083b606b8e98e946ed1a02dc0fc`、机器可读且完全 Mock-only 的增强真实基础设施容量基线。它使用隔离的 PostgreSQL 16、Redis 7 和两个独立 Worker，验证显式有限 policy、Worker 扩缩、精确 `202/429` 背压、cooperative quantum、跨 Model 公平性、租约过期恢复、Redis stop/start、重复通知及治理 ledger/audit 对账。增强前的 dirty-worktree 基线仍在第 3 节作为历史记录保留，不能与当前候选证据混用。
+Phase 2 现有一条绑定 clean commit `665244e095905083b606b8e98e946ed1a02dc0fc`、机器可读且完全 Mock-only 的增强真实基础设施容量基线。它使用隔离的 PostgreSQL 16、Redis 7 和两个独立 Worker，验证显式有限 policy、Worker 扩缩、精确 `202/429` 背压、cooperative quantum、跨 Model 公平性、租约过期恢复、Redis stop/start、重复通知及治理 ledger/audit 对账。增强前的 dirty-worktree 基线仍在第 3 节作为历史记录保留，不能与当前候选证据混用。仓库还提供按 [ADR-0012](decisions/ADR-0012-single-host-slo-capacity-qualification.md) 预登记的 `P2-local-control-plane-v1` 正式资格入口；本节描述方法和门禁，不把入口本身写成一次已经通过的正式多轮结果。
 
 这不是生产 SLO/SLA，也不是以下能力的证明：
 
@@ -19,6 +19,7 @@ Phase 2 现有一条绑定 clean commit `665244e095905083b606b8e98e946ed1a02dc0f
 
 ```bash
 make phase2-capacity
+make phase2-slo
 ```
 
 该命令执行 [`scripts/phase2_capacity.py`](../scripts/phase2_capacity.py)。脚本使用随机 Compose project 和随机 loopback API 端口，移除已知真实 Provider Key 环境变量，只注册 Mock Model，把证据写入 Git 忽略目录，并在成功或失败后执行 `docker compose down -v --remove-orphans`。默认负载为：
@@ -52,6 +53,42 @@ worker_poll_seconds=0.15
 - 脱敏命令尾部、诊断与 cleanup 结果。
 
 证据文件含 Run ID、容器 ID、数据 hash 和运维计数，仍应按内部运维数据保护；不得公开 Provider 数据、数据库内容或凭据。脚本不会调用真实 Provider。
+
+### 2.1 `P2-local-control-plane-v1` 固定资格合同
+
+`make phase2-slo` 执行 [`scripts/phase2_slo.py`](../scripts/phase2_slo.py)。它不是可任意调参的容量搜索，而是在精确 clean commit 上串行执行 1 次 warm-up 和 5 次 measured trial；默认 seed 为 `20260828`，单/双 Worker cell 使用预先平衡的固定顺序，warm-up 不进入统计，measured trial 不删除异常轮，也不允许只重跑失败 cell 后拼接证据。每个 trial 都调用隔离的 `phase2-capacity` child，并固定以下支持 profile：
+
+| 维度 | `P2-local-control-plane-v1` 固定值 |
+| --- | --- |
+| 故障域 | 单台可信主机、一个 API、PostgreSQL 16、Redis 7、两个独立 Worker；不宣称 HA |
+| 最低资源 | Host 至少 8 logical CPU / 8,000,000,000 bytes RAM；Docker 至少 8 CPU / 4,000,000,000 bytes memory |
+| 数据库 | `max_connections >= 100`；API 与每个 Worker `pool_size=5`、`max_overflow=5`、pool timeout 2 秒 |
+| 执行 | 每 Worker 同时 1 个 Run；Run concurrency 1；每 cell 4 个 Run；每 Run 为 Demo 15 题 |
+| Mock 与预算 | Mock generation delay 80 ms；input reservation 256 Token；`max_tokens=64`；全有限 policy |
+| 调度与背压 | backlog 4、并发提交 6、`question_quantum=5`；burst 必须精确 `4×202 + 2×429` |
+| 恢复参数 | `lease/heartbeat/poll=30/10/1s`；`max_attempts=3`；retry backoff `base/cap=1/30s`；shutdown grace 30 秒 |
+| Redis/连接参数 | block 1000 ms、operation timeout 1 秒；readiness DB timeout 2 秒 |
+
+Compose 通过 `LLMBENCHLAB_COMPOSE_WORKER_MAX_ATTEMPTS`、`LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_BASE_SECONDS`、`LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_CAP_SECONDS`、`LLMBENCHLAB_COMPOSE_DATABASE_POOL_SIZE` 和 `LLMBENCHLAB_COMPOSE_DATABASE_MAX_OVERFLOW` 显式映射这些资格敏感值。每个 child 还从容器内应用 Settings 回读 lease、heartbeat、poll、retry、pool 和 Redis 参数，并把 PostgreSQL `max_connections`、稳定 image ID 与主机/容器资源纳入环境指纹；任一 trial 漂移都会使整个 suite 失败。
+
+### 2.2 统计、硬门禁与 evidence
+
+主 SLI 不信任 child 提供的汇总吞吐：wrapper 以每个 cell 的 `60 completed questions / wall_duration_seconds` 独立重算题吞吐，再按 trial 为单位计算样本均值、标准差、CV、双侧 95% 均值区间和单侧 95% Student-t lower confidence bound（LCB）。双/单 Worker scale 使用同一个 measured trial 内的配对吞吐比，避免把不同轮的主机噪声错误配对。资格阈值为：
+
+| SLI | 预登记门槛 |
+| --- | --- |
+| 单 Worker 吞吐 | one-sided 95% LCB `>= 5 q/s`，CV `<= 15%` |
+| 双 Worker 吞吐 | one-sided 95% LCB `>= 10 q/s`，CV `<= 15%` |
+| burst 吞吐 | one-sided 95% LCB `>= 6 q/s`，CV `<= 20%` |
+| 同 trial 双/单 Worker scale | 配对 ratio 的 one-sided 95% LCB `>= 1.50`，CV `<= 15%` |
+| 各 trial p95 | 单 Worker queue/execution/e2e `<= 3/8/10s`；双 Worker `<= 2/5/7s`；burst `<= 3/5/8s` |
+| backlog 与恢复 | 每 trial drain `<= 10s`；kill fence→reclaim `<= 38s`；lease expiry→reclaim `<= 6s`；Redis Run durable `created_at`→claim `<= 3s` |
+
+每轮还必须满足零题错误、唯一 Response/operation/audit key、无 active/reserved/overdrawn 残留、Redis PEL/lag 清零、backpressure/fairness/fault/cleanup 全通过。最终 ledger 对账不是读取物化 counter 自证：capacity child 从不可删除的 Provider attempt ledger 独立重算 scope 与 UTC-minute projection，检查缺行、多行及每个 consumed/reserved 字段漂移，wrapper 再要求全部 projection drift 字段为 0。只有所有硬门禁和 SLO 同时成功，容量模型才输出 `qualified`；否则吞吐 LCB 派生的安全到达率保持 `not_qualified`。
+
+aggregate schema 为 `llmbenchlab-phase2-slo-evidence-v1`，默认写入 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/<suite>/evidence.json`；各 raw child evidence 位于同一 suite 的 trial 子目录，也不提交或自动上传。aggregate 只复制 allowlist：精确 commit、脚本/Compose hash、稳定配置/环境指纹、child 相对路径和 hash、脱敏 SLI/统计/判定、容量模型与 cleanup 摘要；不复制 child stdout/log、DSN/URL、环境变量、题目、Prompt/Response、keyring/envelope 或 Provider 数据。child 运行在独立进程组；超时或中断后先给 scoped cleanup 最多 420 秒，再只针对该进程组升级终止。即使如此，artifact 仍是内部运维证据而非访问控制、WORM 或“操作者从未删除更早 suite”的证明。
+
+GitHub-hosted CI 的共享 CPU、内存和 Docker 调度不稳定，因此 required jobs 只验证统计函数、validator、失败路径与既有可靠性，不执行上述绝对吞吐/延迟资格。正式数值只能来自目标 clean commit 的受控本机，并必须与该精确 SHA 的公开 CI 正确性门禁共同记录。`make phase2-slo --self-check-only` 不是 Make target 支持的参数形式；如需纯合同自检应直接运行 `python3 -I scripts/phase2_slo.py --self-check-only`，它不执行 Docker trial，不能替代正式资格。
 
 ## 3. 2026-08-27 增强前的历史 dirty-worktree 基线
 

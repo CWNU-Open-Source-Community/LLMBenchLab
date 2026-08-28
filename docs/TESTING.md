@@ -62,6 +62,7 @@ make lint       # Ruff + ESLint + TypeScript 类型检查
 make smoke      # 只跑完全离线的后端垂直切片
 make phase2-acceptance  # 隔离的真实 Compose 九场景可靠性验收
 make phase2-capacity    # PostgreSQL 16/Redis 7/1→2 Worker 的 Mock 容量基线
+make phase2-slo         # clean commit 上固定 1 warm-up + 5 measured 的单机资格
 make format     # 运行项目约定的格式化器
 ```
 
@@ -113,6 +114,7 @@ uv run pytest -q \
   tests/test_response_metadata_api.py \
   tests/test_credential_audit.py \
   tests/test_phase2_capacity_script.py \
+  tests/test_phase2_slo_script.py \
   tests/test_adapters.py
 uv run pytest -k 'multiple_choice or numeric'
 ```
@@ -375,7 +377,7 @@ GitHub Actions 对 `main` push 和 Pull Request 触发四类 job：
 | `full-stack-reliability` | `python3 scripts/phase2_acceptance.py` 的隔离 Compose 九场景 | 唯一项目/卷、随机 loopback 端口、Mock-only；总是上传已脱敏 evidence，脚本总是精确清理 |
 | `frontend` | ESLint、Vitest 组件测试、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
 
-CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
+CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。`P2-local-control-plane-v1` 的 validator、统计、编排失败路径和 ledger projection 合同可以进入普通自动化，但 GitHub-hosted runner 不运行 `make phase2-slo` 的绝对吞吐/延迟门禁：共享 runner 的 CPU、内存和 Docker 调度不是稳定性能实验室。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
 
 下表是 2026-08-25 Phase 2 可靠性切片的历史基线，不是本次标准数据/真实评测 CLI 提交的通过声明。本次实际数量必须在当前工作日志和精确 commit 的 CI 中重新记录，不能沿用这些数字：
 
@@ -552,6 +554,22 @@ make phase2-capacity
 除 steady-state 外，默认先停止 Worker，以 6 路并发提交 6 个 Run，必须精确得到 4 个 `202` 和 2 个带 `run_backlog_full`/`limit=4` 的 `429`，再排空已接纳 Run；每个测量 Run 必须有至少两次 dispatch 和 cooperative yield。跨 Model 公平性场景在单 Worker 下先压入高流量 Model 的 3 个 Run，再用最后一个 slot 接纳低流量 Run，并以 durable audit 顺序断言低流量 Run 在高流量 backlog 全部终态前获得 claim/slice。脚本还必测 lease owner SIGKILL/自然过期接管、Redis stop/start 下 DB reconciliation，以及终态重复投递 no-op；最后从 DB ledger 重算 active/reserved/consumed，检查 audit/operation key 唯一、Response/QuestionExecution 对齐、overdrawn/漂移、queue lag/PEL 和项目 cleanup。证据写入 `.pytest_cache/artifacts/phase2-capacity/<project>/evidence.json`，schema 为 `llmbenchlab-phase2-capacity-evidence-v1`，包含被测 commit/dirty 状态、脚本/Compose hash、主机/容器资源、数据 Hash、配置、测量、故障、公平性、reconciliation、secret self-review 与 cleanup。
 
 失败、字段缺失、非 Mock Model、真实 Provider credential、非有限 policy/read-back 漂移、错误的 `202/429` 分布、缺少 cooperative yield/公平顺序、少于两个 Worker、DB/queue/ledger/audit 漂移或残留资源都会使脚本失败。`--self-check-only` 只验证工具、guard、配置和清理，不能替代基线。精确 SHA `665244e…` 的完整真实 Compose capacity 已通过：evidence `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-51cfadee04f5/evidence.json`，SHA-256 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`，cleanup 零残留；历史 dirty artifact 仍不能替代它。结果只对证据中的硬件、commit 与配置成立；小样本 Mock 吞吐不是 Provider 性能、费用、生产 SLO/SLA 或水平扩展上限。
+
+### 12.2 `P2-local-control-plane-v1` 正式单机资格
+
+从仓库根目录、在没有其他修改的目标 commit 上运行：
+
+```bash
+make phase2-slo
+```
+
+入口只接受 exact clean commit；开始前、每个 child 前和最终统计前都会复核 commit/工作树，且会复核 `phase2_slo.py`、`phase2_capacity.py`、`phase2_acceptance.py` 与 `compose.yaml` 的 SHA-256。默认 suite 串行执行 1 次 warm-up 和 5 次 measured trial，固定 seed `20260828`，以平衡顺序交替单/双 Worker measurement；warm-up 不计入统计，所有 measured trial 都保留，任一 child 命令失败、超时、字段漂移或 cleanup 失败都会使整个 suite 失败。
+
+每个 trial 固定 PostgreSQL 16、Redis 7、一个 API、两个 Worker、三个 measurement cell；每 cell 完成 4 个 15 题 Mock Run。配置固定 `lease/heartbeat/poll=30/10/1s`、Worker `max_attempts=3`、retry `base/cap=1/30s`、database pool/overflow `5/5`、backlog 4、burst submissions 6、Run concurrency 1、question quantum 5、Mock delay 80 ms、input reservation 256 和 `max_tokens=64`。容器内 Settings read-back、PostgreSQL `max_connections >= 100`、主机/Docker 最低资源、image ID、数据/配置/环境指纹都必须跨轮稳定。
+
+wrapper 不信任 child 的题吞吐汇总，而是以 `completed_questions / wall_duration_seconds` 重算；双/单 Worker scale 使用同一 measured trial 的配对 ratio。Student-t LCB、CV、每轮 p95、burst drain 和 lease/Redis 恢复阈值按 [PERFORMANCE.md](PERFORMANCE.md) 的预登记合同判定。每轮还必须独立从 ledger 重算 scope/minute consumed/reserved projection，要求缺失、多余和字段 drift 全为 0，并验证 Response/operation/audit 唯一、有限 policy、公平性、故障收敛、Redis PEL/lag 和项目 cleanup。
+
+aggregate 与 raw child evidence 都写入 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`。aggregate 是严格 allowlist，不含 child stdout/log、DSN/URL、环境变量、题目、Prompt/Response、keyring 或 Provider 数据；中断/超时会先向独立 child 进程组发送终止，并留 420 秒给 scoped Compose cleanup。仍应把路径/hash 当内部运维证据保护，不能默认上传 CI。`python3 scripts/phase2_slo.py --self-check-only` 只做纯合同检查，不要求 clean Git 或 Docker，也不能替代 1+5 full-stack suite。只有真实运行、保留 evidence SHA-256、所有目标/硬门禁通过，并且同一精确 commit 的 required CI 绿色后，才能记录本 profile 在该主机合格；本节不构成一次实际通过声明。
 
 ## 13. 失败排查与完成证据
 
