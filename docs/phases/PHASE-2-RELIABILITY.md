@@ -66,7 +66,7 @@
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
 | P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
 | P2-06 可观测性 | `completed` | 固定 exporter/八规则、canonical retention CLI、Worker DB-time progress、`0005` / 13 表 importer、公共 retained-row 校验与全日志源治理已进入 clean commit `9a20676…`；clean capacity/9/9 acceptance、实现 CI 与 evidence-doc commit `ec29596…` 的 CI 4/4 均通过 |
-| P2-07 验证与运维 | `ready/next` | 既有 enhanced capacity/PG tests、正式 v2 单机资格与运维文档是共享前置证据；本切片尚未实现，下一步须先新建独立计划/日志/必要 ADR，再实施 PostgreSQL+keyring backup/restore、Redis 重建、完整失败矩阵与告警响应 |
+| P2-07 验证与运维 | `planned` | [ADR-0016](../decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、[独立计划](../plans/2026-08-28-phase-2-recovery-operations.md) 与 [工作日志](../worklogs/2026-08-28-phase-2-recovery-operations.md) 已建立；功能尚未实现，后续从最小只读 verifier 开始 |
 
 `slice_delivered` 表示该垂直切片及其候选门禁已交付，不表示整个阶段完成。Phase 2 必须保持 `in_progress`。
 
@@ -135,8 +135,8 @@
 
 ## 交付物与下一任务
 
-已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 P2-01 v2 多轮资格。治理 SHA `665244e…` 已通过真实 integration/capacity/acceptance；SLO SHA `b6a35fe…` 已通过 23/23 本地资格与远程 4/4 CI。P2-06 implementation SHA `9a20676…` 与 evidence-doc SHA `ec29596…` 已分别通过精确 4/4 CI，仓库级闭环完成；下一步按 [NEXT_TASK.md](../NEXT_TASK.md) 新建 P2-07 独立计划/日志/必要 ADR，再实施 backup/restore 和剩余运维演练。
+已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 P2-01 v2 多轮资格。治理 SHA `665244e…` 已通过真实 integration/capacity/acceptance；SLO SHA `b6a35fe…` 已通过 23/23 本地资格与远程 4/4 CI。P2-06 implementation SHA `9a20676…` 与 evidence-doc SHA `ec29596…` 已分别通过精确 4/4 CI，仓库级闭环完成；P2-07 的 ADR/计划/日志已建立，后续按 [NEXT_TASK.md](../NEXT_TASK.md) 从最小只读 verifier 开始实施。
 
 ## 状态
 
-`in_progress`。P2-01 与 P2-06 已完成，P2-05 已交付；P2-07 为 `ready/next` 但尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+`in_progress`。P2-01 与 P2-06 已完成，P2-05 已交付；P2-07 状态为 `planned`，功能尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。

@@ -1,9 +1,10 @@
-# 下一任务：启动 P2-07 恢复与运维闭环
+# 下一任务：实施 P2-07 最小恢复验证切片
 
-> 状态：`ready`；P2-06 已完成仓库级闭环，下一步先建立 P2-07 独立计划、工作日志与必要 ADR
+> 状态：`planned`；P2-07 独立计划、工作日志与 ADR-0016 已建立，功能实现尚未开始
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
-> 已完成计划：[Phase 2 可观测性与审计保留](plans/2026-08-28-phase-2-observability-retention.md)
-> 已完成日志：[2026-08-28 P2-06 工作日志](worklogs/2026-08-28-phase-2-observability-retention.md)
+> 当前计划：[Phase 2 恢复与运维闭环](plans/2026-08-28-phase-2-recovery-operations.md)
+> 当前日志：[2026-08-28 P2-07 工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)
+> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)
 > 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md)
 
 ## 当前事实
@@ -21,16 +22,16 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。默认用户 SQLite 尚未在 head且未擅自迁移。
 
-## 立即执行：建立 P2-07 工作包
+## 已完成：建立 P2-07 工作包
 
-1. 按 AGENTS/PLANS 先新建 P2-07 独立执行计划与工作日志，记录目标、非目标、验收、风险和实施步骤；不得复用 P2-06 日志冒充新任务记录。
-2. 完整勘察现有 PostgreSQL backup/restore、keyring、Redis consumer group、告警 Runbook 与 Compose/CI 边界；若改变恢复协议或安全取舍，实施前新增 ADR。
-3. 把 P2-07 拆成可独立验证的 backup/keyring、Redis rebuild、alert response 与故障矩阵步骤，先冻结恢复不变量和证据公开边界，再实施代码/脚本。
-4. 自动化只使用 Mock/Stub；任何数据库/volume/keyring 删除或替换必须使用隔离、精确目标和 fail-closed guard，不触碰默认用户数据。
+1. 已按 AGENTS/PLANS 新建独立执行计划与工作日志，记录目标、非目标、验收、风险和实施步骤。
+2. 已勘察 PostgreSQL backup/restore、keyring、Redis consumer group、告警 Runbook 与 Compose/CI 边界，并以 ADR-0016 冻结关键取舍。
+3. 已把后续工作拆成 verifier、Redis/Worker、rules/recovery harness 和最终门禁；本轮按用户要求停止，没有实施代码或脚本。
+4. 后续自动化仍只能使用 Mock/Stub；任何数据库/volume/keyring 删除或替换必须使用隔离、精确目标和 fail-closed guard，不触碰默认用户数据。
 
 ## P2-07：下一独立切片
 
-P2-07 当前为 `ready`、尚未实现。新建独立计划、工作日志和必要 ADR 后，完成：
+P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最小只读 verifier 切片开始，之后才依次完成：
 
 - PostgreSQL backup → 空目标 restore → Alembic `20260828_0005` head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
 - 数据库与数据库外 keyring 独立备份/恢复：匹配 keyring 能解密，缺失/错误 keyring fail closed；日志/证据不得回显 Key 或 envelope。
@@ -54,5 +55,5 @@ P2-07 当前为 `ready`、尚未实现。新建独立计划、工作日志和必
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-继续执行 docs/NEXT_TASK.md。P2-06 已完成，不要重跑碰绿。现在按 AGENTS/PLANS 新建 P2-07 独立计划、工作日志和必要 ADR，先勘察并冻结 PostgreSQL+keyring 配对 backup/restore、Redis rebuild、八规则告警处置和剩余故障矩阵合同，再分步实现与验证。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
+继续执行 docs/NEXT_TASK.md。P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
 ```

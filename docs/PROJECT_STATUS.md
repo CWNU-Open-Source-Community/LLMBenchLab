@@ -6,7 +6,7 @@
 
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
-- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计、P2-01 单机资格与 P2-06 已完整交付；P2-07 为 `ready/next`，尚未实现）
+- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计、P2-01 单机资格与 P2-06 已完整交付；P2-07 工作包已建立，状态为 `planned`，功能尚未实现）
 - Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（仅可信本地 MMLU-Pro/GPQA-Diamond 客观题提前切片）
 - Phase 4–6：`planned`
 
@@ -14,7 +14,7 @@
 
 `0.1.0` development baseline，REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`；尚未发布正式 Release。
 
-公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`。P2-06 实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已普通 push 并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 GitHub Actions [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 四个必需 job 全部成功；绑定该 clean SHA 的 capacity 与 9/9 acceptance 也已通过。Evidence closeout 文档 commit [`ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6) 已 push，其精确 SHA 的 GitHub Actions [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 四个必需 job 全部成功，因此 P2-06 已完成仓库级收尾并标记为 `completed`。Phase 2 仍为 `in_progress`，P2-07 为 `ready/next`、尚未实现。历史 P2-01 位于 [PR #2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)：实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
+公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`。P2-06 实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已普通 push 并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 GitHub Actions [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 四个必需 job 全部成功；绑定该 clean SHA 的 capacity 与 9/9 acceptance 也已通过。Evidence closeout 文档 commit [`ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6) 已 push，其精确 SHA 的 GitHub Actions [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 四个必需 job 全部成功，因此 P2-06 已完成仓库级收尾并标记为 `completed`。Phase 2 仍为 `in_progress`；P2-07 已建立 ADR-0016、独立计划和工作日志，状态为 `planned`，功能实现尚未开始。历史 P2-01 位于 [PR #2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)：实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
 
 ## 已交付基线
 
@@ -53,7 +53,7 @@
 ## 状态与后续
 
 - P2-06：状态为 `completed`；实现、clean-SHA Compose evidence、实现 commit 与 evidence closeout 文档 commit 的 push 和精确 SHA CI 均已完成。
-- P2-07：状态为 `ready/next`，尚未实现。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的完整运维演练尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。
+- P2-07：状态为 `planned`，已建立 [ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、[独立计划](plans/2026-08-28-phase-2-recovery-operations.md) 和 [工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的功能实现尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
 ## 已知边界与风险
@@ -117,4 +117,4 @@
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。P2-06 已完成仓库级收尾；下一任务为 `ready/next`、尚未实现的 P2-07 数据库/keyring backup/restore、Redis 重建、告警处置和剩余故障演练。Phase 2 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。P2-06 已完成仓库级收尾；P2-07 工作包已建立、状态为 `planned`，后续从最小只读 recovery verifier 开始实施。Phase 2 继续保持 `in_progress`。

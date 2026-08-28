@@ -19,7 +19,7 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - 自动化、CI、Compose 故障验收和容量演练的模型执行都只使用 Mock；根据层级使用临时 SQLite 或隔离 PostgreSQL 16/Redis 7，不访问真实模型服务，也不产生模型费用。
 - Phase 2 仍为 `in_progress`。P2-01 已完整交付：`P2-local-control-plane-v2` 在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 次 warm-up + 5 次 measured trial，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；该实现的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run 33150080341](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
 - P2-06 状态为 `completed`。实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已 push 到当前分支并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 [GitHub Actions run 33164609388](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 成功。绑定同一 clean SHA 的 Compose acceptance 9/9 通过，evidence 为 `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-92e173eeee28/evidence.json`（SHA-256 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`），Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0` 且 cleanup C/V/N 全空；clean capacity evidence 为 `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-ca5673061b0f/evidence.json`（SHA-256 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`），1W/2W/burst QPS=`7.267474/12.962228/9.333604`、wall=`8.255963/4.628834/6.428385s`，最终 18 Runs/270 Responses/270 QuestionExecutions/271 reservations/1230 audit，0 question error/drift/duplicate/PEL/lag，Worker expected=2、shortfall=0，cleanup C/V/N/image 全零且 image counters=`1/1/0/0`。这是 Mock-only 单机观测，不是生产或真实 Provider SLO；此前 dirty evidence 继续保留为历史，不替代该 clean-SHA 结果。Evidence-doc commit [`ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6) 已 push，其精确 SHA 的 [run 33165775037](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 4/4 成功，完成 P2-06 仓库级收尾。
-- P2-07 状态为 `ready/next`，但尚未实现；下一步才开始数据库/keyring 配对 backup/restore、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵，因此 Phase 2 仍为 `in_progress`。Phase 3 也只交付客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
+- P2-07 状态为 `planned`，ADR-0016、独立计划和工作日志已建立，但功能尚未实现；后续才开始数据库/keyring 配对 backup/restore、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵，因此 Phase 2 仍为 `in_progress`。Phase 3 也只交付客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
 
 最新、可复核的完成状态与测试证据以 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) 和 [`docs/worklogs/`](docs/worklogs/) 为准；Roadmap 中的计划能力不等于已交付能力。
 
@@ -396,7 +396,7 @@ uv run llmbenchlab-audit-retention delete \
 | --- | --- | --- |
 | Phase 0 | 项目治理、需求、架构、协议 | 已完成 |
 | Phase 1 | FastAPI + React + SQLite 的 MVP 垂直链路 | 已完成 |
-| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：P2-01 已闭环；P2-06 实现与 evidence-doc 精确 SHA CI 均全绿，状态为 `completed`；P2-07 为 `ready/next`，尚未实现 |
+| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：P2-01 已闭环；P2-06 实现与 evidence-doc 精确 SHA CI 均全绿，状态为 `completed`；P2-07 工作包已建立，状态为 `planned`，功能尚未实现 |
 | Phase 3 | 合规标准 Benchmark 与隔离代码评测 | MMLU-Pro/GPQA 客观数据切片已交付；IFEval、沙箱及其余验收未完成 |
 | Phase 4 | LLM Judge、人工校准与 Arena | 计划中 |
 | Phase 5 | Agent、工具调用与 Live Benchmark | 计划中 |
