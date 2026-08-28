@@ -15,7 +15,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 - Provider API Key、访问令牌、兼容模式环境变量、AES-GCM credential envelope 与部署 keyring。
 - Benchmark 题目、参考答案、metadata、许可证与来源信息；未来可能包含私有数据。
 - 原始模型回答、解析结果、错误信息、运行配置快照和排行榜证据。
-- Governance policy/scope/minute counters、逐 Provider attempt reservation/settlement ledger、typed audit/history、credential audit 与安全归一化 Provider metadata。
+- Governance policy/scope/minute counters、逐 Provider attempt reservation/settlement ledger、typed audit/history/archive、Worker process/progress、credential audit 与安全归一化 Provider metadata。
 - PostgreSQL/SQLite 中的数据库事实、SQLite 源库与备份、Redis AOF/队列元数据、宿主机文件和本地网络访问能力。
 - 用户的 Provider 配额、预算与账号信誉。
 - GitHub 仓库、Actions 权限、发布产物和依赖供应链。
@@ -68,7 +68,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 - 每个 HTTP attempt 的 ledger 状态只允许 `reserved → send_started → settled_actual|settled_conservative`，或可证明未开始外发时 `reserved → released_pre_send`。明确 pre-send release 保留旧 ledger 并开启新 generation，只重试当前未发送 ordinal，不重置已经 `send_started` 的较小 ordinal。commit/usage/transport 不确定一律保守结算；这防止本地预算按零释放，却可能低估剩余额度。
 - scope 和 UTC-minute 物化 counter 会在治理变更前从 never-delete ledger 重算；高、低漂移都停止新 admission/结算/对账，并由 API/Worker 边界用独立短事务尽力记录固定、不含损坏值的 `governance_integrity_error`。过期 lease takeover 在旧 ledger 校验失败时撤销新 owner 并使 Run fail closed，防止新 Worker 外发。
 - 租约失效后 reconciler 会释放/结算本地 reservation，避免永久占用 admission。该动作无法停止已从 `send_started` 外发、仍在 Provider 运行的幽灵请求，也不证明崩溃后的真实远端并发仍受本地上限约束。本地 consumed 只用于 admission 与审计，必须另行核对 Provider 账单。
-- typed audit payload 只接受 allowlist 短枚举/数值和 opaque ID，不含 Key、Authorization、URL、Prompt、原始回答或异常文本。事件重放以唯一 key 和 payload hash 检查一致性；默认 operational/security 至少保留 90/365 天。它仍是同库的应用 append-only 事实，不是 WORM 或管理员不可篡改证据。
+- typed audit payload 只接受 allowlist 短枚举/数值和 opaque ID，不含 Key、Authorization、URL、Prompt、原始回答或异常文本。事件重放以唯一 key 和 payload hash 检查一致性；默认 operational/security 至少保留 90/365 天。Retention CLI 会把过期完整事实写入权限收紧、canonical、内容/文件 hash 绑定的内部 JSONL，并支持离线 verify、精确 restore/delete/reconcile；hash 不是签名或 WORM，archive 仍含内部身份与时间线，必须按敏感运维文件保护。
 
 ## 3. API Key 与秘密管理
 
@@ -131,7 +131,8 @@ Web stored 流程如下：
 
 当前应用日志和 OpenAI-compatible Adapter 的错误处理会：
 
-- 对 LLMBenchLab 应用 logger 使用结构化 JSON、请求/Run correlation ID 和字段 allowlist；API 只记录代码定义的 route template，不记录原始查询串或请求体。
+- 只有显式登记的 LLMBenchLab 应用 logger 可输出 literal message 与 structured extra；字段除了 allowlist，还分别受固定 event/result/error/component 枚举、canonical UUID、Redis stream ID、HTTP method/route template 和有限数值合同约束。非法身份字段被省略，未知 method/path/code 只映射到固定 `unsupported`，异常类名只保留固定错误族，不反射原值。API 不记录原始查询串或请求体。
+- `configure_logging` 把已知进程内 `Uvicorn`、`httpx`/`httpcore`、SQLAlchemy 与 Redis client logger 统一路由到同一 sanitizer：第三方动态 logger 名、message、exception 与伪造 structured extra 不进入 JSON；原始 `uvicorn.access` handler 被禁用，由应用 middleware 的 route-template 事件替代。
 - 请求校验响应只保留安全的 `type`、白名单化 `loc` 和 `msg`，省略 Pydantic `input`/`ctx`；keyring/加解密失败只暴露稳定错误码。Model create/PATCH 成功响应带 `Cache-Control: no-store`。
 - SQLAlchemy engine 固定 `hide_parameters=true`，因此 SQL echo/异常不会打印 bound Key/envelope 参数；这不替代关闭生产 SQL debug、保护数据库和限制第三方 telemetry。
 - 用 `[REDACTED]` 替换当前 API Key 的精确值。
@@ -147,8 +148,8 @@ Web stored 流程如下：
 仍需遵守以下规则：
 
 - 不记录 `os.environ`、HTTP headers、完整异常 locals、请求体或 `.env` 内容。
-- 结构化 JSON/字段 allowlist 只覆盖 LLMBenchLab 应用 logger，不覆盖全部 Uvicorn、access log、SQLAlchemy、Redis client 或其他第三方 logger；部署侧必须另行统一采集、过滤和保留策略。
-- Uvicorn access log 仍可能记录方法、原始路径和状态码；因此秘密不得出现在 URL、查询参数或路径，反向代理 access log 也必须应用同一规则。
+- 应用外的反向代理 access log、PostgreSQL/Redis server log、Docker/runtime log，以及 formatter 配置前或进程崩溃时的 stderr 不受上述 sanitizer 控制；未知且安装自有 handler 的第三方库也必须在部署侧审计、过滤并设置保留策略。
+- 即使进程内原始 Uvicorn access handler 已禁用，秘密仍不得出现在 URL、查询参数或路径；反向代理和基础设施日志必须应用相同规则。
 - `DEBUG` 仅用于无秘密的本地排障。HTTP wire logging 和第三方 SDK debug logging 默认关闭；即使 SQL 参数已隐藏，也不应在含敏感数据的部署中采集冗长 SQL trace。
 - 原始模型回答可能含供应商回显的其他敏感内容。当前只保证精确替换正在使用的 Key，并识别部分常见秘密形态；回答仍会作为评测证据持久化并通过 Responses API 返回，不能把“没有当前 Key”误当成“可以公开”。
 - 异常报告、CI artifact 和截图发出前再次人工检查，不把数据库或 `.env` 整体上传。
@@ -262,32 +263,32 @@ Compose 默认只把 API 和 frontend 端口发布到宿主 `127.0.0.1`，Postgr
 健康端点也不是访问控制或完整监控：
 
 - `/live` 只证明 API 进程能响应；`/health` 只检查数据库连接；`/ready` 检查数据库、Alembic head 与 Redis，并可能在 Redis 故障时返回 `503/degraded`，同时保留数据库提交和对账能力。
-- `/tasks/metrics` 公开数据库当前任务/governance gauges；`/tasks/history` 在同一数据库读取快照中逐条验证 retained audit 的 contract/hash/identity/retention，再公开 typed event counters 与 Run queue/execution/end-to-end p50/p95/p99，任一损坏事件使整个响应 fail closed 且不反射损坏值。pending/running cancel 都写 `run_cancel_requested`，dead-letter 单列 `run_dead_lettered`；`/runs/{id}/audit` 公开该 Run 的稳定分页 typed event。Run created/finished 与 credential audit 均取数据库 UTC。它们没有租户隔离，history 最多取 10,000 latency 样本并显式 `truncated`，audit 也不是 WORM；无鉴权时这些计数、时序、ledger 关联和 Provider metadata 都是可读取的敏感运维元数据。
-- Worker 容器 probe 只检查数据库/head 和队列依赖能力。Redis 不可用时它会报告 degraded 但以成功退出保留数据库对账路径；它**不证明 Worker 主事件循环仍在领取、心跳或推进任务**，不能替代 watchdog、进度告警或进程级 liveness。
+- `/tasks/metrics` 公开数据库当前任务/governance gauges 与匿名 Worker expected/registered/live/stalled/shortfall、最近聚合进展时间；`/tasks/history` 在同一数据库读取快照中逐条验证 retained audit 的 contract/hash/identity/retention，再公开 typed event counters 与 Run queue/execution/end-to-end p50/p95/p99。`/metrics/prometheus` 以固定 labels 输出同类 current/window/latency/Worker gauges，并用硬行数上限与 per-process single-flight 约束抓取压力。任一损坏 retained event 使整个 history/exporter fail closed 且不反射损坏值。pending/running cancel 都写 `run_cancel_requested`，dead-letter 单列 `run_dead_lettered`；`/runs/{id}/audit` 公开该 Run 的稳定分页 typed event。它们没有认证或租户隔离；无鉴权时这些计数、时序、ledger 关联和 Provider metadata 都是可读取的敏感运维元数据。
+- Worker 主进程只把固定 scan/claim/progress/lease-heartbeat bit 合并写入 DB UTC `worker_processes`，API/exporter不返回 generation/worker ID。无真实 event 时 recorder 不刷新 `last_seen_at`，避免 timer 制造幽灵健康；异常退出的 generation 会保守变 stale。Worker 容器 probe 仍只检查数据库/head 和队列依赖能力并明确 `main_loop_progress=not_checked`；它**不证明 Worker 主事件循环正在推进**，不能替代 DB-time progress 告警。
 - API readiness 把同步数据库检查放入 `asyncio.to_thread` 并限制等待时间；asyncio 超时不会取消已进入线程的数据库驱动调用，实际资源占用仍由数据库连接/驱动/池 timeout 约束。不得把 HTTP 探针 timeout 当作数据库查询硬中止。
 
-Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL/TLS，不能暴露公网或共享开发网；更高信任级别部署必须启用 Redis ACL/认证、TLS、最小网络可达、磁盘权限与备份策略，并限制危险管理命令。Redis 消息只含内部 ID、版本与 correlation ID，不含 Prompt、答案、Provider Key 或权威 Run 状态；清空、丢失或重复消息应只影响延迟/可用性，数据库事实不能被 Redis 覆盖。
+Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL/TLS，不能暴露公网或共享开发网；更高信任级别部署必须启用 Redis ACL/认证、TLS、最小网络可达、磁盘权限与备份策略，并限制危险管理命令。Redis 消息只含 canonical UUID Run/correlation ID 与固定版本，不含 Prompt、答案、Provider Key 或权威 Run 状态；publish 和 delivery 两侧都拒绝非 UUID identity，防止受污染通知在数据库校验前进入 Worker structured log。清空、丢失或重复消息应只影响延迟/可用性，数据库事实不能被 Redis 覆盖。
 
 ## 9. 数据库、响应、迁移与备份
 
 - PostgreSQL/SQLite、Redis AOF、备份和容器 volume 整体都没有存储层加密；只有 `model_credentials` 的 Provider Key 字段在应用层形成 AES-GCM envelope。题目、回答、endpoint、环境变量名和其他元数据仍是明文，应使用专用系统账号和最小文件权限保护，不放在云盘公共共享目录。Compose 中的 `llmbenchlab-local-only` PostgreSQL 密码只是隔离本地开发占位，不是生产秘密。
 - 数据库备份可能比在线数据库保留更久，应应用同等或更严格的访问、加密、保留和销毁策略。部署 keyring 必须单独备份：不备份会失去恢复能力，与数据库备份放在一起则失去 envelope 的隔离价值。
 - Responses API 包含 raw response、Prompt、标准答案和错误；Questions API 包含参考答案和 metadata。Web Run Detail 每次分页读取 100 条只限制单次展示量，不是授权、脱敏或数据隔离；Runs 列表中的详情链接也不会改变任何人的读取权限。不要把这些接口接入公开 Dashboard。
-- Governance policy、四层 opaque scope/Token/费用聚合、逐 attempt ledger、typed audit/history 和 Provider request/model/fingerprint/finish metadata 虽不含凭据正文，仍可暴露调用规模、费用趋势、供应商关联和故障时间线，必须与 Run 证据同级保护。应用 append-only 与 payload hash 不阻止数据库管理员修改或删除这些行。
+- Governance policy、四层 opaque scope/Token/费用聚合、逐 attempt ledger、typed audit/history/archive、Worker progress 和 Provider request/model/fingerprint/finish metadata 虽不含凭据正文，仍可暴露调用规模、费用趋势、内部身份关联和故障时间线，必须与 Run 证据同级保护。应用 append-only 与 payload/file hash 不阻止数据库管理员或本地文件所有者修改、替换或删除事实。
 - 正式评测报告同样包含题目、参考答案、raw response、解析和错误证据。Exporter 创建权限收紧的目录/文件、拒绝覆盖已有目标并脱敏常见秘密形态；报告指标从计划题与 Responses 重算，`metrics_provenance` 会显式标注 Run 汇总字段漂移。操作者仍须像保护数据库一样保护 `summary.json`、`groups.csv` 与 `responses.jsonl`；脱敏不是内容访问控制。
 - Run 快照用于复现，会保存模型/Benchmark 标识、`credential_source`、Model ID、endpoint，以及 environment 模式的变量名称；不会保存 credential row ID、ciphertext、nonce、key id 或 plaintext。设计环境变量名时避免包含机密业务信息。
 - 删除 Model 会在存在历史 Run 时被拒绝，以保护证据；MVP 尚无合规删除、匿名化或数据生命周期功能。
 - 备份与恢复步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
-显式 SQLite→PostgreSQL importer 会按依赖顺序复制 12 张核心/治理表的**完整内容**：`governance_policies`、`models`、`model_credentials`、`benchmarks`、`questions`、`governance_scopes`、`evaluation_runs`、`evaluation_responses`、`governance_minute_buckets`、`question_executions`、`provider_call_reservations`、`audit_events`。因此它会复制 encrypted credential envelope、题目/答案/快照/原始回答、typed Provider metadata、policy、Token/费用 ledger 与 audit，但不会解密或打印 row 内容。它只能在受信环境中针对停止写入、已在 Alembic head 且无 active reservation 的源库和空目标执行；在打开目标前还会从全部 ledger 重算 scope/minute 计数，任何高/低漂移或缺 bucket 都拒绝导入。源库、目标库、对账输出与中间备份必须按最高敏感数据等级保护。工具输出只包含每表行数、主键集 SHA-256 digest 和 canonical row SHA-256 digest；摘要仍可能用于关联同一快照，不等于加密或访问控制。
+显式 SQLite→PostgreSQL importer 会按依赖顺序复制 13 张核心/治理表的**完整内容**：`governance_policies`、`models`、`model_credentials`、`benchmarks`、`questions`、`governance_scopes`、`evaluation_runs`、`evaluation_responses`、`governance_minute_buckets`、`question_executions`、`provider_call_reservations`、`audit_events`、`worker_processes`。因此它会复制 encrypted credential envelope、题目/答案/快照/原始回答、typed Provider metadata、policy、Token/费用 ledger、audit 与 stopped/stale Worker facts，但不会解密或打印 row 内容。它只能在受信环境中针对停止写入、已在 Alembic head 且无 active reservation/live Worker generation 的源库和空目标执行；在打开目标前还会从全部 ledger 重算 scope/minute 计数，任何高/低漂移或缺 bucket 都拒绝导入。源库、目标库、对账输出与中间备份必须按最高敏感数据等级保护。工具输出只包含每表行数、主键集 SHA-256 digest 和 canonical row SHA-256 digest；摘要仍可能用于关联同一快照，不等于加密或访问控制。
 
 - 含凭据的目标 DSN 必须通过 `--target-env ENV_VAR`（默认 `LLMBENCHLAB_DATABASE_URL`）读取；`--target` 只接受无密码 URL。仍需防止环境、进程转储和 CI 配置泄露 DSN。
 - 退出码 `0` 表示提交后对账成功；退出码 `2` 表示提交前失败并回滚目标事务。
-- 退出码 `4` 表示 PostgreSQL 未确认 `COMMIT` 结果：原子事务保证目标应为“空”或“完整”，但客户端不知道是哪一种。**禁止盲目重试**，必须先检查目标 12 表、Alembic head 和已有对账证据。
+- 退出码 `4` 表示 PostgreSQL 未确认 `COMMIT` 结果：原子事务保证目标应为“空”或“完整”，但客户端不知道是哪一种。**禁止盲目重试**，必须先检查目标 13 表、Alembic head 和已有对账证据。
 - 退出码 `3` 表示 `COMMIT` 已确认、但提交后验证或报告失败；导入已经提交。**禁止盲目重试或把它描述为回滚**，应先只读核验目标，必要时从已验证备份执行人工恢复。
 - 工具是单向导入，不提供 PostgreSQL→SQLite 自动回迁。schema downgrade 也不等于数据平台回滚。
 
-`20260827_0004 → 0003` 会移除治理/ledger/audit/Provider metadata，guard 因而在第一条 DDL 前拒绝任何相关表行或新 Run/Response 事实。正常 bootstrap/运行后的数据库不可原地 downgrade；应优先向前修复，或恢复经核验的 pre-0004 备份并保留 post-0004 只读 ledger/audit 归档。只有隔离空数据库才用于 `0004 → 0003 → 0004` 往返验证；详见 [OPERATIONS.md](OPERATIONS.md)。
+`20260828_0005 → 0004` 会移除 Worker progress，guard 在第一条 DDL 前拒绝任何 generation 行；`20260827_0004 → 0003` 会移除治理/ledger/audit/Provider metadata并拒绝任何相关事实。正常运行后的数据库不可原地 downgrade；应优先向前修复，或恢复经核验的旧备份并保留只读证据。只有隔离空数据库用于双方向往返验证；详见 [OPERATIONS.md](OPERATIONS.md)。
 
 ## 10. 依赖与构建供应链
 
@@ -332,7 +333,7 @@ Mock CI 不需要任何 Provider Key，也禁止配置真实模型凭据。标�
 - 身份认证、对象级授权、管理员权限、安全会话/API Token，以及把现有 typed audit 送入受控归档/WORM 或等价独立安全日志。
 - SSRF 应用层校验与网络层出站 allowlist。
 - 将现有共享 DB governance 扩展为认证主体/租户 policy、Provider 熔断和生产级 Worker 隔离；在目标硬件与精确提交重跑真实工作负载容量/HA 验证，不能把当前 Mock dirty-worktree 基线当 SLA。
-- 将现有 typed counters/p50/p95/p99 接入 exporter、监控面板和告警，补 Worker 主循环 liveness、不可抵赖审计选项与经过演练的多主机恢复；当前 Runbook/Mock 故障演练不等于生产 HA。
+- 将现有 exporter/固定告警接入受控 Prometheus/Alertmanager、认证 Dashboard 与组织值班流程，并另行设计密码学签名/WORM 或等价不可抵赖审计；当前 DB-time Worker progress、普通文件 archive 和 Mock 故障演练不等于生产 HA、不可篡改存储或多主机恢复。
 - TLS、反向代理请求体限制、安全响应头、CSP、Host/代理信任配置。
 - 私有题目、参考答案、raw response 的访问控制、静态加密、保留与删除策略。
 - 集中 secrets manager、Key 轮换、备份加密与恢复演练。

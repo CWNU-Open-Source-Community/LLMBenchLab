@@ -13,6 +13,7 @@ import pytest
 from app.db.base import Base
 from app.db.prepare_migrations import (
     CREDENTIAL_REVISION,
+    GOVERNANCE_REVISION,
     LEGACY_REVISION,
     PHASE_1_REVISION,
     SchemaPreparationError,
@@ -24,7 +25,7 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260827_0004"
+HEAD_REVISION = "20260828_0005"
 WEB_CREDENTIAL_REVISION = CREDENTIAL_REVISION
 RELIABILITY_REVISION = "20260825_0002"
 
@@ -386,6 +387,40 @@ def test_prepare_backs_up_and_adopts_web_credential_schema(
     _run_alembic(database_path, "check")
 
 
+@pytest.mark.parametrize("versioned", [False, True])
+def test_prepare_backs_up_and_adopts_governance_schema(
+    tmp_path: Path,
+    versioned: bool,
+) -> None:
+    database_path = tmp_path / f"governance-{'versioned' if versioned else 'unversioned'}.db"
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    if not versioned:
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("DELETE FROM alembic_version")
+
+    result = prepare_database(_database_url(database_path))
+
+    assert result.action == ("versioned_governance" if versioned else "stamped_governance")
+    assert result.stamped_revision == GOVERNANCE_REVISION
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    with sqlite3.connect(result.backup_path) as backup:
+        tables = {
+            row[0] for row in backup.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        indexes = {
+            row[0] for row in backup.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert "audit_events" in tables
+        assert "worker_processes" not in tables
+        assert "ix_audit_events_expires_id" not in indexes
+        assert "ix_audit_events_occurred_id" not in indexes
+
+    _run_alembic(database_path, "upgrade", "head")
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    _run_alembic(database_path, "check")
+
+
 @pytest.mark.parametrize(
     ("cancellation_requested", "expected_status", "expected_last_error"),
     [
@@ -550,6 +585,7 @@ def test_governance_schema_matches_orm_and_does_not_seed_policy(tmp_path: Path) 
         "question_executions",
         "provider_call_reservations",
         "audit_events",
+        "worker_processes",
     }
     with sqlite3.connect(database_path) as connection:
         tables = {
@@ -557,6 +593,52 @@ def test_governance_schema_matches_orm_and_does_not_seed_policy(tmp_path: Path) 
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert expected_tables <= tables
+        worker_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(worker_processes)")
+        }
+        assert worker_columns == {
+            "generation_id",
+            "worker_id",
+            "started_at",
+            "last_seen_at",
+            "last_scan_at",
+            "last_claim_at",
+            "last_progress_at",
+            "last_lease_heartbeat_at",
+            "stopped_at",
+        }
+        worker_indexes = {
+            row[1]: row for row in connection.execute("PRAGMA index_list(worker_processes)")
+        }
+        assert worker_indexes["ix_worker_processes_stopped_seen_generation"][2] == 0
+        assert [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info(ix_worker_processes_stopped_seen_generation)"
+            )
+        ] == ["stopped_at", "last_seen_at", "generation_id"]
+        audit_indexes = {
+            row[1]: row for row in connection.execute("PRAGMA index_list(audit_events)")
+        }
+        for index_name, expected_columns in (
+            ("ix_audit_events_expires_id", ["expires_at", "id"]),
+            ("ix_audit_events_occurred_id", ["occurred_at", "id"]),
+        ):
+            assert audit_indexes[index_name][2] == 0
+            assert [
+                row[2] for row in connection.execute(f'PRAGMA index_info("{index_name}")')
+            ] == expected_columns
+        audit_window_plan = [
+            row[3]
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM audit_events "
+                "WHERE occurred_at >= ? AND occurred_at < ? "
+                "ORDER BY occurred_at, id LIMIT 50001",
+                ("2026-08-28 00:00:00", "2026-08-28 00:15:00"),
+            )
+        ]
+        assert any("ix_audit_events_occurred_id" in detail for detail in audit_window_plan)
+        assert all("TEMP B-TREE" not in detail for detail in audit_window_plan)
         assert connection.execute("SELECT COUNT(*) FROM governance_policies").fetchone()[0] == 0
         policy_indexes = {
             row[1]: row for row in connection.execute("PRAGMA index_list(governance_policies)")
@@ -705,6 +787,28 @@ def test_governance_upgrade_backfills_failed_attempts_by_run_state(
             )
 
 
+def test_worker_progress_downgrade_rejects_process_facts_before_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "worker-progress-downgrade.db"
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO worker_processes (generation_id, worker_id, started_at, last_seen_at) "
+            "VALUES ('00000000-0000-0000-0000-000000000001', 'worker-test', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+
+    failed = _invoke_alembic(database_path, "downgrade", GOVERNANCE_REVISION)
+
+    assert failed.returncode != 0
+    assert "process facts exist" in failed.stderr
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM worker_processes").fetchone()[0] == 1
+        audit_indexes = {row[1] for row in connection.execute("PRAGMA index_list(audit_events)")}
+        assert "ix_audit_events_expires_id" in audit_indexes
+        assert "ix_audit_events_occurred_id" in audit_indexes
+
+
 def test_governance_downgrade_rejects_response_metadata_before_ddl(tmp_path: Path) -> None:
     database_path = tmp_path / "governance-metadata-downgrade.db"
     _run_alembic(database_path, "upgrade", LEGACY_REVISION)
@@ -720,7 +824,7 @@ def test_governance_downgrade_rejects_response_metadata_before_ddl(tmp_path: Pat
 
     assert failed.returncode != 0
     assert "Response Provider metadata exists" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
     with sqlite3.connect(database_path) as connection:
         tables = {
             row[0]
@@ -753,7 +857,7 @@ def test_governance_downgrade_rejects_failure_and_fairness_evidence_before_ddl(
 
     assert failed.returncode != 0
     assert "Run governance/failure evidence" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT failed_attempt_count, dispatch_count FROM evaluation_runs WHERE id = 'run-1'"
@@ -781,7 +885,7 @@ def test_governance_downgrade_rejects_question_execution_before_ddl(tmp_path: Pa
 
     assert failed.returncode != 0
     assert "question-execution evidence exists" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT run_id, question_id FROM question_executions WHERE id = 'execution-1'"
@@ -870,7 +974,7 @@ def test_governance_ledger_foreign_keys_are_never_delete_restrict(tmp_path: Path
 
     assert failed.returncode != 0
     assert "ledger, audit, policy, scope" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
 
 
 def test_reliability_downgrade_rejects_active_runs_before_ddl(tmp_path: Path) -> None:

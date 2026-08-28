@@ -10,6 +10,12 @@ from typing import Any
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, ResponseError
 
+from app.core.logging import (
+    normalize_correlation_id,
+    normalize_redis_stream_id,
+    normalize_uuid_identifier,
+)
+
 TASK_MESSAGE_VERSION = "llmbenchlab-run-task-v1"
 
 
@@ -105,23 +111,28 @@ class RedisRunQueue:
             raise QueueUnavailable("queue_consumer_group_unavailable") from exc
 
     async def publish(self, run_id: str, *, correlation_id: str) -> str:
-        if not 1 <= len(run_id) <= 128 or not 1 <= len(correlation_id) <= 128:
-            raise ValueError("run_id and correlation_id must contain 1 to 128 characters")
+        normalized_run_id = normalize_uuid_identifier(run_id)
+        normalized_correlation_id = normalize_correlation_id(correlation_id)
+        if normalized_run_id is None or normalized_correlation_id is None:
+            raise ValueError("run_id and correlation_id must be canonical UUIDs")
         try:
             async with asyncio.timeout(self._publish_timeout_seconds):
-                message_id = await self._client.xadd(
+                raw_message_id = await self._client.xadd(
                     self.stream,
                     {
                         "version": TASK_MESSAGE_VERSION,
-                        "run_id": run_id,
-                        "correlation_id": correlation_id,
+                        "run_id": normalized_run_id,
+                        "correlation_id": normalized_correlation_id,
                     },
                     maxlen=self._max_length,
                     approximate=True,
                 )
         except (RedisError, OSError, TimeoutError) as exc:
             raise QueueUnavailable("queue_publish_unavailable") from exc
-        return _text(message_id)
+        message_id = normalize_redis_stream_id(_text(raw_message_id))
+        if message_id is None:
+            raise QueueUnavailable("queue_publish_unavailable")
+        return message_id
 
     async def read_new(
         self,
@@ -207,14 +218,12 @@ class RedisRunQueue:
     @staticmethod
     def _delivery(message_id: Any, fields: Mapping[Any, Any]) -> RunTaskDelivery:
         normalized = {_text(key): _text(value) for key, value in fields.items()}
-        run_id = normalized.get("run_id")
-        correlation_id = normalized.get("correlation_id")
+        run_id = normalize_uuid_identifier(normalized.get("run_id"))
+        correlation_id = normalize_correlation_id(normalized.get("correlation_id"))
         if (
             normalized.get("version") != TASK_MESSAGE_VERSION
             or run_id is None
-            or not 1 <= len(run_id) <= 128
             or correlation_id is None
-            or not 1 <= len(correlation_id) <= 128
         ):
             run_id = None
             correlation_id = None

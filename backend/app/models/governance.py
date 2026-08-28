@@ -394,9 +394,11 @@ class AuditEvent(Base):
         CheckConstraint("lease_token IS NULL OR lease_token >= 0", name="lease_token_nonnegative"),
         CheckConstraint("duration_ms IS NULL OR duration_ms >= 0", name="duration_nonnegative"),
         CheckConstraint("expires_at > occurred_at", name="expiry_after_occurrence"),
+        Index("ix_audit_events_occurred_id", "occurred_at", "id"),
         Index("ix_audit_events_run_occurred", "run_id", "occurred_at", "id"),
         Index("ix_audit_events_type_occurred", "event_type", "occurred_at"),
         Index("ix_audit_events_expiry", "expires_at", "retention_class"),
+        Index("ix_audit_events_expires_id", "expires_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)

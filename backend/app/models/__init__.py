@@ -25,6 +25,7 @@ from app.models.governance import (
 from app.models.model import Model
 from app.models.model_credential import ModelCredential
 from app.models.question import Question
+from app.models.worker_process import WorkerProcess
 
 __all__ = [
     "TERMINAL_RUN_STATUSES",
@@ -48,4 +49,5 @@ __all__ = [
     "QuestionExecution",
     "QuestionType",
     "RunStatus",
+    "WorkerProcess",
 ]

@@ -9,6 +9,11 @@ from redis.exceptions import ResponseError
 
 from app.task_queue import TASK_MESSAGE_VERSION, QueueUnavailable, RedisRunQueue
 
+RUN_ID = "00000000-0000-4000-8000-000000000001"
+CORRELATION_ID = "00000000-0000-4000-8000-000000000002"
+OTHER_RUN_ID = "00000000-0000-4000-8000-000000000003"
+OTHER_CORRELATION_ID = "00000000-0000-4000-8000-000000000004"
+
 
 class _FakeRedis:
     def __init__(self) -> None:
@@ -72,7 +77,7 @@ async def test_publish_uses_versioned_bounded_stream_message() -> None:
     client = _FakeRedis()
     queue = _queue(client)
 
-    message_id = await queue.publish("run-1", correlation_id="correlation-1")
+    message_id = await queue.publish(RUN_ID, correlation_id=CORRELATION_ID)
 
     assert message_id == "1-0"
     assert client.added == [
@@ -81,8 +86,8 @@ async def test_publish_uses_versioned_bounded_stream_message() -> None:
                 "runs",
                 {
                     "version": TASK_MESSAGE_VERSION,
-                    "run_id": "run-1",
-                    "correlation_id": "correlation-1",
+                    "run_id": RUN_ID,
+                    "correlation_id": CORRELATION_ID,
                 },
             ),
             {"maxlen": 100, "approximate": True},
@@ -97,7 +102,42 @@ async def test_publish_timeout_is_sanitized_and_bounded() -> None:
     queue = _queue(client, publish_timeout=0.01)
 
     with pytest.raises(QueueUnavailable, match="queue_publish_unavailable"):
-        await queue.publish("run-1", correlation_id="correlation-1")
+        await queue.publish(RUN_ID, correlation_id=CORRELATION_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["run_id", "correlation_id"])
+async def test_redis_delivery_rejects_secret_canary_identifiers(field: str) -> None:
+    client = _FakeRedis()
+    queue = _queue(client)
+    secret = "sk-redis-queue-canary-must-not-reach-worker-logs"
+    fields = {
+        "version": TASK_MESSAGE_VERSION,
+        "run_id": RUN_ID,
+        "correlation_id": CORRELATION_ID,
+    }
+    fields[field] = secret
+    client.read_response = [("runs", [("2-0", fields)])]
+
+    delivery = await queue.read_new(consumer="worker-1", block_milliseconds=0)
+
+    assert delivery is not None and not delivery.is_valid
+    assert delivery.run_id is None
+    assert delivery.correlation_id is None
+    assert secret not in repr(delivery)
+
+
+@pytest.mark.asyncio
+async def test_publish_rejects_non_uuid_identifiers_before_redis_call() -> None:
+    client = _FakeRedis()
+    queue = _queue(client)
+
+    with pytest.raises(ValueError, match="canonical UUIDs"):
+        await queue.publish("sk-invalid-run", correlation_id=CORRELATION_ID)
+    with pytest.raises(ValueError, match="canonical UUIDs"):
+        await queue.publish(RUN_ID, correlation_id="sk-invalid-correlation")
+
+    assert client.added == []
 
 
 @pytest.mark.asyncio
@@ -133,8 +173,8 @@ async def test_read_claim_cursor_validation_ack_and_close() -> None:
                     "2-0",
                     {
                         "version": TASK_MESSAGE_VERSION,
-                        "run_id": "run-2",
-                        "correlation_id": "correlation-2",
+                        "run_id": RUN_ID,
+                        "correlation_id": CORRELATION_ID,
                     },
                 )
             ],
@@ -143,7 +183,7 @@ async def test_read_claim_cursor_validation_ack_and_close() -> None:
     delivery = await queue.read_new(consumer="worker-1", block_milliseconds=0)
     assert delivery is not None and delivery.is_valid
     assert delivery.message_id == "2-0"
-    assert delivery.run_id == "run-2"
+    assert delivery.run_id == RUN_ID
 
     client.claim_response = [
         "7-0",
@@ -152,8 +192,8 @@ async def test_read_claim_cursor_validation_ack_and_close() -> None:
                 "3-0",
                 {
                     "version": "unknown-version",
-                    "run_id": "run-3",
-                    "correlation_id": "correlation-3",
+                    "run_id": OTHER_RUN_ID,
+                    "correlation_id": OTHER_CORRELATION_ID,
                 },
             )
         ],

@@ -28,6 +28,181 @@ def _load_script() -> ModuleType:
 script = _load_script()
 
 
+def test_migration_acceptance_retains_both_populated_guards_and_empty_round_trips() -> None:
+    source = _ACCEPTANCE_SCRIPT.read_text(encoding="utf-8")
+
+    assert script.PRE_GOVERNANCE_REVISION == "20260827_0003"
+    assert script.GOVERNANCE_REVISION == "20260827_0004"
+    assert script.WORKER_PROGRESS_REVISION == "20260828_0005"
+    assert "postgres_populated_0005_and_0004_downgrade_guards_with_empty_round_trips" in source
+    assert "Cannot downgrade Worker progress schema" in source
+    assert "Cannot downgrade governance schema" in source
+    assert "application_worker_progress_0005_to_0004_guard" in source
+    assert "isolated_governance_0004_to_0003_guard" in source
+    assert "worker_facts_cleared_in_clone_only" in source
+    assert 'TEMPLATE "llmbenchlab"' in source
+    assert "worker_progress_0005_to_0004_round_trip" in source
+    assert "governance_0004_to_0003_round_trip" in source
+    assert "pre_worker_progress_revision" in source
+    assert "pre_governance_revision" in source
+
+
+def test_acceptance_declares_the_two_worker_expected_minimum() -> None:
+    source = _ACCEPTANCE_SCRIPT.read_text(encoding="utf-8")
+
+    assert '"LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES": "2"' in source
+
+
+def test_worker_progress_health_requires_both_main_loops() -> None:
+    harness = _bare_harness()
+    responses = [
+        {
+            "status_code": 200,
+            "payload": {
+                "worker_expected_processes": 2,
+                "worker_registered_processes": 2,
+                "worker_live_processes": 1,
+                "worker_stalled_processes": 1,
+                "worker_shortfall_processes": 1,
+            },
+        },
+        {
+            "status_code": 200,
+            "payload": {
+                "worker_expected_processes": 2,
+                "worker_registered_processes": 2,
+                "worker_live_processes": 2,
+                "worker_stalled_processes": 0,
+                "worker_shortfall_processes": 0,
+            },
+        },
+    ]
+    requests: list[tuple[object, ...]] = []
+
+    def fake_http_json(*args: object, **kwargs: object) -> dict[str, object]:
+        requests.append((*args, kwargs))
+        return responses.pop(0)
+
+    def fake_wait_for(
+        description: str,
+        probe: object,
+        predicate: object,
+        *,
+        timeout: float,
+        interval: float,
+    ) -> dict[str, object]:
+        assert (
+            description == "two registered and live Worker main loops without stalls or shortfall"
+        )
+        assert timeout == 12
+        assert interval == 0.25
+        assert callable(probe)
+        assert callable(predicate)
+        degraded = probe()
+        assert predicate(degraded) is False
+        healthy = probe()
+        assert predicate(healthy) is True
+        return healthy
+
+    harness.http_json = fake_http_json
+    harness.wait_for = fake_wait_for
+
+    result = harness.wait_worker_progress_healthy(timeout=12)
+
+    assert result == {
+        "worker_expected_processes": 2,
+        "worker_registered_processes": 2,
+        "worker_live_processes": 2,
+        "worker_stalled_processes": 0,
+        "worker_shortfall_processes": 0,
+    }
+    assert requests == [
+        ("GET", "/tasks/metrics", {"accepted": {200}, "timeout": 4}),
+        ("GET", "/tasks/metrics", {"accepted": {200}, "timeout": 4}),
+    ]
+
+
+def test_topology_records_database_derived_worker_progress() -> None:
+    source = _ACCEPTANCE_SCRIPT.read_text(encoding="utf-8")
+
+    assert "worker_progress = self.wait_worker_progress_healthy()" in source
+    assert '"worker_progress": worker_progress' in source
+
+
+def test_template_clone_blocks_new_source_connections_and_restores_access() -> None:
+    harness = _bare_harness()
+    calls: list[tuple[str, str, bool]] = []
+
+    def fake_psql_database(
+        sql: str,
+        *,
+        database: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((sql, database, check))
+        stdout = '{"attempted":2,"all_terminated":true}\n' if "json_build_object" in sql else ""
+        return subprocess.CompletedProcess(["psql"], 0, stdout=stdout, stderr="")
+
+    harness.psql_database = fake_psql_database
+
+    result = harness.clone_application_database("p2governance_safe")
+
+    assert result == {
+        "source_connections_disabled": True,
+        "terminated_connection_count": 2,
+        "source_connections_restored": True,
+        "create_returncode": 0,
+    }
+    assert calls[0] == (
+        'ALTER DATABASE "llmbenchlab" WITH ALLOW_CONNECTIONS false;',
+        "postgres",
+        True,
+    )
+    assert "pg_terminate_backend(pid)" in calls[1][0]
+    assert "datname = 'llmbenchlab'" in calls[1][0]
+    assert calls[2] == (
+        'CREATE DATABASE "p2governance_safe" TEMPLATE "llmbenchlab";',
+        "postgres",
+        True,
+    )
+    assert calls[3] == (
+        'ALTER DATABASE "llmbenchlab" WITH ALLOW_CONNECTIONS true;',
+        "postgres",
+        False,
+    )
+
+
+def test_template_clone_restores_source_access_when_create_fails() -> None:
+    harness = _bare_harness()
+    calls: list[str] = []
+
+    def fake_psql_database(
+        sql: str,
+        *,
+        database: str,
+        check: bool = True,
+    ) -> subprocess.CompletedProcess[str]:
+        assert database == "postgres"
+        calls.append(sql)
+        if "json_build_object" in sql:
+            return subprocess.CompletedProcess(
+                ["psql"],
+                0,
+                stdout='{"attempted":0,"all_terminated":true}\n',
+                stderr="",
+            )
+        if sql.startswith("CREATE DATABASE"):
+            raise script.AcceptanceFailure("simulated clone failure")
+        return subprocess.CompletedProcess(["psql"], 0, stdout="", stderr="")
+
+    harness.psql_database = fake_psql_database
+
+    with pytest.raises(script.AcceptanceFailure, match="simulated clone failure"):
+        harness.clone_application_database("p2governance_safe")
+
+    assert calls[-1] == 'ALTER DATABASE "llmbenchlab" WITH ALLOW_CONNECTIONS true;'
+
+
 def _bare_harness() -> object:
     harness = object.__new__(script.Phase2Acceptance)
     harness.require = script.Phase2Acceptance.require.__get__(harness)

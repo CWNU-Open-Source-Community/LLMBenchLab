@@ -7,15 +7,17 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, TextIO
 
 import sqlalchemy as sa
@@ -25,7 +27,9 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import Table
 
 from app import models as _models  # noqa: F401 -- registers all mapped tables
+from app.core.config import get_settings
 from app.db.base import Base
+from app.db.clock import as_utc
 from app.db.prepare_migrations import (
     SchemaPreparationError,
     database_heads,
@@ -33,6 +37,13 @@ from app.db.prepare_migrations import (
     validate_sqlite_schema_fingerprint,
 )
 from app.db.session import create_database_engine
+from app.governance.audit import AuditIntegrityError, validate_audit_event_values_for_read
+from app.governance.repository import (
+    GovernanceIntegrityError,
+    _policy_snapshot,
+    _run_override_snapshot,
+    _validate_policy_integrity,
+)
 
 CORE_TABLE_NAMES = (
     "governance_policies",
@@ -47,6 +58,7 @@ CORE_TABLE_NAMES = (
     "question_executions",
     "provider_call_reservations",
     "audit_events",
+    "worker_processes",
 )
 DEFAULT_TARGET_ENV = "LLMBENCHLAB_DATABASE_URL"
 
@@ -146,6 +158,7 @@ _SCOPE_REFERENCE_TYPES = (
     ("model_scope_id", "model"),
     ("run_scope_id", "run"),
 )
+_OPAQUE_GOVERNANCE_DIGEST = re.compile(r"[a-f0-9]{64}")
 
 
 def _canonical_value(value: Any) -> Any:
@@ -460,7 +473,106 @@ def _validate_governance_materializations(connection: Connection) -> None:
             )
 
 
-def preflight_sqlite_source(connection: Connection) -> None:
+def _validate_governance_snapshots(connection: Connection) -> None:
+    """Reject policy hashes and managed Run snapshots that cannot be executed safely."""
+
+    policies = Base.metadata.tables["governance_policies"]
+    runs = Base.metadata.tables["evaluation_runs"]
+    try:
+        policy_rows = tuple(
+            dict(row)
+            for row in connection.execute(sa.select(policies).order_by(policies.c.id)).mappings()
+        )
+        policies_by_id: dict[str, SimpleNamespace] = {}
+        for row in policy_rows:
+            policy = SimpleNamespace(**row)
+            _validate_policy_integrity(policy)
+            policies_by_id[str(row["id"])] = policy
+
+        for raw_run in connection.execute(sa.select(runs).order_by(runs.c.id)).mappings():
+            run = dict(raw_run)
+            if _enum_text(run["governance_status"]) == "legacy_unmanaged":
+                continue
+            policy_id = run["governance_policy_id"]
+            policy = policies_by_id.get(str(policy_id)) if policy_id is not None else None
+            snapshot = run["model_parameters_snapshot"]
+            governance = snapshot.get("governance") if isinstance(snapshot, Mapping) else None
+            if policy is None or not isinstance(governance, Mapping):
+                raise GovernanceIntegrityError("governance_run_snapshot_mismatch")
+
+            expected_policy = _policy_snapshot(policy)
+            expected_keys = set(expected_policy) | {
+                "provider_scope_key",
+                "local_admission_only",
+                "run_overrides",
+            }
+            provider_scope = governance.get("provider_scope_key")
+            run_record = SimpleNamespace(**run)
+            if (
+                set(governance) != expected_keys
+                or any(governance.get(name) != value for name, value in expected_policy.items())
+                or not isinstance(provider_scope, str)
+                or _OPAQUE_GOVERNANCE_DIGEST.fullmatch(provider_scope) is None
+                or governance.get("local_admission_only") is not True
+                or governance.get("run_overrides") != _run_override_snapshot(run_record)
+            ):
+                raise GovernanceIntegrityError("governance_run_snapshot_mismatch")
+    except GovernanceIntegrityError:
+        raise SQLiteImportError(
+            "Source SQLite governance policy or managed Run snapshot failed integrity "
+            "validation; restore the original immutable policy and Run snapshot facts "
+            "before importing"
+        ) from None
+    except Exception:
+        raise SQLiteImportError(
+            "Source SQLite governance policy or managed Run snapshot could not be validated"
+        ) from None
+
+
+def _validate_retained_audit_events(connection: Connection) -> None:
+    """Apply the live retained-row contract before copying any audit evidence."""
+
+    audit_events = Base.metadata.tables["audit_events"]
+    try:
+        for event in connection.execute(
+            sa.select(audit_events).order_by(audit_events.c.occurred_at, audit_events.c.id)
+        ).mappings():
+            validate_audit_event_values_for_read(
+                id=event["id"],
+                event_key=event["event_key"],
+                event_type=event["event_type"],
+                payload_hash=event["payload_hash"],
+                payload=event["payload"],
+                retention_class=event["retention_class"],
+                occurred_at=event["occurred_at"],
+                expires_at=event["expires_at"],
+                correlation_id=event["correlation_id"],
+                run_id=event["run_id"],
+                model_id=event["model_id"],
+                question_id=event["question_id"],
+                worker_id=event["worker_id"],
+                reservation_id=event["reservation_id"],
+                attempt=event["attempt"],
+                provider_attempt=event["provider_attempt"],
+                lease_token=event["lease_token"],
+                duration_ms=event["duration_ms"],
+            )
+    except (AuditIntegrityError, LookupError):
+        raise SQLiteImportError(
+            "Source SQLite retained audit event failed integrity validation; restore the "
+            "original typed audit facts before importing"
+        ) from None
+    except Exception:
+        raise SQLiteImportError(
+            "Source SQLite retained audit events could not be validated"
+        ) from None
+
+
+def preflight_sqlite_source(
+    connection: Connection,
+    *,
+    worker_stale_seconds: float | None = None,
+) -> None:
     """Validate a read-only, stopped SQLite source before reading application data."""
 
     if connection.dialect.name != "sqlite":
@@ -527,7 +639,35 @@ def preflight_sqlite_source(connection: Connection) -> None:
             "reserved or send_started ledger row before importing"
         )
 
+    stale_seconds = (
+        get_settings().worker_progress_stale_seconds
+        if worker_stale_seconds is None
+        else worker_stale_seconds
+    )
+    if stale_seconds <= 0:
+        raise SQLiteImportError("Worker stale threshold must be positive")
+    source_now_value = connection.scalar(sa.select(sa.func.current_timestamp()))
+    if not isinstance(source_now_value, datetime):
+        raise SQLiteImportError("Source SQLite database clock is unavailable")
+    source_now = as_utc(source_now_value)
+    live_worker_processes = connection.scalar(
+        sa.select(sa.func.count())
+        .select_from(Base.metadata.tables["worker_processes"])
+        .where(
+            Base.metadata.tables["worker_processes"].c.stopped_at.is_(None),
+            Base.metadata.tables["worker_processes"].c.last_seen_at
+            >= source_now - timedelta(seconds=stale_seconds),
+        )
+    )
+    if live_worker_processes:
+        raise SQLiteImportError(
+            "Source SQLite contains a live Worker generation; stop every Worker and wait "
+            "for graceful stop or the configured stale threshold before importing"
+        )
+
+    _validate_governance_snapshots(connection)
     _validate_governance_materializations(connection)
+    _validate_retained_audit_events(connection)
 
 
 def _require_empty_target(connection: Connection) -> None:

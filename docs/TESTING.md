@@ -13,12 +13,13 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 | 后端单元测试 | Evaluator、Adapter、Loader/Hash、固定标准数据转换的边界语义 | `backend/tests/test_evaluators.py`、`test_adapters.py`、`test_dataset_loader.py`、`test_standard_datasets.py` | 禁止；Provider 用 MockTransport，下载用注入 fixture fetcher |
 | 正式流程组件测试 | CLI 秘密/确认/编排、模型发现/canary、完整报告和大题集有界 task | `test_evaluation_cli.py`、`test_provider_preflight.py`、`test_run_report.py`、`test_evaluation_runner_reliability.py` | 禁止；只用 fixture、MockTransport、Mock Adapter、临时数据库 |
 | API 与进程边界测试 | FastAPI Schema、状态码、秘密安全、Run 提交与 API/Worker 分离 | `backend/tests/test_api.py`、`test_run_dispatch.py`、`test_process_boundaries.py` | 禁止 |
-| Governance / audit 测试 | full-document policy/hash/Run overrides、四层 admission/ledger 派生物完整性、fail-closed Token/cost、pre-send generation、公平 slice、typed history/audit、Provider metadata 与 credential audit | `test_governance.py`、`test_governance_api.py`、`test_audit_api.py`、`test_task_history_api.py`、`test_response_metadata_api.py`、`test_credential_audit.py` | 禁止；SQLite/Mock/MockTransport |
-| 租约与 Worker 测试 | 条件领取、fencing、心跳、取消、幂等 Response、重试/恢复、队列 ACK | `test_run_leases.py`、`test_evaluation_runner_reliability.py`、`test_worker.py`、`test_task_queue.py` | 禁止；SQLite/假队列 |
-| 迁移与导入回归 | SQLite/真实 PostgreSQL migration、0004 populated downgrade refusal/空库往返，以及 12 表 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
+| Governance / audit 测试 | policy/ledger 完整性、typed history/audit、Provider/credential evidence，以及 canonical archive/离线 verify/精确 reconcile/restore/delete | `test_governance.py`、`test_audit_api.py`、`test_audit_archive.py`、`test_audit_retention.py`、`test_audit_retention_cli.py` | 禁止；SQLite/Mock/fixture；真实 PG retention 只连测试库 |
+| 租约与 Worker 测试 | 条件领取、fencing、心跳、取消、幂等 Response、重试/恢复、队列 ACK，以及 generation 级 DB-time scan/claim/lease-heartbeat/progress/stale | `test_run_leases.py`、`test_evaluation_runner_reliability.py`、`test_worker.py`、`test_worker_progress.py`、`test_worker_probe.py` | 禁止；SQLite/假队列 |
+| Metrics / alert / logging 测试 | 固定 Prometheus exposition、snapshot/hard cap/single-flight/取消竞态、精确八规则/Runbook，以及全部生产 logger source/第三方 handler 治理 | `test_prometheus_exporter.py`、`test_prometheus_alert_rules.py`、`test_logging.py`、`test_logging_sources.py` | 禁止；SQLite/假队列/标准库 JSON |
+| 迁移与导入回归 | SQLite/真实 PostgreSQL migration、`0005` populated downgrade refusal/空库往返，以及 13 表 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
 | 真实基础设施集成 | PostgreSQL 并发领取/取消竞态、Redis Streams PEL/ACK/重复投递 | `backend/tests/integration/` 与 importer 的 `integration` 用例 | 只连接显式测试 PostgreSQL/Redis；禁止 Provider |
 | Mock 端到端 Smoke | API 提交 pending Run → 独立 WorkerService → Responses → Leaderboard/Metrics | `backend/tests/test_smoke.py`，marker 为 `smoke` | 禁止 |
-| Compose 故障验收 | 六服务拓扑、双 Worker、进程/Redis/lease 故障、治理/ledger、取消、重复消息与 0004 安全回滚 | `scripts/phase2_acceptance.py` / `make phase2-acceptance` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
+| Compose 故障验收 | 六服务拓扑、双 Worker、进程/Redis/lease 故障、治理/ledger、取消、重复消息、Worker expected count 与 `0005` 安全回滚 | `scripts/phase2_acceptance.py` / `make phase2-acceptance` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | Mock 容量基线 | 真实 PostgreSQL 16/Redis 7、全有限 policy、1/2 Worker、精确 `202/429` backlog、cooperative quantum、跨 Model 公平性、lease/Redis/重复通知故障及 DB/queue/ledger/audit 对账 | `scripts/phase2_capacity.py` / `make phase2-capacity` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | 固定单机资格 | clean SHA 上的 v2 四-cell、1 warm-up + 5 measured、统计/恢复/公平/ledger/cleanup 硬门禁 | `scripts/phase2_slo.py` / `make phase2-slo` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | 前端单元/组件测试 | 格式化、状态/指标、错误/空态、主要页面交互 | `frontend/src/**/*.test.ts(x)`、`frontend/tests/` | API 必须 stub/mock |
@@ -26,7 +27,7 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 | 构建检查 | 确认生产前端可编译打包 | `npm run build` | 安装完成后不需要 |
 | 配置检查 | 校验 Compose 插值和服务定义 | `docker compose config` | 不启动 Provider |
 
-单元测试定位纯逻辑错误；真实 PostgreSQL/Redis 集成测试验证方言和队列语义；Smoke 证明最小离线链路；Compose 验收覆盖真实独立进程故障；capacity harness 记录单轮基线；SLO wrapper 在固定 clean SHA 上完成多轮资格。这些层级不能互相替代。四层治理、逐 attempt ledger、背压/公平调度、typed audit/history 和 Provider metadata 已有自动化覆盖；增强 capacity、9/9 acceptance 已通过，`P2-local-control-plane-v2` 也已在 clean SHA `b6a35fe…` 完成 1+5、23/23 和远程 4/4 门禁。Phase 2 仍为 `in_progress`，因为这项 Mock-only 单机资格不能替代 Worker progress/liveness、告警/归档、backup/restore、剩余恢复矩阵、生产 SLA 或 HA 证明。
+单元测试定位纯逻辑错误；真实 PostgreSQL/Redis 集成测试验证方言和队列语义；Smoke 证明最小离线链路；Compose 验收覆盖真实独立进程故障；capacity harness 记录单轮基线；SLO wrapper 在固定 clean SHA 上完成多轮资格。这些层级不能互相替代。四层治理、逐 attempt ledger、背压/公平调度、typed audit/history 和 Provider metadata 已有已交付自动化；P2-06 当前又加入 Worker progress、exporter/规则、retention 与全日志源回归。合并定向、lint、全量 test、smoke、真实 integration、隔离 migration、build、Compose config、Prometheus 规则解析、dirty 工作树 capacity 与 9/9 acceptance 已全绿；structured-extra High 与 Worker `__main__` logger Medium 修复后，最新 76-file staged 技术/安全终审为 0 Blocker/High/Medium。当前仍待 clean-SHA Compose 证据与精确 SHA CI，不能把已通过的本地层级写成 P2-06 仓库级收尾。Phase 2 还缺 P2-07 backup/restore、剩余恢复矩阵、生产 SLA/HA 证明，因此继续 `in_progress`。
 
 ## 3. 环境准备
 
@@ -222,6 +223,7 @@ OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把
 - backlog 满稳定 429；rate/concurrency defer 不生成 0 分 Response；每个 lease 只新增 frozen question quantum，cooperative yield 不增加 `failed_attempt_count`，最久未获服务 Run 优先再调度。
 - typed audit 的唯一 event key/payload hash、90/365-day retention、稳定 Run audit 分页，以及 history window/p50/p95/p99 截断语义；history 必须在单一一致性快照中校验窗口内每个 event 的 contract、payload hash、identity、retention 和数值边界，任一损坏使整个响应以 `audit_event_integrity_error` fail closed，不能返回局部统计或反射损坏 payload。credential change/reject/decrypt failure 不含 Key/origin/envelope，Provider metadata 经过安全归一化进入 Response/API/report。
 - Worker 每次只执行一个 Run，按配置心跳；优雅停止在 grace 内等待，超时后由租约过期恢复，而不是伪造成功 ACK。
+- 长运行 Worker 在执行前注册唯一 process generation；真实 scan/claim/lease-heartbeat/progress 只设置固定 bit，并由单 in-flight recorder 以同一个 DB timestamp 节流写入。无 event 时零写入、flush 失败保留 bit、graceful stop 原子保存 pending/stop，stopped generation 的迟到 flush 不能复活；`last_seen_at == cutoff` 明确为 live。
 - Runner 对大题集只创建至多 `concurrency` 个消费者 task；当前可靠性用例以 2,000 题验证并发 4 的固定 task 集，并验证取消/失租停止后续取题和 Adapter 只关闭一次。另有阻塞快照物化用例验证同步加载被移出事件循环，租约心跳可在加载期间继续运行。
 - API 进程不持有 Runner/task manager；只启动 API 时 Run 保持 `pending`，启动独立 Worker 后才执行。
 
@@ -239,6 +241,8 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - Redis 不可用时 `/ready` 返回脱敏的 `503 degraded`，但数据库正常时 `accepting_runs=true`、database reconciliation 可用；数据库或 schema 不可用时返回 `not_ready` 并停止接受新 Run。
 - 服务端生成并回传 UUID `X-Request-ID`，忽略客户端同名值，防止调用方把 write-only Key 复制到 header 后迫使日志/响应反射；未知路径只记录 `<unmatched>`，不把用户路径或请求正文写入应用日志。
 - `/tasks/metrics` 从数据库派生任务、governance backlog/delay/exhaustion、active Provider attempt、overdrawn scope 与 attempt/failure/dispatch gauges；`/tasks/history?window_hours=1..2160` 从 retained typed audit/Run 时间聚合 counters 与 queue/execution/end-to-end p50/p95/p99，并验证 10,000 样本上限/`truncated`。history 的 DB 时钟、窗口、事件和三组 latency 查询必须共享同一事务快照（PostgreSQL `REPEATABLE READ READ ONLY`；SQLite 显式 `BEGIN`）；任一 event contract/hash/identity/retention/数值损坏都使整个响应以 500 `audit_event_integrity_error` fail closed。pending/running cancel 都贡献 `run_cancel_requested`，dead-letter 使用专用 `run_dead_lettered`，不会与一般 terminal counter 混淆。
+- `/tasks/metrics` 另验证 expected/registered/live/stalled/shortfall、inclusive stale cutoff 与最近五类 Worker activity 时间不泄露 process ID；`/metrics/prometheus` 固定 content type、LF/final newline、HELP/TYPE/sample 顺序、全部 gauge/enum label、无动态查询参数和 `Cache-Control: no-store`。
+- exporter 回归验证单 DB-time snapshot、audit `50,001` hard fail、每类 latency `10,001` truncated、数据库/audit/renderer 整次 fail closed、Redis 非权威降级、进程内 single-flight，以及重复 request cancellation 时 DB thread 完成前 gate 不提前释放；任何响应都不得反射损坏 payload、异常文本、对象 ID 或秘密 marker。
 - governance policy GET 在初始化前无副作用返回 `404 governance_policy_not_initialized`，PUT 必须提交全部 20 个字段；相同内容幂等、历史内容重激活原 ID/version。整数限制覆盖各字段准确边界；所有 USD 限制公开上限均为 `10000000.00000000`，请求接受 Decimal-compatible JSON number 或 decimal string，响应固定为 JSON string。SQLite 回归验证该上限内 binary64 spacing 小于半个 `0.00000001` 量子，八位小数可按相同 Decimal round-trip；PostgreSQL 仍以 `NUMERIC(20,8)` 为并发生产门禁。Run audit 端点按 `(occurred_at,id)` 稳定分页并对 retained event identity/payload/retention 做读取期完整性检查。
 - Model CRUD、分页、Provider 必需字段、远端 HTTP 拒绝/loopback 例外和名称冲突。
 - Model POST/PATCH 接受 8–8192-byte visible-ASCII write-only `api_key`，并拒绝 7-byte、空白、非 ASCII 与过长输入；GET/list 的凭据相关字段只返回非秘密状态，不返回 Key、密文、nonce 或 key id。marker 测试覆盖 201、422、409、503、500、Host 与 request-ID 反射路径。
@@ -258,7 +262,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 
 `backend/tests/test_migrations.py` 使用独立临时 SQLite 和 Alembic 子进程验证：
 
-- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260827_0004` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata 字段、约束和索引。
+- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260828_0005` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束，以及两个 bounded audit scan indexes。
 - 有模型、Benchmark、题目、Run 与 Response 的 legacy schema 被一致性备份、严格识别并无损升级；题目按原插入顺序回填 0-based `position`。
 - 与当前 metadata 一致但没有版本标记的库可安全收养，已有 head 重复 preflight 不生成多余备份。
 - 部分表、server default/CHECK 内容或重名、PK/UNIQUE/FK/index/partial index、trigger、SQLite conflict policy/generated column、`STRICT`/`WITHOUT ROWID` 等未知 drift 在创建版本标记和备份前被拒绝；已在 head 的库同样验证。
@@ -266,6 +270,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - `0001 -> 0002` 会按冻结的 Phase 1 语义收敛旧 `running` Run；存在 active Run 时可靠性 downgrade 被拒绝，不能静默删除租约元数据。
 - `0002 -> 0003` 会把旧 OpenAI-compatible Model 回填为 `environment`、Mock 回填为 `none`；只要凭据表有任意行，credential downgrade 在 DDL 前拒绝并保留二进制内容。
 - `0003 -> 0004` 把既有 Run 标为 `legacy_unmanaged` 并保留 protocol-v1 证据；任意 policy/scope/bucket/question execution/attempt ledger/audit、新 Run fairness/governance 字段或 Response Provider metadata 存在时，`0004 -> 0003` 必须在第一条 DDL 前拒绝。只有隔离空库用于 `0004 -> 0003 -> 0004` roundtrip。
+- `0004 -> 0005` 不回填虚构 Worker generation；任意 `worker_processes` 行都使 `0005 -> 0004` 在第一条 DDL 前拒绝。只有显式清空 process facts 或隔离空库才能往返，进入 `0004` 后原 governance/audit downgrade guard 继续生效。
 - 应用启动 revision 门禁拒绝未迁移库；测试夹具中的 `create_all` 仅用于隔离临时库，并显式 stamp 到与 metadata 对应的 head，不是运行时建表路径。
 
 目标化运行：
@@ -275,13 +280,13 @@ cd backend
 uv run pytest tests/test_migrations.py
 ```
 
-真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline 后停止 API/Worker，尝试 `0004 -> 0003` 并断言 guard 在任何 DDL 前拒绝，revision 和 core protocol hash 不变；另建隔离空 PostgreSQL 验证 `0004 -> 0003 -> 0004`。schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
+真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline 并停止 API/Worker 后，先断言 populated `0005 -> 0004` 在任何 DDL 前拒绝且 head 不变；另建隔离空 PostgreSQL 完成 `0005 -> 0004 -> 0005`/check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
 
 ### 6.3 SQLite→PostgreSQL 导入
 
-`backend/tests/test_sqlite_postgres_import.py` 的离线路径验证 canonical hash、只读 SQLite、head/integrity/FK/active-Run/active-reservation 拒绝、固定 12 表复制及提交前回滚；源 preflight 在打开目标前从完整 reservation ledger 重算每个 scope 和 minute bucket，拒绝高报、低报、缺 bucket 或其他派生漂移。fixture 含真实 AES-GCM nonce/ciphertext/key-id、governance/ledger/audit/Provider metadata 行并断言明文不在 SQLite。标记为 `integration` 的真实 PostgreSQL 用例还验证：
+`backend/tests/test_sqlite_postgres_import.py` 的离线路径验证 canonical hash、只读 SQLite、head/integrity/FK/active-Run/active-reservation/live-Worker 拒绝、固定 13 表复制及提交前回滚；源 preflight 在打开目标前从完整 reservation ledger 重算每个 scope 和 minute bucket，拒绝高报、低报、缺 bucket 或其他派生漂移。fixture 含真实 AES-GCM nonce/ciphertext/key-id、governance/ledger/audit/Provider metadata 与 stopped/stale Worker rows，并断言明文不在 SQLite。标记为 `integration` 的真实 PostgreSQL 用例还验证：
 
-- 随机专用空库成功导入后，12 表行数、主键集合和 canonical row hash 与源一致，JSON、Decimal、UTC、协议快照、逐题证据、governance ledger/audit 及 credential 二进制保持；stdout/stderr 不打印 Key、key id、nonce 或 ciphertext。
+- 随机专用空库成功导入后，13 表行数、主键集合和 canonical row hash 与源一致，JSON、Decimal、UTC、协议快照、逐题证据、governance ledger/audit、Worker progress 及 credential 二进制保持；stdout/stderr 不打印 Key、key id、nonce 或 ciphertext。
 - 中途复制失败整体回滚；两个不同源并发导入时恰好一个成功，另一个在目标非空检查处拒绝。
 - `COMMIT` 确认丢失使用专用 `commit_outcome_unknown` 语义；已确认提交后的 snapshot 或输出失败使用 `committed_but_verification_failed`，两者都禁止盲目重试。
 - 源 SQLite 主文件 hash 不变；输出只有阶段、表名、行数与 SHA-256 摘要，不打印题目、回答或连接 URL。
@@ -292,9 +297,11 @@ uv run pytest tests/test_migrations.py
 ### 6.4 健康、日志和指标的测试边界
 
 - `/ready` 把同步数据库/head 检查放入 `asyncio.to_thread` 并设置异步等待上限，Redis ping 也有独立 timeout；测试证明半开依赖不会阻塞 `/live`。取消 `to_thread` 的等待不会终止底层数据库驱动调用，因此最终上界仍依赖 driver、连接池和 `connect_timeout`，不能把 asyncio timeout 当作强制中止。
-- Worker `app.worker_probe` 是依赖能力探针：数据库/head 失败 exit 1；Redis 不可用但数据库 reconciliation 可用时输出 `degraded` 且 exit 0；配置错误 exit 1。它不观察 Worker 主事件循环或当前 heartbeat，不能证明进程没有卡死。
-- LLMBenchLab 应用 logger 输出脱敏 JSON、request/correlation ID 与 allowlist 字段；异常只记录类型。Uvicorn 自身及 access logger 仍使用其原生 handler，不在“全部日志统一 JSON”的保证内。
-- `/tasks/metrics` 是当下数据库 gauges；`/tasks/history` 和 `/runs/{id}/audit` 已提供 retained typed counters、有限样本延迟与稳定分页事件，包括 pending cancel 的 `run_cancel_requested` 和专用 `run_dead_lettered`。它们仍不是 Prometheus exporter、trace、自动告警、WORM/不可抵赖审计或 Worker 主循环 liveness；这些生产观测能力仍需后续工作。
+- Worker `app.worker_probe` 是依赖能力探针：数据库/head 失败 exit 1；Redis 不可用但数据库 reconciliation 可用时输出 `degraded` 且 exit 0；配置错误 exit 1。它固定声明 `probe_scope=dependencies_only`、`main_loop_progress=not_checked`；主循环进展由独立 DB-time generation facts 聚合，probe 不能读取 peer aggregate 后冒充当前进程健康。
+- 全部生产 logger source 必须使用无格式参数字面量消息；LLMBenchLab JSON formatter 只输出 allowlist extra、把非有限值变为 `null`、异常只保留类型。外部 logger 的动态 message/identity 被固定分类替代，raw Uvicorn access handler 关闭；AST/source 测试阻止新增绕过。
+- `/tasks/metrics`、`/tasks/history`、`/runs/{id}/audit` 与固定 `/metrics/prometheus` 已实现；八条规则由标准库 strict JSON 测试精确校验，并已用临时 `prom/prometheus:v3.5.0` 容器内 `promtool check rules` 验证八条规则全部成功。仓库仍没有 trace、Alertmanager/sender、WORM/不可抵赖审计或自动请求链路删除。
+
+Audit retention 目标回归另要求：canonical bytes/hash/rollup/冻结 fixture、128 MiB/64 KiB/10,000 限制、在逐行 decode 前执行全局行数上限、duplicate keys/non-finite/乱序/冲突、owner/`0600`/symlink/parent 权限、FIFO/非普通文件拒绝与 no-replace atomic output；fresh process `verify` 在无效 DSN 下仍成功且不创建 engine/数据库目录；SQLite 和真实 PostgreSQL 完成 archive→verify→delete→reconcile→restore，PostgreSQL mutation 保持 advisory/row lock，零行 no-op 也必须 post-verify，commit unknown/post-commit verification 用独立 exit `4`/`3`，且所有错误不反射 archive path、argv marker、DSN 或行内容。
 
 ## 7. 完全离线 Smoke Test
 
@@ -345,7 +352,7 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 
 真实模型验收应在隔离的本地数据库上先运行 `--limit`，人工核对模型发现、付费 canary、请求上界、逐题错误、Provider 账单和报告三文件，再决定是否 `--full`。这项手工操作不得写入自动化测试结果或 CI 通过数；如果本次没有真实 API URL/Key，就应明确记录“未运行”，不能用 MockTransport 结果替代“真实 Provider 已验证”。
 
-当前自动化已验证 typed lifecycle/credential audit、history counters/latency、逐题 Provider request ID/returned model/system fingerprint/finish reason/HTTP attempt count 的持久化/API/报告路径，以及非法值归一化。已知观测缺口是 `resume` canary 尚未追加独立 audit event，另无 exporter/告警/WORM；不能把这些剩余边界写成 Provider exactly-once 或生产可观测性完成。
+当前自动化已验证 typed lifecycle/credential audit、history counters/latency、逐题 Provider metadata、Worker progress、固定 exporter/八规则和 canonical audit retention；合并定向套件、最新 dirty capacity 与 9/9 acceptance 全绿，真实 PostgreSQL/Redis integration 为 `33 passed, 0 skipped`。clean-SHA Compose 和精确 SHA CI 仍待，已知观测缺口还包括 `resume` canary 未追加独立 audit event、仓库不部署 sender/trace/WORM；不能把这些边界写成 Provider exactly-once、生产监控平台或 Phase 2 完成。
 
 ## 9. 前端测试要求
 
@@ -374,11 +381,31 @@ GitHub Actions 对 `main` push 和 Pull Request 触发四类 job：
 | Job | 必需检查 | 隔离与失败规则 |
 | --- | --- | --- |
 | `backend` | Ruff lint/format；临时 SQLite `upgrade -> 0001 -> head`/check；`pytest -m "not integration"` | 临时 SQLite；不启动 PostgreSQL/Redis；离线 Mock/MockTransport |
-| `backend-integration` | 真实 PostgreSQL migration 往返；PostgreSQL/Redis/importer 的 29 个 `integration` 用例 | Actions service 容器；JUnit 必须收集非零用例且零 skip，否则 job 失败 |
+| `backend-integration` | 真实 PostgreSQL migration 往返；PostgreSQL/Redis/importer/audit-retention 的 31 个 `integration` 用例 | Actions service 容器；JUnit 必须收集非零用例且零 skip，否则 job 失败 |
 | `full-stack-reliability` | `python3 scripts/phase2_acceptance.py` 的隔离 Compose 九场景 | 唯一项目/卷、随机 loopback 端口、Mock-only；总是上传已脱敏 evidence，脚本总是精确清理 |
 | `frontend` | ESLint、Vitest 组件测试、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
 
 CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。`P2-local-control-plane-v2` 的 validator、统计、四-cell 编排失败路径、ledger projection 和 exact-project cleanup 合同可以进入普通自动化，但 GitHub-hosted runner 不运行 `make phase2-slo` 的绝对吞吐/延迟门禁：共享 runner 的 CPU、内存和 Docker 调度不是稳定性能实验室。正式实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功；它是同一 SHA 的正确性门禁，不替代本机 1+5。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
+
+P2-06 当前工作树的阶段性证据如下；尚未完成项必须保持 pending，不能沿用任何历史 SHA 的绿色结果：
+
+| 验证 | 当前实际结果 |
+| --- | --- |
+| 合并定向套件 | Worker progress/API/runner/migration/importer、exporter/rules、audit archive/retention/CLI 与 logging 回归全绿；包含 importer committed-target integrity、retention no-op postverify、外部 logger extra、FIFO/line-cap 和 PostgreSQL advisory/row-lock 终审回归 |
+| 真实 PostgreSQL/Redis integration | 临时 PostgreSQL 16/Redis 7 migration/check 后 `33 passed, 0 skipped`；包含新增 PostgreSQL audit retention round-trip、advisory/row-lock 门禁与既有 lease/governance/importer 路径。首次 cleanup 命令被本地安全策略拒绝，容器尚未启动；改用明确目标后完整流程通过 |
+| `make lint` | 全绿：Ruff 检查 152 files、Ruff format check、ESLint 与 TypeScript typecheck 通过 |
+| `make test` | 后端 `916 passed, 33 skipped`；前端 `38 passed`；模型路径只使用 Mock/MockTransport/stub |
+| `make smoke` | `1 passed, 7 deselected`；完全离线 Mock |
+| Frontend production build | 从根目录误运行 `npm run build` 因无 `package.json` 失败；改为 `cd frontend && npm run build` 后成功（2192 modules），保留 662.39 kB 主 chunk 非阻断 warning |
+| Migration | 默认用户 SQLite 尚未在 head，直接 `alembic check` 失败且未擅自迁移；临时 SQLite head→`0001`→head/check 与隔离真实 PostgreSQL 往返/check 全绿；当前 head `20260828_0005` |
+| Compose config | `docker compose config --quiet` exit 0 |
+| Prometheus rules | 临时 `prom/prometheus:v3.5.0` 中 `promtool check rules` 成功，八条规则全部通过 |
+| Ruff scripts 补充检查 | 对 `scripts/` 的过宽默认 Ruff 命令报告 93 条既有 modernization 告警；按本任务合同使用 `--select E,F,I` 后通过，未把既有告警冒充本次失败 |
+| Dirty Compose acceptance | 9/9；evidence `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-11554c25ec2d/evidence.json`，SHA-256 `d5f058457dbc29875cbac4bc38345b810b5ed556ea538862d309116ceb629fde`，`dirty=true`；Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0`，application `0005` populated refusal、isolated populated `0004` refusal、两层空库往返和容器/卷/网络空清理均通过 |
+| Dirty Compose capacity | 最新脚本通过；evidence `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-c6de062ab77e/evidence.json`，SHA-256 `4aeb8271dd81e8671fc287942839f8d06862140ea9a6bf1d7ee5660265aa8453`，`dirty=true`；1W/2W/burst wall `8.257520/4.640051/7.161722s`、`7.266104/12.930892/8.377873 q/s`，最终 18 Runs/270 Responses/270 question executions/271 reservations（270 actual + 1 conservative）/1229 audit，0 error/drift/duplicate/PEL/lag，expected Worker=2，cleanup C/V/N/image 全零且 image `1/1/0/0`；offline Mock、非 SLO |
+| Staged 技术/安全终审 | structured-extra High 与 Worker `__main__` logger Medium 已修复；最新 76-file index 为 0 Blocker/High/Medium；hydration/import integrity 修复目标集 `67 passed` |
+| 仍待门禁 | implementation commit、clean-SHA Compose、push 与精确 SHA CI 尚待完成 |
+| Clean-SHA Compose / remote | 尚无 P2-06 独立 commit、clean-SHA capacity/acceptance、push、精确 SHA 或 Actions URL；P2-06 仓库级收尾保持 `in_progress` |
 
 下表是 2026-08-25 Phase 2 可靠性切片的历史基线，不是本次标准数据/真实评测 CLI 提交的通过声明。本次实际数量必须在当前工作日志和精确 commit 的 CI 中重新记录，不能沿用这些数字：
 
@@ -543,7 +570,7 @@ make phase2-acceptance
 6. Redis 完全 stop/start；`live`/`health` 保持可用、`ready` 降级，API 仍以 `202` 提交数据库事实，Worker 仅靠 DB reconciliation 完成；Redis 恢复后新消息正常 ACK。
 7. Worker 停止时取消 pending Run；Worker 恢复消费旧通知后终态和 0 Response 不漂移。
 8. 运行中取消并再次 XADD 同一 Run；Response 数在取消后冻结，重复投递被 ACK 且 canonical snapshot 不变。
-9. 停止 API/Worker 后在 populated PostgreSQL 上尝试 `20260827_0004 -> 0003`：policy/ledger/audit 等数据存在时必须在第一条 DDL 前拒绝，application revision、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0004 -> 0003 -> 0004` 和 check，随后重启 API/Worker。schema downgrade 不是数据平台回迁。
+9. 停止 API/Worker 后在 populated PostgreSQL 上尝试 `20260828_0005 -> 0004`：Worker progress rows 存在时必须在第一条 DDL 前拒绝，application revision、13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005` 和 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
 
 任何一个场景失败、未运行、使用真实 Provider、最终 PEL/lag 非零或清理不完整，都不能把可靠执行基础写成通过。`--self-check-only` 只验证 Docker/Compose、隔离和清理 guard，不执行九场景，不能替代正式命令。精确 SHA `665244e…` 的最终本地运行已 9/9 通过；artifact 与 hash 见第 10.1 节。
 

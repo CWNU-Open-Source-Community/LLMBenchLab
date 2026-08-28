@@ -46,7 +46,12 @@ async def test_worker_probe_sanitizes_database_startup_failure(
     assert await probe_module._probe() == 1
 
     output = capsys.readouterr().out
-    assert json.loads(output) == {"status": "not_ready", "database": "unavailable"}
+    assert json.loads(output) == {
+        "status": "not_ready",
+        "database": "unavailable",
+        "probe_scope": "dependencies_only",
+        "main_loop_progress": "not_checked",
+    }
     assert secret not in output
     assert engine.disposed is True
 
@@ -71,6 +76,8 @@ async def test_worker_probe_reports_queue_degradation_but_keeps_reconciliation_r
         "schema": "ok",
         "queue": "unavailable",
         "database_reconciliation": "available",
+        "probe_scope": "dependencies_only",
+        "main_loop_progress": "not_checked",
     }
     assert queue.closed is True
     assert engine.disposed is True
@@ -99,6 +106,8 @@ async def test_worker_probe_sanitizes_invalid_queue_configuration(
         "database": "ok",
         "schema": "ok",
         "queue": "configuration_error",
+        "probe_scope": "dependencies_only",
+        "main_loop_progress": "not_checked",
     }
     assert secret not in output
     assert engine.disposed is True

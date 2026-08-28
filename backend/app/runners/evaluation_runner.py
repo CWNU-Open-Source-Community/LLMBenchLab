@@ -56,6 +56,11 @@ from app.security import (
     normalize_provider_metadata,
 )
 from app.services.credential_audit import audit_credential_decrypt_failed
+from app.worker_progress import (
+    NULL_WORKER_PROGRESS_OBSERVER,
+    WorkerProgressEvent,
+    WorkerProgressObserver,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +123,7 @@ class EvaluationRunner:
         worker_id: str | None = None,
         lease_repository: RunLeaseRepository | None = None,
         governance_repository: GovernanceRepository | None = None,
+        progress_observer: WorkerProgressObserver | None = None,
     ) -> None:
         settings = get_settings()
         self._settings = settings
@@ -132,6 +138,7 @@ class EvaluationRunner:
         self._governance_repository = governance_repository or GovernanceRepository(session_factory)
         self._heartbeat_seconds = settings.worker_heartbeat_seconds
         self._mock_generation_delay_seconds = settings.mock_generation_delay_seconds
+        self._progress_observer = progress_observer or NULL_WORKER_PROGRESS_OBSERVER
 
     async def execute(
         self,
@@ -166,6 +173,7 @@ class EvaluationRunner:
                 "result": "claimed",
             },
         )
+        self._note_progress(WorkerProgressEvent.CLAIM)
         heartbeat_stop = asyncio.Event()
         lease_lost = asyncio.Event()
         heartbeat_task = asyncio.create_task(
@@ -234,6 +242,7 @@ class EvaluationRunner:
                 )
                 if response_disposition == ResponseDisposition.INSERTED:
                     responses_added += 1
+                    self._note_progress(WorkerProgressEvent.PROGRESS)
                 return True
 
             governance_signal = await self._run_questions(
@@ -290,6 +299,7 @@ class EvaluationRunner:
                 )
                 if disposition == AttemptDisposition.FENCE_LOST:
                     raise _LeaseUnavailable("governance_transition_fence_lost")
+                self._note_progress(WorkerProgressEvent.PROGRESS)
                 return True
             if not cancellation_requested and model.governance is not None and questions_remain:
                 disposition = await asyncio.to_thread(
@@ -310,9 +320,12 @@ class EvaluationRunner:
                 )
                 if disposition == AttemptDisposition.FENCE_LOST:
                     raise _LeaseUnavailable("cooperative_yield_fence_lost")
+                self._note_progress(WorkerProgressEvent.PROGRESS)
                 return True
             final_status = RunStatus.CANCELLED if cancellation_requested else RunStatus.COMPLETED
             finished_status = await asyncio.to_thread(self._finish, lease, final_status)
+            if finished_status is not None:
+                self._note_progress(WorkerProgressEvent.PROGRESS)
             logger.info(
                 "Evaluation run finish transition resolved",
                 extra={
@@ -353,6 +366,7 @@ class EvaluationRunner:
             return False
         except _LeaseUnavailable:
             if await asyncio.to_thread(self._lease_repository.finish_cancelled, lease):
+                self._note_progress(WorkerProgressEvent.PROGRESS)
                 logger.info(
                     "Evaluation run stopped after cancellation",
                     extra={
@@ -395,6 +409,8 @@ class EvaluationRunner:
                 lease,
                 error_code=f"runner_error:{type(exc).__name__}",
             )
+            if disposition != AttemptDisposition.FENCE_LOST:
+                self._note_progress(WorkerProgressEvent.PROGRESS)
             logger.warning(
                 "Evaluation run failure transition resolved",
                 extra={
@@ -433,6 +449,22 @@ class EvaluationRunner:
 
     def _claim(self, run_id: str) -> RunLease | None:
         return self._lease_repository.claim(run_id, owner=self._worker_id)
+
+    def _note_progress(self, event: WorkerProgressEvent) -> None:
+        """Keep optional observability from changing the execution state machine."""
+
+        try:
+            observer = getattr(self, "_progress_observer", NULL_WORKER_PROGRESS_OBSERVER)
+            observer.note(event)
+        except Exception as exc:
+            logger.warning(
+                "Worker progress observer rejected an execution fact",
+                extra={
+                    "event": "worker_progress_observer_failed",
+                    "error_code": f"worker_progress_error:{type(exc).__name__}",
+                    "result": "ignored",
+                },
+            )
 
     async def _heartbeat(
         self,
@@ -485,6 +517,7 @@ class EvaluationRunner:
                         "result": "renewed",
                     },
                 )
+                self._note_progress(WorkerProgressEvent.LEASE_HEARTBEAT)
 
     @staticmethod
     async def _run_questions(

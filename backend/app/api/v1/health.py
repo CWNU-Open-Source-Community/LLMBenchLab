@@ -2,16 +2,14 @@
 
 import asyncio
 import logging
-import math
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import case, func, select, text
+from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
 
 from app.api.deps import SessionDep, SettingsDep
 from app.core.config import get_settings
@@ -19,20 +17,14 @@ from app.core.constants import PROTOCOL_VERSION
 from app.core.time import utc_now
 from app.db.prepare_migrations import database_heads, expected_database_heads
 from app.db.session import SessionLocal
-from app.governance import (
-    AuditIntegrityError,
-    validate_audit_identity_for_read,
-    validate_audit_payload_for_read,
-)
-from app.models import (
-    AuditEvent,
-    AuditRetentionClass,
-    EvaluationRun,
-    GovernanceRunStatus,
-    GovernanceScope,
-    ProviderCallReservation,
-    ProviderCallReservationState,
-    RunStatus,
+from app.governance import AuditIntegrityError
+from app.observability import (
+    METRICS_LATENCY_SAMPLE_LIMIT,
+    collect_task_current,
+    collect_task_history,
+    configure_read_snapshot,
+    database_clock,
+    latency_summary,
 )
 from app.schemas.system import (
     HealthResponse,
@@ -50,180 +42,20 @@ router = APIRouter(tags=["system"])
 logger = logging.getLogger(__name__)
 
 _HISTORY_MAX_WINDOW_HOURS = 90 * 24
-_HISTORY_LATENCY_SAMPLE_LIMIT = 10_000
-_TASK_EVENT_TYPES = (
-    "governance_policy_bootstrapped",
-    "governance_policy_applied",
-    "run_admitted",
-    "run_claimed",
-    "run_cancel_requested",
-    "run_deferred",
-    "run_yielded",
-    "run_terminal",
-    "run_retry_scheduled",
-    "run_dead_lettered",
-    "run_lease_reconciled",
-    "provider_attempt_reserved",
-    "provider_attempt_send_started",
-    "provider_attempt_settled",
-    "question_evidence_persisted",
-    "queue_notification",
-    "governance_integrity_error",
-)
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)
-
-
-def _database_clock(session: Session) -> datetime:
-    value = session.scalar(select(func.current_timestamp()))
-    if not isinstance(value, datetime):
-        raise RuntimeError("Database did not return a timestamp for task metrics")
-    return _as_utc(value)
-
-
-def _percentile(values: Sequence[float], percentage: float) -> float:
-    ordered = sorted(float(value) for value in values)
-    if not ordered:
-        raise ValueError("percentile requires at least one sample")
-    if len(ordered) == 1:
-        return ordered[0]
-    position = (len(ordered) - 1) * percentage / 100
-    lower = int(position)
-    upper = min(lower + 1, len(ordered) - 1)
-    fraction = position - lower
-    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+_HISTORY_LATENCY_SAMPLE_LIMIT = METRICS_LATENCY_SAMPLE_LIMIT
 
 
 def _latency_summary(values: Sequence[float]) -> TaskLatencyPercentiles:
-    truncated = len(values) > _HISTORY_LATENCY_SAMPLE_LIMIT
-    selected = list(values[:_HISTORY_LATENCY_SAMPLE_LIMIT])
-    if not selected:
-        return TaskLatencyPercentiles(
-            sample_count=0,
-            truncated=False,
-            p50_ms=None,
-            p95_ms=None,
-            p99_ms=None,
-        )
+    """Compatibility wrapper for the public history response schema."""
+
+    snapshot = latency_summary(values, sample_limit=_HISTORY_LATENCY_SAMPLE_LIMIT)
     return TaskLatencyPercentiles(
-        sample_count=len(selected),
-        truncated=truncated,
-        p50_ms=round(_percentile(selected, 50), 6),
-        p95_ms=round(_percentile(selected, 95), 6),
-        p99_ms=round(_percentile(selected, 99), 6),
+        sample_count=snapshot.sample_count,
+        truncated=snapshot.truncated,
+        p50_ms=snapshot.p50_ms,
+        p95_ms=snapshot.p95_ms,
+        p99_ms=snapshot.p99_ms,
     )
-
-
-def _run_latency_summary(
-    session: Session,
-    *,
-    observed_at: Any,
-    started_at: Any,
-    ended_at: Any,
-    window_start: datetime,
-    window_end: datetime,
-) -> TaskLatencyPercentiles:
-    rows = session.execute(
-        select(started_at, ended_at)
-        .where(
-            observed_at >= window_start,
-            observed_at < window_end,
-            started_at.is_not(None),
-            ended_at.is_not(None),
-            ended_at >= started_at,
-        )
-        .order_by(observed_at, EvaluationRun.id)
-        .limit(_HISTORY_LATENCY_SAMPLE_LIMIT + 1)
-    ).all()
-    values = [
-        (_as_utc(end_value) - _as_utc(start_value)).total_seconds() * 1000
-        for start_value, end_value in rows
-    ]
-    return _latency_summary(values)
-
-
-def _configure_task_history_snapshot(session: Session) -> None:
-    """Start the strongest portable read snapshot before any history query."""
-
-    dialect = session.get_bind().dialect.name
-    connection = session.connection()
-    if dialect == "sqlite":
-        # SQLite's legacy driver mode does not begin a transaction for SELECT.
-        connection.exec_driver_sql("BEGIN")
-    elif dialect == "postgresql":
-        connection.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-
-
-def _validate_task_history_event(event: AuditEvent) -> str:
-    """Validate every retained fact before it contributes to a counter."""
-
-    try:
-        event_type = event.event_type
-        validate_audit_payload_for_read(event_type, event.payload, event.payload_hash)
-        validate_audit_identity_for_read("id", event.id, maximum=36)
-        validate_audit_identity_for_read("event_key", event.event_key, maximum=255)
-        validate_audit_identity_for_read(
-            "correlation_id",
-            event.correlation_id,
-            maximum=128,
-        )
-        validate_audit_identity_for_read("run_id", event.run_id, maximum=36)
-        validate_audit_identity_for_read("model_id", event.model_id, maximum=36)
-        validate_audit_identity_for_read("question_id", event.question_id, maximum=36)
-        validate_audit_identity_for_read("worker_id", event.worker_id, maximum=128)
-        validate_audit_identity_for_read(
-            "reservation_id",
-            event.reservation_id,
-            maximum=36,
-        )
-
-        if not isinstance(event.retention_class, AuditRetentionClass):
-            raise ValueError("invalid audit retention class")
-        if not isinstance(event.occurred_at, datetime) or not isinstance(
-            event.expires_at,
-            datetime,
-        ):
-            raise ValueError("invalid audit retention timestamps")
-        minimum_retention = timedelta(
-            days=365 if event.retention_class == AuditRetentionClass.SECURITY else 90
-        )
-        if _as_utc(event.expires_at) - _as_utc(event.occurred_at) < minimum_retention:
-            raise ValueError("invalid audit retention interval")
-
-        if event.attempt is not None and (
-            isinstance(event.attempt, bool)
-            or not isinstance(event.attempt, int)
-            or not 0 <= event.attempt <= 2**31 - 1
-        ):
-            raise ValueError("invalid audit attempt")
-        if event.provider_attempt is not None and (
-            isinstance(event.provider_attempt, bool)
-            or not isinstance(event.provider_attempt, int)
-            or not 1 <= event.provider_attempt <= 2**31 - 1
-        ):
-            raise ValueError("invalid audit provider attempt")
-        if event.lease_token is not None and (
-            isinstance(event.lease_token, bool)
-            or not isinstance(event.lease_token, int)
-            or not 0 <= event.lease_token <= 2**63 - 1
-        ):
-            raise ValueError("invalid audit lease token")
-        if event.duration_ms is not None and (
-            isinstance(event.duration_ms, bool)
-            or not isinstance(event.duration_ms, (int, float))
-            or not math.isfinite(event.duration_ms)
-            or event.duration_ms < 0
-        ):
-            raise ValueError("invalid audit duration")
-    except AuditIntegrityError:
-        raise
-    except (OverflowError, TypeError, ValueError):
-        raise AuditIntegrityError("retained audit event failed integrity validation") from None
-    return event_type
 
 
 def _database_readiness() -> tuple[str, str, list[str]]:
@@ -347,165 +179,47 @@ async def readiness(
     response_model=TaskMetricsResponse,
     summary="查看数据库派生的任务运维指标",
 )
-def task_metrics(session: SessionDep) -> TaskMetricsResponse:
+def task_metrics(session: SessionDep, settings: SettingsDep) -> TaskMetricsResponse:
     """Expose database-derived gauges; metrics never override task truth."""
 
-    now = _database_clock(session)
-    active_run_statuses = (RunStatus.PENDING, RunStatus.RUNNING)
-    row = session.execute(
-        select(
-            func.coalesce(
-                func.sum(case((EvaluationRun.status == RunStatus.PENDING, 1), else_=0)), 0
-            ).label("pending"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            (EvaluationRun.status == RunStatus.PENDING)
-                            & (
-                                EvaluationRun.next_attempt_at.is_(None)
-                                | (EvaluationRun.next_attempt_at <= now)
-                            )
-                            & (
-                                EvaluationRun.governance_not_before.is_(None)
-                                | (EvaluationRun.governance_not_before <= now)
-                            ),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("due_pending"),
-            func.coalesce(
-                func.sum(case((EvaluationRun.status == RunStatus.RUNNING, 1), else_=0)), 0
-            ).label("running"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            (EvaluationRun.status == RunStatus.RUNNING)
-                            & (EvaluationRun.lease_expires_at <= now),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("expired_running"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            EvaluationRun.cancellation_requested.is_(True)
-                            & EvaluationRun.status.in_((RunStatus.PENDING, RunStatus.RUNNING)),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("active_cancellation_requests"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            (EvaluationRun.status == RunStatus.PENDING)
-                            & EvaluationRun.next_attempt_at.is_not(None),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("retry_scheduled"),
-            func.coalesce(
-                func.sum(case((EvaluationRun.dead_lettered_at.is_not(None), 1), else_=0)), 0
-            ).label("dead_lettered"),
-            func.coalesce(
-                func.sum(
-                    case((EvaluationRun.last_error == "queue_notification_unavailable", 1), else_=0)
-                ),
-                0,
-            ).label("runs_with_queue_notification_error"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            EvaluationRun.status.in_(active_run_statuses)
-                            & (
-                                EvaluationRun.governance_status
-                                != GovernanceRunStatus.LEGACY_UNMANAGED
-                            ),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("managed_backlog"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (EvaluationRun.governance_status == GovernanceRunStatus.DELAYED, 1),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("governance_delayed"),
-            func.coalesce(
-                func.sum(
-                    case(
-                        (EvaluationRun.governance_status == GovernanceRunStatus.EXHAUSTED, 1),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label("governance_exhausted"),
-            func.coalesce(func.sum(EvaluationRun.attempt_count), 0).label("total_attempts"),
-            func.coalesce(func.sum(EvaluationRun.failed_attempt_count), 0).label(
-                "total_failed_attempts"
-            ),
-            func.coalesce(func.sum(EvaluationRun.dispatch_count), 0).label("total_dispatches"),
+    with session.begin():
+        configure_read_snapshot(session)
+        now = database_clock(session)
+        snapshot = collect_task_current(
+            session,
+            now=now,
+            worker_stale_seconds=settings.worker_progress_stale_seconds,
+            worker_expected_processes=settings.worker_expected_processes,
         )
-    ).one()
-    active_provider_attempts = (
-        session.scalar(
-            select(func.count(ProviderCallReservation.id)).where(
-                ProviderCallReservation.state.in_(
-                    (
-                        ProviderCallReservationState.RESERVED,
-                        ProviderCallReservationState.SEND_STARTED,
-                    )
-                )
-            )
-        )
-        or 0
-    )
-    overdrawn_governance_scopes = (
-        session.scalar(
-            select(func.count(GovernanceScope.id)).where(GovernanceScope.overdrawn.is_(True))
-        )
-        or 0
-    )
     return TaskMetricsResponse(
-        pending=int(row.pending),
-        due_pending=int(row.due_pending),
-        running=int(row.running),
-        expired_running=int(row.expired_running),
-        active_cancellation_requests=int(row.active_cancellation_requests),
-        retry_scheduled=int(row.retry_scheduled),
-        dead_lettered=int(row.dead_lettered),
-        runs_with_queue_notification_error=int(row.runs_with_queue_notification_error),
-        managed_backlog=int(row.managed_backlog),
-        governance_delayed=int(row.governance_delayed),
-        governance_exhausted=int(row.governance_exhausted),
-        active_provider_attempts=int(active_provider_attempts),
-        overdrawn_governance_scopes=int(overdrawn_governance_scopes),
-        total_attempts=int(row.total_attempts),
-        total_failed_attempts=int(row.total_failed_attempts),
-        total_dispatches=int(row.total_dispatches),
-        timestamp=now,
+        pending=snapshot.pending,
+        due_pending=snapshot.due_pending,
+        running=snapshot.running,
+        expired_running=snapshot.expired_running,
+        active_cancellation_requests=snapshot.active_cancellation_requests,
+        retry_scheduled=snapshot.retry_scheduled,
+        dead_lettered=snapshot.dead_lettered,
+        runs_with_queue_notification_error=snapshot.runs_with_queue_notification_error,
+        managed_backlog=snapshot.managed_backlog,
+        governance_delayed=snapshot.governance_delayed,
+        governance_exhausted=snapshot.governance_exhausted,
+        active_provider_attempts=snapshot.active_provider_attempts,
+        overdrawn_governance_scopes=snapshot.overdrawn_governance_scopes,
+        total_attempts=snapshot.total_attempts,
+        total_failed_attempts=snapshot.total_failed_attempts,
+        total_dispatches=snapshot.total_dispatches,
+        worker_expected_processes=snapshot.worker.expected,
+        worker_registered_processes=snapshot.worker.registered,
+        worker_live_processes=snapshot.worker.live,
+        worker_stalled_processes=snapshot.worker.stalled,
+        worker_shortfall_processes=snapshot.worker.shortfall,
+        worker_stale_after_seconds=snapshot.worker.stale_seconds,
+        worker_last_seen_at=snapshot.worker.last_seen_at,
+        worker_last_scan_at=snapshot.worker.last_scan_at,
+        worker_last_claim_at=snapshot.worker.last_claim_at,
+        worker_last_progress_at=snapshot.worker.last_progress_at,
+        worker_last_lease_heartbeat_at=snapshot.worker.last_lease_heartbeat_at,
+        timestamp=snapshot.timestamp,
     )
 
 
@@ -525,52 +239,19 @@ def task_history(
 
     try:
         with session.begin():
-            _configure_task_history_snapshot(session)
-            window_end = _database_clock(session)
+            configure_read_snapshot(session)
+            window_end = database_clock(session)
             window_start = window_end - timedelta(hours=window_hours)
-            events = list(
-                session.scalars(
-                    select(AuditEvent)
-                    .where(
-                        AuditEvent.occurred_at >= window_start,
-                        AuditEvent.occurred_at < window_end,
-                    )
-                    .order_by(AuditEvent.occurred_at, AuditEvent.id)
-                )
+            snapshot = collect_task_history(
+                session,
+                window_start=window_start,
+                window_end=window_end,
+                audit_event_limit=None,
+                latency_sample_limit=_HISTORY_LATENCY_SAMPLE_LIMIT,
             )
-            event_values = {event_type: 0 for event_type in _TASK_EVENT_TYPES}
-            for event in events:
-                event_type = _validate_task_history_event(event)
-                if event_type in event_values:
-                    event_values[event_type] += 1
             event_counts = TaskEventCounts(
-                total=sum(event_values.values()),
-                **event_values,
-            )
-
-            queue_latency = _run_latency_summary(
-                session,
-                observed_at=EvaluationRun.started_at,
-                started_at=EvaluationRun.created_at,
-                ended_at=EvaluationRun.started_at,
-                window_start=window_start,
-                window_end=window_end,
-            )
-            execution_latency = _run_latency_summary(
-                session,
-                observed_at=EvaluationRun.finished_at,
-                started_at=EvaluationRun.started_at,
-                ended_at=EvaluationRun.finished_at,
-                window_start=window_start,
-                window_end=window_end,
-            )
-            end_to_end_latency = _run_latency_summary(
-                session,
-                observed_at=EvaluationRun.finished_at,
-                started_at=EvaluationRun.created_at,
-                ended_at=EvaluationRun.finished_at,
-                window_start=window_start,
-                window_end=window_end,
+                total=sum(snapshot.event_counts.values()),
+                **snapshot.event_counts,
             )
     except (AuditIntegrityError, LookupError) as exc:
         logger.error(
@@ -592,9 +273,27 @@ def task_history(
         window_end=window_end,
         window_hours=window_hours,
         event_counts=event_counts,
-        queue_latency=queue_latency,
-        execution_latency=execution_latency,
-        end_to_end_latency=end_to_end_latency,
+        queue_latency=TaskLatencyPercentiles(
+            sample_count=snapshot.queue_latency.sample_count,
+            truncated=snapshot.queue_latency.truncated,
+            p50_ms=snapshot.queue_latency.p50_ms,
+            p95_ms=snapshot.queue_latency.p95_ms,
+            p99_ms=snapshot.queue_latency.p99_ms,
+        ),
+        execution_latency=TaskLatencyPercentiles(
+            sample_count=snapshot.execution_latency.sample_count,
+            truncated=snapshot.execution_latency.truncated,
+            p50_ms=snapshot.execution_latency.p50_ms,
+            p95_ms=snapshot.execution_latency.p95_ms,
+            p99_ms=snapshot.execution_latency.p99_ms,
+        ),
+        end_to_end_latency=TaskLatencyPercentiles(
+            sample_count=snapshot.end_to_end_latency.sample_count,
+            truncated=snapshot.end_to_end_latency.truncated,
+            p50_ms=snapshot.end_to_end_latency.p50_ms,
+            p95_ms=snapshot.end_to_end_latency.p95_ms,
+            p99_ms=snapshot.end_to_end_latency.p99_ms,
+        ),
         latency_sample_limit=_HISTORY_LATENCY_SAMPLE_LIMIT,
         timestamp=window_end,
     )

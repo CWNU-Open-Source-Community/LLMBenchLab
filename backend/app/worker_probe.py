@@ -18,7 +18,16 @@ async def _probe() -> int:
     try:
         initialize_database()
     except Exception:
-        print(json.dumps({"status": "not_ready", "database": "unavailable"}))
+        print(
+            json.dumps(
+                {
+                    "status": "not_ready",
+                    "database": "unavailable",
+                    "probe_scope": "dependencies_only",
+                    "main_loop_progress": "not_checked",
+                }
+            )
+        )
         engine.dispose()
         return 1
 
@@ -33,6 +42,8 @@ async def _probe() -> int:
                         "database": "ok",
                         "schema": "ok",
                         "queue": "configuration_error",
+                        "probe_scope": "dependencies_only",
+                        "main_loop_progress": "not_checked",
                     }
                 )
             )
@@ -54,6 +65,8 @@ async def _probe() -> int:
                     "schema": "ok",
                     "queue": queue_status,
                     "database_reconciliation": "available",
+                    "probe_scope": "dependencies_only",
+                    "main_loop_progress": "not_checked",
                 }
             )
         )

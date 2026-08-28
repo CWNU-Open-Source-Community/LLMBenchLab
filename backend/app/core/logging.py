@@ -7,9 +7,40 @@ import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
+
+from app.core.logging_contract import (
+    OMIT as _OMIT,
+)
+from app.core.logging_contract import (
+    is_application_logger,
+    normalize_application_message,
+    normalize_correlation_id,
+    normalize_log_level,
+    normalize_redis_stream_id,
+    normalize_request_method,
+    normalize_request_path,
+    normalize_structured_field,
+    normalize_timestamp,
+    normalize_uuid_identifier,
+)
+
+__all__ = (
+    "REQUEST_ID_HEADER",
+    "SanitizedJsonFormatter",
+    "configure_logging",
+    "correlation_scope",
+    "get_correlation_id",
+    "get_request_id",
+    "new_correlation_id",
+    "normalize_correlation_id",
+    "normalize_redis_stream_id",
+    "normalize_request_method",
+    "normalize_request_path",
+    "normalize_uuid_identifier",
+    "request_scope",
+)
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _correlation_id: ContextVar[str | None] = ContextVar("correlation_id", default=None)
@@ -30,18 +61,12 @@ _STRUCTURED_FIELDS = (
     "error_code",
     "component",
 )
+_EXTERNAL_LOGGER_NAME = "external"
+_EXTERNAL_MESSAGE = "External component log event"
 
 
 def new_correlation_id() -> str:
     return str(uuid4())
-
-
-def normalize_correlation_id(value: str | None) -> str | None:
-    if value is None or not 1 <= len(value) <= 128:
-        return None
-    if not all(character.isalnum() or character in "-._:" for character in value):
-        return None
-    return value
 
 
 def get_correlation_id() -> str | None:
@@ -70,33 +95,44 @@ def request_scope(value: str) -> Iterator[None]:
         _request_id.reset(token)
 
 
-def _json_value(value: Any) -> str | int | float | bool | None:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    return str(value)
-
-
 class SanitizedJsonFormatter(logging.Formatter):
-    """Emit allowlisted context without exception text, request bodies, or credentials."""
+    """Emit only closed-domain structured context and fixed application messages."""
 
     def format(self, record: logging.LogRecord) -> str:
+        application_record = is_application_logger(record.name)
         payload: dict[str, Any] = {
-            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
-            "level": record.levelname,
-            "logger": record.name,
-            "message": record.getMessage(),
+            "timestamp": normalize_timestamp(record.created),
+            "level": normalize_log_level(record.levelname),
+            "logger": record.name if application_record else _EXTERNAL_LOGGER_NAME,
+            # Registered application sources are statically restricted to this
+            # closed literal-message set. External dynamic identity, messages,
+            # formatting arguments, exception text, and extras are suppressed.
+            "message": (
+                normalize_application_message(record) if application_record else _EXTERNAL_MESSAGE
+            ),
         }
-        request_id = get_request_id() or getattr(record, "request_id", None)
-        if request_id is not None:
-            payload["request_id"] = _json_value(request_id)
-        correlation_id = get_correlation_id() or getattr(record, "correlation_id", None)
-        if correlation_id is not None:
-            payload["correlation_id"] = _json_value(correlation_id)
-        for field in _STRUCTURED_FIELDS:
-            if hasattr(record, field):
-                payload[field] = _json_value(getattr(record, field))
-        if record.exc_info and record.exc_info[0] is not None:
-            payload["exception_type"] = record.exc_info[0].__name__
+        request_id = get_request_id()
+        if request_id is None and application_record:
+            request_id = getattr(record, "request_id", None)
+        normalized_request_id = normalize_uuid_identifier(request_id)
+        if normalized_request_id is not None:
+            payload["request_id"] = normalized_request_id
+
+        correlation_id = get_correlation_id()
+        if correlation_id is None and application_record:
+            correlation_id = getattr(record, "correlation_id", None)
+        normalized_correlation_id = normalize_correlation_id(correlation_id)
+        if normalized_correlation_id is not None:
+            payload["correlation_id"] = normalized_correlation_id
+
+        if application_record:
+            for field in _STRUCTURED_FIELDS:
+                if hasattr(record, field):
+                    normalized = normalize_structured_field(field, getattr(record, field))
+                    if normalized is not _OMIT:
+                        payload[field] = normalized
+        if application_record and isinstance(record.exc_info, tuple) and record.exc_info:
+            payload["exception_type"] = "suppressed"
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -104,3 +140,24 @@ def configure_logging(level: str) -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(SanitizedJsonFormatter())
     logging.basicConfig(level=level, handlers=[handler], force=True)
+    # Uvicorn installs named handlers before importing the application. Its
+    # access message can contain a raw query string, while dependency loggers
+    # may contain URLs or driver errors. Route all of them through the sanitized
+    # root formatter and disable the redundant raw access log; the application
+    # middleware already emits a route-template request completion event.
+    for logger_name in (
+        "httpcore",
+        "httpx",
+        "redis",
+        "sqlalchemy",
+        "sqlalchemy.engine",
+        "uvicorn",
+        "uvicorn.error",
+    ):
+        external_logger = logging.getLogger(logger_name)
+        external_logger.handlers.clear()
+        external_logger.propagate = True
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.handlers.clear()
+    access_logger.propagate = False
+    access_logger.disabled = True

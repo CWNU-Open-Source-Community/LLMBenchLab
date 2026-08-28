@@ -12,6 +12,7 @@ from app.core.config import get_settings
 from app.db.session import SessionLocal
 from app.runners.run_leases import ReapReport
 from app.task_queue import QueueUnavailable, RunTaskDelivery
+from app.worker_progress import WorkerProgressEvent
 from app.workers import WorkerService
 
 
@@ -126,6 +127,23 @@ class _FakeQueue:
         self.closed = True
 
 
+class _FakeProgressRecorder:
+    def __init__(self) -> None:
+        self.events: list[WorkerProgressEvent] = []
+        self.started = False
+        self.stopped = False
+
+    def note(self, event: WorkerProgressEvent) -> None:
+        self.events.append(event)
+
+    async def start(self) -> None:
+        self.started = True
+
+    async def stop(self) -> bool:
+        self.stopped = True
+        return True
+
+
 def _settings(**updates):
     return get_settings().model_copy(
         update={
@@ -136,7 +154,7 @@ def _settings(**updates):
     )
 
 
-def _service(repository, runner, queue) -> WorkerService:
+def _service(repository, runner, queue, *, progress=None) -> WorkerService:
     return WorkerService(
         SessionLocal,
         _settings(),
@@ -144,6 +162,7 @@ def _service(repository, runner, queue) -> WorkerService:
         worker_id="worker-test",
         lease_repository=repository,
         runner=runner,
+        progress_recorder=progress or _FakeProgressRecorder(),
     )
 
 
@@ -167,7 +186,9 @@ async def test_worker_acks_only_after_runner_returns() -> None:
 
 @pytest.mark.asyncio
 async def test_worker_does_not_ack_unhandled_runner_failure(caplog) -> None:
-    queue = _FakeQueue([RunTaskDelivery("2-0", "run-2", "correlation-2")])
+    run_id = "00000000-0000-4000-8000-000000000001"
+    correlation_id = "00000000-0000-4000-8000-000000000002"
+    queue = _FakeQueue([RunTaskDelivery("2-0", run_id, correlation_id)])
     runner = _FakeRunner()
     runner.raise_error = True
     service = _service(_FakeRepository(), runner, queue)
@@ -175,13 +196,13 @@ async def test_worker_does_not_ack_unhandled_runner_failure(caplog) -> None:
 
     assert await service.run_once() is True
 
-    assert runner.calls == ["run-2"]
+    assert runner.calls == [run_id]
     assert queue.acked == []
     failure = next(
         record for record in caplog.records if record.event == "worker_run_unhandled_error"
     )
-    assert failure.run_id == "run-2"
-    assert failure.correlation_id == "correlation-2"
+    assert failure.run_id == run_id
+    assert failure.correlation_id == correlation_id
     assert failure.result == "not_acknowledged"
 
 
@@ -225,6 +246,31 @@ async def test_temporary_database_failure_does_not_destroy_worker_service() -> N
 
 
 @pytest.mark.asyncio
+async def test_scan_progress_requires_both_reaper_and_due_scan_success() -> None:
+    progress = _FakeProgressRecorder()
+    service = _service(_FakeRepository(), _FakeRunner(), None, progress=progress)
+
+    assert await service.run_once() is False
+    assert progress.events == [WorkerProgressEvent.SCAN]
+
+    progress.events.clear()
+    repository = _FakeRepository()
+    repository.fail_reap_once = True
+    service = _service(repository, _FakeRunner(), None, progress=progress)
+    assert await service.run_once() is False
+    assert progress.events == []
+
+    class _FailDueRepository(_FakeRepository):
+        def due_run_ids(self, *, limit: int) -> tuple[str, ...]:
+            del limit
+            raise SQLAlchemyError("controlled")
+
+    service = _service(_FailDueRepository(), _FakeRunner(), None, progress=progress)
+    assert await service.run_once() is False
+    assert progress.events == []
+
+
+@pytest.mark.asyncio
 async def test_stop_during_blocking_queue_read_never_starts_new_run() -> None:
     queue = _FakeQueue([RunTaskDelivery("4-0", "run-late", "correlation-4")])
     queue.block_read = True
@@ -252,11 +298,15 @@ async def test_stop_during_database_scan_never_starts_new_run() -> None:
             return ("run-after-stop",)
 
     runner = _FakeRunner()
-    service = _service(_StoppingRepository(), runner, None)
+    progress = _FakeProgressRecorder()
+    service = _service(_StoppingRepository(), runner, None, progress=progress)
 
     await asyncio.wait_for(service.run(stop), timeout=1)
 
     assert runner.calls == []
+    assert progress.events == [WorkerProgressEvent.SCAN]
+    assert progress.started is True
+    assert progress.stopped is True
 
 
 @pytest.mark.asyncio

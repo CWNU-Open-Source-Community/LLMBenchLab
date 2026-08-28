@@ -120,6 +120,7 @@ Benchmark 校验错误还会提供文件、行、列或 JSON Pointer：
 | GET | `/ready` | 200/503 | 数据库、Alembic head 和 Redis 组件就绪状态 |
 | GET | `/tasks/metrics` | 200 | 数据库当前任务 gauges |
 | GET | `/tasks/history` | 200 | 有界 UTC 窗口内的类型化事件 counters 与 Run 延迟分位数 |
+| GET | `/metrics/prometheus` | 200 | 固定低基数 Prometheus text exposition；不接受查询参数 |
 | GET | `/info` | 200 | 服务、协议和能力信息 |
 | GET | `/governance/policy` | 200/404 | 只读查看当前治理策略；未初始化时不产生写入 |
 | PUT | `/governance/policy` | 200 | 原子应用一份完整、版本化的治理策略 |
@@ -264,6 +265,17 @@ curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
   "total_attempts": 3,
   "total_failed_attempts": 1,
   "total_dispatches": 4,
+  "worker_expected_processes": 2,
+  "worker_registered_processes": 2,
+  "worker_live_processes": 2,
+  "worker_stalled_processes": 0,
+  "worker_shortfall_processes": 0,
+  "worker_stale_after_seconds": 60.0,
+  "worker_last_seen_at": "2026-08-25T05:59:59Z",
+  "worker_last_scan_at": "2026-08-25T05:59:58Z",
+  "worker_last_claim_at": "2026-08-25T05:59:50Z",
+  "worker_last_progress_at": "2026-08-25T05:59:55Z",
+  "worker_last_lease_heartbeat_at": "2026-08-25T05:59:57Z",
   "timestamp": "2026-08-25T06:00:00Z"
 }
 ```
@@ -277,6 +289,8 @@ curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
 - `active_provider_attempts`：attempt ledger 中仍为 `reserved/send_started` 的行数；它是本地数据库 admission 事实，不承诺 Worker 崩溃后的 Provider 幽灵请求已经停止。
 - `overdrawn_governance_scopes`：已被实际 usage 超出 reservation 的治理 scope 数，不是超额 attempt 数。
 - `total_attempts`、`total_failed_attempts`、`total_dispatches`：Run 表中 lease 取得次数、实际 Run 级失败次数与公平调度 dispatch 次数的总和。
+- `worker_expected_processes` 是部署显式声明的最小进程数；`registered/live/stalled/shortfall` 从未停止的 `worker_processes` generation 与同一 DB UTC cutoff 派生，`last_seen_at == cutoff` 仍为 live。
+- 五个 `worker_last_*` 字段对未停止 generation 取最近（`MAX`）事实；空集合或尚未发生该事件时为 `null`。响应不包含 generation/worker ID，dependency probe 也不会写入或伪造这些时间。
 
 这些都是查询时点的 DB-derived gauges，不是完整事件 counters、历史延迟、审计记录或监控面板；它们绝不能覆盖数据库任务状态。保留期内的有界历史聚合见下一节 `/tasks/history`。
 
@@ -345,7 +359,21 @@ curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
 
 窗口终点、audit 校验/counter 与三组 Run 延迟都在同一数据库读取快照内完成：PostgreSQL 使用 `REPEATABLE READ READ ONLY`，SQLite 显式开启读事务。因此同一响应不会把不同提交时点的 event 与 Run timestamp 混合；这仍不是跨请求的历史快照或 WORM 保证。每种延迟最多按观测时间、Run ID 的稳定顺序读取最早 10,000 个样本；`sample_count` 是实际参与计算的数量。若还有更多样本，`truncated=true`，分位数只描述这 10,000 个样本，不能当作完整窗口统计。audit counters 不受 latency 样本上限影响。`window_hours` 越界返回 `422`。
 
-### 3.6 `GET /info`
+### 3.6 `GET /metrics/prometheus`
+
+返回固定 Prometheus text format `0.0.4`：
+
+```bash
+curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
+```
+
+成功状态为 `200`，`Content-Type: text/plain; version=0.0.4; charset=utf-8`、`Cache-Control: no-store`、LF 和唯一末尾换行。接口不接受任何 query parameter；存在参数时返回 `422 metrics_query_parameters_not_allowed`。同一 API 进程已有 collection 时立即返回 `429 metrics_scrape_in_progress`，不排队。
+
+一次 collection 在同一数据库读快照和同一 DB UTC 下取得 current Run/governance gauges、固定 15 分钟 typed-audit window、固定 1 小时 Run latency 与 Worker aggregate。audit 最多读取 `50,001` 行；第 `50,001` 行使整个请求返回 `503 metrics_observation_limit_exceeded`，不截断 counter。每类 latency 最多读取 `10,001` 个样本，输出前 10,000 个的 p50/p95/p99 与 `truncated=1`。任一 retained audit 的 contract/hash/identity/retention/数值损坏返回 `500 audit_event_integrity_error`；数据库失败返回 `503 metrics_database_unavailable`；renderer 拒绝负数/非有限值并返回 `500 metrics_rendering_error`。所有失败都不返回部分 exposition或异常原文。
+
+Redis ping 在数据库快照外，只影响 `llmbenchlab_queue_configured`/`llmbenchlab_queue_available`；Redis down 不会让数据库指标失败。所有 metric type 都是 `gauge`。labels 仅为固定的 `event_type`、latency `phase/quantile`、Worker `state/activity`；不输出 Run、Model、Provider、Worker、Question、policy、URL、hash 或错误文本。JSON `/tasks/metrics` 的 Worker 时间取 active generation 的 `MAX`；Prometheus `llmbenchlab_worker_activity_oldest_age_seconds` 取 `MIN` 后计算最老 age，二者语义不同。完整 family、示例 scrape 和八条规则见 [ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 与 `deploy/observability/`。
+
+### 3.7 `GET /info`
 
 请求：
 
@@ -370,7 +398,7 @@ curl -sS http://127.0.0.1:8000/api/v1/info
 }
 ```
 
-### 3.7 `GET/PUT /governance/policy`
+### 3.8 `GET/PUT /governance/policy`
 
 该接口没有认证，只允许可信 loopback 运维调用。`GET` 是安全只读操作：数据库尚无 policy 时返回 `404 governance_policy_not_initialized`，不会顺带创建 policy、scope 或 audit 行。
 

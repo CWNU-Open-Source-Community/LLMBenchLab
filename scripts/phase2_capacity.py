@@ -1079,6 +1079,7 @@ class Phase2Capacity(Phase2Acceptance):
         self.env["LLMBENCHLAB_COMPOSE_WORKER_LEASE_SECONDS"] = str(self.lease_seconds)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS"] = str(self.heartbeat_seconds)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_POLL_SECONDS"] = str(self.worker_poll_seconds)
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES"] = str(self.worker_count)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_MAX_ATTEMPTS"] = str(self.worker_max_attempts)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_BASE_SECONDS"] = str(
             self.retry_backoff_base_seconds

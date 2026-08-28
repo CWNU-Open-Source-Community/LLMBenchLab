@@ -23,10 +23,10 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import signal
 import socket
-import secrets
 import subprocess
 import sys
 import tempfile
@@ -42,6 +42,7 @@ EVIDENCE_SCHEMA = "llmbenchlab-phase2-acceptance-evidence-v1"
 PROTOCOL_VERSION = "llmbenchlab-protocol-v1"
 PRE_GOVERNANCE_REVISION = "20260827_0003"
 GOVERNANCE_REVISION = "20260827_0004"
+WORKER_PROGRESS_REVISION = "20260828_0005"
 TASK_MESSAGE_VERSION = "llmbenchlab-run-task-v1"
 TASK_STREAM = "llmbenchlab:runs:v1"
 TASK_GROUP = "llmbenchlab-workers-v1"
@@ -413,6 +414,7 @@ class Phase2Acceptance:
                 "LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS": "2",
                 "LLMBENCHLAB_COMPOSE_WORKER_POLL_SECONDS": "0.15",
                 "LLMBENCHLAB_COMPOSE_WORKER_SHUTDOWN_GRACE_SECONDS": "1",
+                "LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES": "2",
                 "LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS": "0.35",
                 "LLMBENCHLAB_COMPOSE_REDIS_OPERATION_TIMEOUT_SECONDS": "0.75",
                 "LLMBENCHLAB_COMPOSE_DATABASE_POOL_TIMEOUT_SECONDS": "2",
@@ -1152,6 +1154,66 @@ SELECT json_build_object(
             check=check,
         )
 
+    def clone_application_database(self, target_database: str) -> Dict[str, Any]:
+        """Clone the application database without racing its healthcheck connection."""
+
+        self.require(
+            SAFE_ID_PATTERN.fullmatch(target_database) is not None,
+            "unsafe PostgreSQL clone database name",
+        )
+        self.require(
+            target_database not in {"llmbenchlab", "postgres"},
+            "refused to replace a protected PostgreSQL database",
+        )
+        restoration: Optional[subprocess.CompletedProcess] = None
+        try:
+            self.psql_database(
+                'ALTER DATABASE "llmbenchlab" WITH ALLOW_CONNECTIONS false;',
+                database="postgres",
+            )
+            terminated_raw = self.psql_database(
+                "SELECT json_build_object("
+                "'attempted', count(*), "
+                "'all_terminated', COALESCE(bool_and(terminated), true))::text "
+                "FROM (SELECT pg_terminate_backend(pid) AS terminated "
+                "FROM pg_stat_activity WHERE datname = 'llmbenchlab' "
+                "AND pid <> pg_backend_pid()) active_connections;",
+                database="postgres",
+            ).stdout.strip()
+            try:
+                terminated = json.loads(terminated_raw)
+            except json.JSONDecodeError as exc:
+                raise AcceptanceFailure(
+                    "PostgreSQL returned invalid source connection termination evidence"
+                ) from exc
+            self.require(
+                terminated.get("all_terminated") is True,
+                "could not terminate every application database connection before clone",
+                terminated,
+            )
+            created = self.psql_database(
+                f'CREATE DATABASE "{target_database}" TEMPLATE "llmbenchlab";',
+                database="postgres",
+            )
+        finally:
+            restoration = self.psql_database(
+                'ALTER DATABASE "llmbenchlab" WITH ALLOW_CONNECTIONS true;',
+                database="postgres",
+                check=False,
+            )
+            self.require(
+                restoration.returncode == 0,
+                "failed to restore application database connections after clone",
+                redact_text(restoration.stderr or restoration.stdout),
+            )
+
+        return {
+            "source_connections_disabled": True,
+            "terminated_connection_count": int(terminated["attempted"]),
+            "source_connections_restored": restoration is not None,
+            "create_returncode": created.returncode,
+        }
+
     def db_run_snapshot(self, run_id: str) -> Dict[str, Any]:
         self.require(SAFE_ID_PATTERN.fullmatch(run_id) is not None, "unsafe Run ID")
         sql = """
@@ -1448,6 +1510,27 @@ WHERE r.id = '{}';
             interval=0.25,
         )
 
+    def wait_worker_progress_healthy(self, timeout: float = 90) -> Dict[str, Any]:
+        """Wait for both configured Worker main loops to report current progress."""
+
+        result = self.wait_for(
+            "two registered and live Worker main loops without stalls or shortfall",
+            lambda: self.http_json("GET", "/tasks/metrics", accepted={200}, timeout=4),
+            lambda response: all(
+                response["payload"].get(field) == expected
+                for field, expected in {
+                    "worker_expected_processes": 2,
+                    "worker_registered_processes": 2,
+                    "worker_live_processes": 2,
+                    "worker_stalled_processes": 0,
+                    "worker_shortfall_processes": 0,
+                }.items()
+            ),
+            timeout=timeout,
+            interval=0.25,
+        )
+        return result["payload"]
+
     def setup_stack(self) -> None:
         self.stack_touched = True
         self.compose(
@@ -1526,6 +1609,7 @@ WHERE r.id = '{}';
             live = self.http_json("GET", "/live", accepted={200})
             health = self.http_json("GET", "/health", accepted={200})
             ready = self.wait_api_ready(200)
+            worker_progress = self.wait_worker_progress_healthy()
             info = self.http_json("GET", "/info", accepted={200})
             frontend = self.http_json("GET", "/healthz", accepted={200}, frontend=True)
             self.require(live["payload"]["status"] == "live", "liveness payload changed", live)
@@ -1553,6 +1637,7 @@ WHERE r.id = '{}';
                 "live": live["payload"],
                 "health": health["payload"],
                 "ready": ready["payload"],
+                "worker_progress": worker_progress,
                 "frontend_healthz": frontend["payload"],
                 "fixtures": demo,
             }
@@ -2202,7 +2287,7 @@ WHERE r.id = '{}';
 
     def migration_round_trip_scenario(self) -> None:
         with self.scenario(
-            "postgres_populated_0004_downgrade_refusal_and_empty_round_trip"
+            "postgres_populated_0005_and_0004_downgrade_guards_with_empty_round_trips"
         ) as entry:
             self.require(self.baseline_run_id is not None, "baseline Run is unavailable")
             run_id = self.baseline_run_id
@@ -2213,20 +2298,26 @@ WHERE r.id = '{}';
             self.require(active_raw == "0", "migration round trip found active Runs", active_raw)
             core_before = self.db_core_protocol_snapshot(run_id)
             reliability_before = self.db_run_snapshot(run_id)
-            populated_counts = json.loads(
+            application_counts = json.loads(
                 self.psql(
                     "SELECT json_build_object("
                     "'policies', (SELECT count(*) FROM governance_policies), "
                     "'reservations', (SELECT count(*) FROM provider_call_reservations), "
-                    "'audit_events', (SELECT count(*) FROM audit_events))::text;"
+                    "'audit_events', (SELECT count(*) FROM audit_events), "
+                    "'worker_processes', (SELECT count(*) FROM worker_processes))::text;"
                 ).stdout.strip()
             )
             self.require(
-                populated_counts["policies"] > 0
-                and populated_counts["reservations"] > 0
-                and populated_counts["audit_events"] > 0,
-                "0004 downgrade refusal requires populated policy, ledger, and audit evidence",
-                populated_counts,
+                application_counts["worker_processes"] > 0,
+                "0005 downgrade refusal requires persisted Worker process facts",
+                application_counts,
+            )
+            self.require(
+                application_counts["policies"] > 0
+                and application_counts["reservations"] > 0
+                and application_counts["audit_events"] > 0,
+                "0004 downgrade refusal requires populated governance evidence",
+                application_counts,
             )
 
             self.compose("stop", "api", "worker", timeout=90)
@@ -2244,45 +2335,196 @@ WHERE r.id = '{}';
                 stopped_workers,
             )
 
-            populated_downgrade = self.compose(
+            worker_progress_downgrade = self.compose(
                 "run",
                 "--rm",
                 "--no-deps",
                 "migrate",
                 "alembic",
                 "downgrade",
-                PRE_GOVERNANCE_REVISION,
+                GOVERNANCE_REVISION,
                 timeout=180,
                 check=False,
             )
             self.require(
-                populated_downgrade.returncode != 0,
-                "populated 0004 downgrade unexpectedly discarded governance evidence",
+                worker_progress_downgrade.returncode != 0,
+                "populated 0005 downgrade unexpectedly discarded Worker progress evidence",
             )
-            refusal_output = populated_downgrade.stderr or populated_downgrade.stdout
+            worker_progress_refusal_output = "\n".join(
+                part
+                for part in (
+                    worker_progress_downgrade.stdout,
+                    worker_progress_downgrade.stderr,
+                )
+                if part
+            )
             self.require(
-                "Cannot downgrade governance schema" in refusal_output,
-                "populated 0004 downgrade did not return the stable refusal reason",
-                redact_text(refusal_output[-2000:]),
+                "Cannot downgrade Worker progress schema" in worker_progress_refusal_output,
+                "populated 0005 downgrade did not return the stable refusal reason",
+                redact_text(worker_progress_refusal_output[-2000:]),
             )
-            populated_revision = self.psql(
+            application_revision = self.psql(
                 "SELECT version_num FROM alembic_version;"
             ).stdout.strip()
             self.require(
-                populated_revision == GOVERNANCE_REVISION,
+                application_revision == WORKER_PROGRESS_REVISION,
                 "failed populated downgrade changed the application database revision",
-                populated_revision,
+                application_revision,
             )
             core_after_refusal = self.db_core_protocol_snapshot(run_id)
             reliability_after_refusal = self.db_run_snapshot(run_id)
 
+            governance_database = "p2governance_" + self.project[-12:]
+            governance_database_url = (
+                f"postgresql+psycopg://llmbenchlab:{LOCAL_PASSWORD}@postgres:5432/"
+                f"{governance_database}?connect_timeout=3"
+            )
+            governance_guard: dict[str, Any] = {
+                "database": governance_database,
+                "source_application_revision": application_revision,
+                "worker_facts_cleared_in_clone_only": True,
+            }
+            governance_guard["safe_template_clone"] = self.clone_application_database(
+                governance_database
+            )
+            try:
+                self.psql_database(
+                    "TRUNCATE TABLE worker_processes;",
+                    database=governance_database,
+                )
+                prepare_governance = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    f"DATABASE_URL={governance_database_url}",
+                    "migrate",
+                    "alembic",
+                    "downgrade",
+                    GOVERNANCE_REVISION,
+                    timeout=180,
+                )
+                governance_revision_before = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=governance_database,
+                ).stdout.strip()
+                self.require(
+                    governance_revision_before == GOVERNANCE_REVISION,
+                    "isolated populated database did not prepare revision 0004",
+                    governance_revision_before,
+                )
+                governance_counts_before = json.loads(
+                    self.psql_database(
+                        "SELECT json_build_object("
+                        "'policies', (SELECT count(*) FROM governance_policies), "
+                        "'reservations', (SELECT count(*) FROM provider_call_reservations), "
+                        "'audit_events', (SELECT count(*) FROM audit_events))::text;",
+                        database=governance_database,
+                    ).stdout.strip()
+                )
+                self.require(
+                    governance_counts_before["policies"] > 0
+                    and governance_counts_before["reservations"] > 0
+                    and governance_counts_before["audit_events"] > 0,
+                    "isolated 0004 downgrade guard lacks populated governance evidence",
+                    governance_counts_before,
+                )
+                governance_downgrade = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    f"DATABASE_URL={governance_database_url}",
+                    "migrate",
+                    "alembic",
+                    "downgrade",
+                    PRE_GOVERNANCE_REVISION,
+                    timeout=180,
+                    check=False,
+                )
+                self.require(
+                    governance_downgrade.returncode != 0,
+                    "populated 0004 downgrade unexpectedly discarded governance evidence",
+                )
+                governance_refusal_output = "\n".join(
+                    part
+                    for part in (governance_downgrade.stdout, governance_downgrade.stderr)
+                    if part
+                )
+                self.require(
+                    "Cannot downgrade governance schema" in governance_refusal_output,
+                    "populated 0004 downgrade did not return the stable refusal reason",
+                    redact_text(governance_refusal_output[-2000:]),
+                )
+                governance_revision_after = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=governance_database,
+                ).stdout.strip()
+                self.require(
+                    governance_revision_after == GOVERNANCE_REVISION,
+                    "failed populated 0004 downgrade changed the isolated database revision",
+                    governance_revision_after,
+                )
+                governance_counts_after = json.loads(
+                    self.psql_database(
+                        "SELECT json_build_object("
+                        "'policies', (SELECT count(*) FROM governance_policies), "
+                        "'reservations', (SELECT count(*) FROM provider_call_reservations), "
+                        "'audit_events', (SELECT count(*) FROM audit_events))::text;",
+                        database=governance_database,
+                    ).stdout.strip()
+                )
+                self.require(
+                    governance_counts_after == governance_counts_before,
+                    "refused populated 0004 downgrade changed governance evidence",
+                    {
+                        "before": governance_counts_before,
+                        "after": governance_counts_after,
+                    },
+                )
+                governance_guard.update(
+                    {
+                        "prepare_0004_returncode": prepare_governance.returncode,
+                        "revision_before_refusal": governance_revision_before,
+                        "populated_counts_before": governance_counts_before,
+                        "downgrade_to_0003_returncode": governance_downgrade.returncode,
+                        "refusal_reason": "Cannot downgrade governance schema",
+                        "revision_after_refusal": governance_revision_after,
+                        "populated_counts_after": governance_counts_after,
+                    }
+                )
+            finally:
+                drop_governance = self.psql_database(
+                    f'DROP DATABASE IF EXISTS "{governance_database}" WITH (FORCE);',
+                    database="postgres",
+                    check=False,
+                )
+                governance_guard["drop_returncode"] = drop_governance.returncode
+            self.require(
+                governance_guard["drop_returncode"] == 0,
+                "isolated populated governance database cleanup failed",
+                governance_guard,
+            )
+            application_worker_facts_after = int(
+                self.psql("SELECT count(*) FROM worker_processes;").stdout.strip()
+            )
+            self.require(
+                application_worker_facts_after == application_counts["worker_processes"],
+                "isolated governance guard changed application Worker process facts",
+                {
+                    "before": application_counts["worker_processes"],
+                    "after": application_worker_facts_after,
+                },
+            )
+
             empty_database = "p2roundtrip_" + self.project[-12:]
             empty_database_url = (
-                "postgresql+psycopg://llmbenchlab:{}@postgres:5432/{}?connect_timeout=3"
-            ).format(LOCAL_PASSWORD, empty_database)
-            empty_round_trip: Dict[str, Any] = {"database": empty_database}
+                f"postgresql+psycopg://llmbenchlab:{LOCAL_PASSWORD}@postgres:5432/"
+                f"{empty_database}?connect_timeout=3"
+            )
+            empty_round_trips: dict[str, Any] = {"database": empty_database}
             self.psql_database(
-                'CREATE DATABASE "{}";'.format(empty_database),
+                f'CREATE DATABASE "{empty_database}";',
                 database="postgres",
             )
             try:
@@ -2291,7 +2533,7 @@ WHERE r.id = '{}';
                     "--rm",
                     "--no-deps",
                     "-e",
-                    "DATABASE_URL={}".format(empty_database_url),
+                    f"DATABASE_URL={empty_database_url}",
                     "migrate",
                     "alembic",
                     "upgrade",
@@ -2303,8 +2545,8 @@ WHERE r.id = '{}';
                     database=empty_database,
                 ).stdout.strip()
                 self.require(
-                    empty_head_before == GOVERNANCE_REVISION,
-                    "empty PostgreSQL database did not upgrade to 0004",
+                    empty_head_before == WORKER_PROGRESS_REVISION,
+                    "empty PostgreSQL database did not upgrade to 0005",
                     empty_head_before,
                 )
                 downgrade_empty = self.compose(
@@ -2312,7 +2554,71 @@ WHERE r.id = '{}';
                     "--rm",
                     "--no-deps",
                     "-e",
-                    "DATABASE_URL={}".format(empty_database_url),
+                    f"DATABASE_URL={empty_database_url}",
+                    "migrate",
+                    "alembic",
+                    "downgrade",
+                    GOVERNANCE_REVISION,
+                    timeout=180,
+                )
+                empty_pre_worker_progress = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=empty_database,
+                ).stdout.strip()
+                self.require(
+                    empty_pre_worker_progress == GOVERNANCE_REVISION,
+                    "empty PostgreSQL database did not downgrade across 0005",
+                    empty_pre_worker_progress,
+                )
+                reupgrade_worker_progress = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    f"DATABASE_URL={empty_database_url}",
+                    "migrate",
+                    "alembic",
+                    "upgrade",
+                    WORKER_PROGRESS_REVISION,
+                    timeout=180,
+                )
+                worker_progress_head_after = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=empty_database,
+                ).stdout.strip()
+                self.require(
+                    worker_progress_head_after == WORKER_PROGRESS_REVISION,
+                    "empty PostgreSQL database did not complete the 0005 round trip",
+                    worker_progress_head_after,
+                )
+
+                prepare_empty_governance = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    f"DATABASE_URL={empty_database_url}",
+                    "migrate",
+                    "alembic",
+                    "downgrade",
+                    GOVERNANCE_REVISION,
+                    timeout=180,
+                )
+                empty_governance_before = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=empty_database,
+                ).stdout.strip()
+                self.require(
+                    empty_governance_before == GOVERNANCE_REVISION,
+                    "empty PostgreSQL database did not prepare revision 0004",
+                    empty_governance_before,
+                )
+                downgrade_empty_governance = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    f"DATABASE_URL={empty_database_url}",
                     "migrate",
                     "alembic",
                     "downgrade",
@@ -2328,48 +2634,83 @@ WHERE r.id = '{}';
                     "empty PostgreSQL database did not downgrade across 0004",
                     empty_pre_governance,
                 )
-                reupgrade_empty = self.compose(
+                reupgrade_empty_governance = self.compose(
                     "run",
                     "--rm",
                     "--no-deps",
                     "-e",
-                    "DATABASE_URL={}".format(empty_database_url),
+                    f"DATABASE_URL={empty_database_url}",
+                    "migrate",
+                    "alembic",
+                    "upgrade",
+                    GOVERNANCE_REVISION,
+                    timeout=180,
+                )
+                governance_head_after = self.psql_database(
+                    "SELECT version_num FROM alembic_version;",
+                    database=empty_database,
+                ).stdout.strip()
+                self.require(
+                    governance_head_after == GOVERNANCE_REVISION,
+                    "empty PostgreSQL database did not complete the 0004 round trip",
+                    governance_head_after,
+                )
+                final_reupgrade_and_check = self.compose(
+                    "run",
+                    "--rm",
+                    "--no-deps",
+                    "-e",
+                    f"DATABASE_URL={empty_database_url}",
                     "migrate",
                     "sh",
                     "-c",
                     "alembic upgrade head && alembic check",
                     timeout=180,
                 )
-                empty_head_after = self.psql_database(
+                empty_final_head = self.psql_database(
                     "SELECT version_num FROM alembic_version;",
                     database=empty_database,
                 ).stdout.strip()
                 self.require(
-                    empty_head_after == GOVERNANCE_REVISION,
-                    "empty PostgreSQL database did not return to 0004",
-                    empty_head_after,
+                    empty_final_head == WORKER_PROGRESS_REVISION,
+                    "empty PostgreSQL database did not return to migration head",
+                    empty_final_head,
                 )
-                empty_round_trip.update(
+                empty_round_trips.update(
                     {
-                        "upgrade_returncode": upgrade_empty.returncode,
-                        "head_before": empty_head_before,
-                        "downgrade_returncode": downgrade_empty.returncode,
-                        "pre_governance_revision": empty_pre_governance,
-                        "reupgrade_and_check_returncode": reupgrade_empty.returncode,
-                        "head_after": empty_head_after,
+                        "initial_upgrade_returncode": upgrade_empty.returncode,
+                        "initial_head": empty_head_before,
+                        "worker_progress_0005_to_0004_round_trip": {
+                            "downgrade_returncode": downgrade_empty.returncode,
+                            "pre_worker_progress_revision": empty_pre_worker_progress,
+                            "reupgrade_returncode": reupgrade_worker_progress.returncode,
+                            "head_after_reupgrade": worker_progress_head_after,
+                        },
+                        "governance_0004_to_0003_round_trip": {
+                            "prepare_0004_returncode": prepare_empty_governance.returncode,
+                            "head_before": empty_governance_before,
+                            "downgrade_returncode": downgrade_empty_governance.returncode,
+                            "pre_governance_revision": empty_pre_governance,
+                            "reupgrade_returncode": reupgrade_empty_governance.returncode,
+                            "head_after_reupgrade": governance_head_after,
+                        },
+                        "final_reupgrade_and_check_returncode": (
+                            final_reupgrade_and_check.returncode
+                        ),
+                        "final_head": empty_final_head,
                     }
                 )
             finally:
                 drop_empty = self.psql_database(
-                    'DROP DATABASE IF EXISTS "{}" WITH (FORCE);'.format(empty_database),
+                    f'DROP DATABASE IF EXISTS "{empty_database}" WITH (FORCE);',
                     database="postgres",
                     check=False,
                 )
-                empty_round_trip["drop_returncode"] = drop_empty.returncode
+                empty_round_trips["drop_returncode"] = drop_empty.returncode
             self.require(
-                empty_round_trip["drop_returncode"] == 0,
+                empty_round_trips["drop_returncode"] == 0,
                 "isolated empty migration database cleanup failed",
-                empty_round_trip,
+                empty_round_trips,
             )
 
             hashes = {
@@ -2382,11 +2723,17 @@ WHERE r.id = '{}';
                 "active_runs_before": 0,
                 "api_stopped": stopped_api,
                 "workers_stopped": stopped_workers,
-                "populated_counts": populated_counts,
-                "populated_downgrade_returncode": populated_downgrade.returncode,
-                "populated_downgrade_refusal": "Cannot downgrade governance schema",
-                "application_revision_after_refusal": populated_revision,
-                "empty_database_round_trip": empty_round_trip,
+                "application_worker_progress_0005_to_0004_guard": {
+                    "populated_counts": application_counts,
+                    "downgrade_returncode": worker_progress_downgrade.returncode,
+                    "refusal_reason": "Cannot downgrade Worker progress schema",
+                    "revision_after_refusal": application_revision,
+                    "worker_facts_after_isolated_governance_guard": (
+                        application_worker_facts_after
+                    ),
+                },
+                "isolated_governance_0004_to_0003_guard": governance_guard,
+                "empty_database_round_trips": empty_round_trips,
                 "core_protocol_hashes": hashes,
                 "core_snapshot_before": core_before,
                 "reliability_before": reliability_before,

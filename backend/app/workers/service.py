@@ -19,6 +19,11 @@ from app.governance import GovernanceIntegrityError, record_governance_integrity
 from app.runners.evaluation_runner import EvaluationRunner
 from app.runners.run_leases import ReapReport, RunLeaseRepository
 from app.task_queue import QueueUnavailable, RedisRunQueue, RunTaskDelivery
+from app.worker_progress import (
+    WorkerProgressEvent,
+    WorkerProgressLifecycle,
+    WorkerProgressRecorder,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +45,7 @@ class WorkerService:
         worker_id: str | None = None,
         lease_repository: RunLeaseRepository | None = None,
         runner: EvaluationRunner | None = None,
+        progress_recorder: WorkerProgressLifecycle | None = None,
     ) -> None:
         self._session_factory = session_factory
         self.worker_id = worker_id or default_worker_id()
@@ -51,10 +57,16 @@ class WorkerService:
             retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
             retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
         )
+        self._progress = progress_recorder or WorkerProgressRecorder(
+            session_factory,
+            worker_id=self.worker_id,
+            flush_seconds=settings.worker_progress_flush_seconds,
+        )
         self._runner = runner or EvaluationRunner(
             session_factory,
             worker_id=self.worker_id,
             lease_repository=self._repository,
+            progress_observer=self._progress,
         )
         self._queue_initialized = False
         self._queue_available: bool | None = None
@@ -70,6 +82,7 @@ class WorkerService:
         run_ids = self._due_run_ids()
         if run_ids is None:
             return False
+        self._progress.note(WorkerProgressEvent.SCAN)
         if run_ids:
             await self._execute_run(run_ids[0])
             return True
@@ -84,6 +97,11 @@ class WorkerService:
 
         active: asyncio.Task[bool] | None = None
         active_delivery: RunTaskDelivery | None = None
+        await self._progress.start()
+        logger.info(
+            "Worker main loop registered and started",
+            extra={"event": "worker_main_loop_started", "worker_id": self.worker_id},
+        )
         try:
             while True:
                 if active is not None:
@@ -113,6 +131,8 @@ class WorkerService:
                     continue
 
                 run_ids = self._due_run_ids()
+                if run_ids is not None:
+                    self._progress.note(WorkerProgressEvent.SCAN)
                 await asyncio.sleep(0)
                 if stop.is_set():
                     return
@@ -172,6 +192,7 @@ class WorkerService:
             if active is not None and not active.done():
                 active.cancel()
                 await asyncio.gather(active, return_exceptions=True)
+            await self._progress.stop()
 
     async def _next_delivery_until_stopped(
         self,
@@ -451,6 +472,7 @@ class WorkerService:
             return None
         self._database_recovered()
         if report.cancelled or report.dead_lettered or report.completed or report.retry_scheduled:
+            self._progress.note(WorkerProgressEvent.PROGRESS)
             logger.info(
                 "Expired Run reconciliation completed",
                 extra={
