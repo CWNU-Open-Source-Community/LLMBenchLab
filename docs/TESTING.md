@@ -565,7 +565,7 @@ make phase2-slo
 
 入口只接受 exact clean commit；开始前、每个 child 前和最终统计前都会复核 commit/工作树，且会复核 `phase2_slo.py`、`phase2_capacity.py`、`phase2_acceptance.py` 与 `compose.yaml` 的 SHA-256。默认 suite 串行执行 1 次 warm-up 和 5 次 measured trial，固定 seed `20260828`，以平衡顺序交替单/双 Worker measurement；warm-up 不计入统计，所有 measured trial 都保留，任一 child 命令失败、超时、字段漂移或 cleanup 失败都会使整个 suite 失败。
 
-每个 trial 固定 PostgreSQL 16、Redis 7、一个 API、两个 Worker、三个 measurement cell；每 cell 完成 4 个 15 题 Mock Run。配置固定 `lease/heartbeat/poll=30/10/1s`、Worker `max_attempts=3`、retry `base/cap=1/30s`、database pool/overflow `5/5`、backlog 4、burst submissions 6、Run concurrency 1、question quantum 5、Mock delay 80 ms、input reservation 256 和 `max_tokens=64`。容器内 Settings read-back、PostgreSQL `max_connections >= 100`、主机/Docker 最低资源、image ID、数据/配置/环境指纹都必须跨轮稳定。
+每个 trial 固定 PostgreSQL 16、Redis 7、一个 API、两个 Worker、三个 measurement cell；每 cell 完成 4 个 15 题 Mock Run。配置固定 `lease/heartbeat/poll=30/10/1s`、Worker `max_attempts=3`、retry `base/cap=1/30s`、database pool/overflow `5/5`、backlog 4、burst submissions 6、Run concurrency 1、question quantum 5、Mock delay 80 ms、input reservation 256 和 `max_tokens=64`。容器内 Settings read-back、PostgreSQL `max_connections >= 100`、主机/Docker 最低资源、只过滤 Compose project/service labels 后的 image content SHA、数据/配置/环境指纹都必须跨轮稳定；raw image ID 仅作逐轮本地审计事实。
 
 wrapper 不信任 child 的题吞吐汇总，而是以 `completed_questions / wall_duration_seconds` 重算；双/单 Worker scale 使用同一 measured trial 的配对 ratio。Student-t LCB、CV、每轮 p95、burst drain 和 lease/Redis 恢复阈值按 [PERFORMANCE.md](PERFORMANCE.md) 的预登记合同判定。每轮还必须独立从 ledger 重算 scope/minute consumed/reserved projection，要求缺失、多余和字段 drift 全为 0，并验证 Response/operation/audit 唯一、有限 policy、公平性、故障收敛、Redis PEL/lag 和项目 cleanup。
 

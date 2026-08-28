@@ -45,6 +45,7 @@ def _container_limit(service: str, identity: str) -> dict[str, object]:
         "container_id": f"container-{identity}",
         "hostname": f"hostname-{identity}",
         "image_id": f"sha256:{'a' * 64}",
+        "image_content_sha256": "b" * 64,
         "pid": 100,
         "memory_limit_bytes": 0,
         "memory_swap_limit_bytes": 0,
@@ -503,15 +504,26 @@ def test_strict_json_loader_rejects_path_escape_and_symlink(tmp_path: Path) -> N
 def test_normalized_environment_fingerprint_ignores_only_runtime_container_identity() -> None:
     base = _environment("a")
     changed_identity = _environment("b")
+    changed_identity["container_limits"]["api"][0]["image_id"] = f"sha256:{'c' * 64}"
     changed_environment = _environment("a")
     changed_environment["host"]["os_release"] = "changed"
+    changed_image_content = _environment("a")
+    changed_image_content["container_limits"]["api"][0]["image_content_sha256"] = "d" * 64
 
     assert script.normalized_fingerprint(
         script._normalize_environment(base)
     ) == script.normalized_fingerprint(script._normalize_environment(changed_identity))
+
+    malformed_raw_identity = _environment("a")
+    malformed_raw_identity["container_limits"]["api"][0]["image_id"] = f"sha256:{'C' * 64}"
+    with pytest.raises(script.QualificationFailure, match="image identity is missing"):
+        script._normalize_environment(malformed_raw_identity)
     assert script.normalized_fingerprint(
         script._normalize_environment(base)
     ) != script.normalized_fingerprint(script._normalize_environment(changed_environment))
+    assert script.normalized_fingerprint(
+        script._normalize_environment(base)
+    ) != script.normalized_fingerprint(script._normalize_environment(changed_image_content))
     with pytest.raises(script.QualificationFailure, match="fingerprint"):
         script.normalized_fingerprint({"not_finite": float("nan")})
 

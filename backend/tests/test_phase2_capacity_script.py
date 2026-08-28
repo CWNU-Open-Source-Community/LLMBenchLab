@@ -85,6 +85,136 @@ def test_distribution_reports_required_capacity_percentiles() -> None:
     }
 
 
+def test_image_content_sha_ignores_only_dynamic_compose_labels() -> None:
+    inspected = {
+        "Architecture": "arm64",
+        "Os": "linux",
+        "Variant": None,
+        "RootFS": {"Layers": [f"sha256:{'a' * 64}", f"sha256:{'b' * 64}"]},
+        "Config": {
+            "Cmd": ["python", "-m", "app"],
+            "Env": ["PYTHONUNBUFFERED=1"],
+            "Labels": {
+                "com.docker.compose.project": "project-a",
+                "com.docker.compose.service": "api",
+                "com.docker.compose.version": "5.3.1",
+                "org.opencontainers.image.revision": "fixed-revision",
+            },
+        },
+    }
+    other_project = json.loads(json.dumps(inspected))
+    other_project["Config"]["Labels"]["com.docker.compose.project"] = "project-b"
+    other_project["Config"]["Labels"]["com.docker.compose.service"] = "worker"
+
+    assert script.image_content_sha256(inspected) == script.image_content_sha256(other_project)
+
+    changed_layer = json.loads(json.dumps(inspected))
+    changed_layer["RootFS"]["Layers"][-1] = f"sha256:{'c' * 64}"
+    assert script.image_content_sha256(inspected) != script.image_content_sha256(changed_layer)
+
+    changed_config = json.loads(json.dumps(inspected))
+    changed_config["Config"]["Cmd"] = ["python", "-m", "different"]
+    assert script.image_content_sha256(inspected) != script.image_content_sha256(changed_config)
+
+    changed_vendor_label = json.loads(json.dumps(inspected))
+    changed_vendor_label["Config"]["Labels"]["org.opencontainers.image.revision"] = "changed"
+    assert script.image_content_sha256(inspected) != script.image_content_sha256(
+        changed_vendor_label
+    )
+
+    changed_compose_version = json.loads(json.dumps(inspected))
+    changed_compose_version["Config"]["Labels"]["com.docker.compose.version"] = "5.4.0"
+    assert script.image_content_sha256(inspected) != script.image_content_sha256(
+        changed_compose_version
+    )
+
+
+def test_image_content_sha_preserves_none_vs_empty_labels_and_rejects_invalid_labels() -> None:
+    base = {
+        "Architecture": "arm64",
+        "Os": "linux",
+        "RootFS": {"Layers": [f"sha256:{'a' * 64}"]},
+        "Config": {"Labels": None},
+    }
+    empty_labels = json.loads(json.dumps(base))
+    empty_labels["Config"]["Labels"] = {}
+    invalid_labels = json.loads(json.dumps(base))
+    invalid_labels["Config"]["Labels"] = []
+
+    assert script.image_content_sha256(base) != script.image_content_sha256(empty_labels)
+    with pytest.raises(script.AcceptanceFailure, match=r"invalid Config\.Labels"):
+        script.image_content_sha256(invalid_labels)
+
+
+@pytest.mark.parametrize(
+    "layer",
+    [
+        "sha256:short",
+        f"sha256:{'A' * 64}",
+        f"sha256:{'g' * 64}",
+        f"md5:{'a' * 64}",
+    ],
+)
+def test_image_content_sha_rejects_malformed_layer_identity(layer: str) -> None:
+    inspected = {
+        "Architecture": "arm64",
+        "Os": "linux",
+        "RootFS": {"Layers": [layer]},
+        "Config": {"Labels": {}},
+    }
+
+    with pytest.raises(script.AcceptanceFailure, match="invalid RootFS layers"):
+        script.image_content_sha256(inspected)
+
+
+def test_container_resources_records_raw_and_content_image_identities() -> None:
+    harness = object.__new__(script.Phase2Capacity)
+    harness.project = "llmbenchlab-p2-123456789abc"
+    harness.require = script.Phase2Acceptance.require.__get__(harness)
+    harness.service_container_ids = lambda _service: ["container-id"]
+    raw_image_id = f"sha256:{'a' * 64}"
+    container_inspect = {
+        "Image": raw_image_id,
+        "Config": {
+            "Labels": {"com.docker.compose.project": harness.project},
+        },
+        "HostConfig": {
+            "Memory": 0,
+            "MemorySwap": 0,
+            "NanoCpus": 0,
+            "CpuQuota": 0,
+            "CpuPeriod": 0,
+            "PidsLimit": None,
+        },
+    }
+    image_inspect = {
+        "Architecture": "arm64",
+        "Os": "linux",
+        "RootFS": {"Layers": [f"sha256:{'b' * 64}"]},
+        "Config": {
+            "Cmd": ["python", "-m", "app"],
+            "Labels": {"com.docker.compose.project": harness.project},
+        },
+    }
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        payload = container_inspect if command[1] == "inspect" else image_inspect
+        return SimpleNamespace(stdout=json.dumps([payload]))
+
+    harness.run_command = run_command
+
+    resources = harness.container_resources("api")
+
+    assert commands == [
+        ["docker", "inspect", "container-id"],
+        ["docker", "image", "inspect", raw_image_id],
+    ]
+    assert resources[0]["image_id"] == raw_image_id
+    assert resources[0]["image_content_sha256"] == script.image_content_sha256(image_inspect)
+
+
 def test_capacity_cli_defaults_are_bounded_and_require_two_workers() -> None:
     args = script.parse_arguments([])
 

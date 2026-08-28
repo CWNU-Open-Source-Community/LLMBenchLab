@@ -71,6 +71,63 @@ PROVIDER_CREDENTIAL_ENV_KEYS = (
     "LLMBENCHLAB_REAL_API_KEY",
     "TEST_PROVIDER_KEY",
 )
+COMPOSE_PROJECT_IMAGE_LABELS = frozenset(
+    {
+        "com.docker.compose.project",
+        "com.docker.compose.service",
+    }
+)
+
+
+def _is_sha256_identity(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and value.startswith("sha256:")
+        and len(value) == 71
+        and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def image_content_sha256(inspected_image: dict[str, Any]) -> str:
+    """Fingerprint executable image content without per-project Compose labels."""
+
+    rootfs = inspected_image.get("RootFS")
+    config = inspected_image.get("Config")
+    if not isinstance(rootfs, dict) or not isinstance(config, dict):
+        raise AcceptanceFailure("docker image inspect omitted RootFS or Config")
+    layers = rootfs.get("Layers")
+    if (
+        not isinstance(layers, list)
+        or not layers
+        or not all(_is_sha256_identity(layer) for layer in layers)
+    ):
+        raise AcceptanceFailure("docker image inspect returned invalid RootFS layers")
+    stable_config = dict(config)
+    labels = config.get("Labels")
+    if labels is not None:
+        if not isinstance(labels, dict):
+            raise AcceptanceFailure("docker image inspect returned invalid Config.Labels")
+        stable_config["Labels"] = {
+            key: value for key, value in labels.items() if key not in COMPOSE_PROJECT_IMAGE_LABELS
+        }
+    payload = {
+        "architecture": inspected_image.get("Architecture"),
+        "os": inspected_image.get("Os"),
+        "variant": inspected_image.get("Variant"),
+        "rootfs_layers": layers,
+        "config": stable_config,
+    }
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise AcceptanceFailure("docker image content was not canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def reconciliation_expectations(
@@ -927,6 +984,7 @@ class Phase2Capacity(Phase2Acceptance):
 
     def container_resources(self, service: str) -> list[dict[str, Any]]:
         resources = []
+        image_content_hashes: dict[str, str] = {}
         for container_id in self.service_container_ids(service):
             completed = self.run_command(
                 ["docker", "inspect", container_id], timeout=20, record=False
@@ -941,11 +999,25 @@ class Phase2Capacity(Phase2Acceptance):
                 "container resource snapshot escaped Compose project isolation",
             )
             limits = inspected.get("HostConfig") or {}
+            image_id = str(inspected.get("Image") or "")
+            self.require(_is_sha256_identity(image_id), "container image identity was missing")
+            if image_id not in image_content_hashes:
+                image_completed = self.run_command(
+                    ["docker", "image", "inspect", image_id],
+                    timeout=20,
+                    record=False,
+                )
+                try:
+                    inspected_image = json.loads(image_completed.stdout)[0]
+                except (IndexError, KeyError, json.JSONDecodeError) as exc:
+                    raise AcceptanceFailure("unexpected docker image inspect output") from exc
+                image_content_hashes[image_id] = image_content_sha256(inspected_image)
             resources.append(
                 {
                     "container_id": container_id,
                     "service": service,
-                    "image_id": inspected.get("Image"),
+                    "image_id": image_id,
+                    "image_content_sha256": image_content_hashes[image_id],
                     "memory_limit_bytes": int(limits.get("Memory") or 0),
                     "memory_swap_limit_bytes": int(limits.get("MemorySwap") or 0),
                     "nano_cpus": int(limits.get("NanoCpus") or 0),

@@ -413,7 +413,7 @@ Redis 不可用时：
 make phase2-slo
 ```
 
-它只允许精确 clean commit，并为每个 trial 创建唯一 Compose project、隔离 PostgreSQL/Redis volume 和随机 loopback 端口。默认串行执行 1 次 warm-up 与 5 次 measured trial；每轮使用一个 API、PostgreSQL 16、Redis 7、两个 Worker、Demo 15 题 Mock，并固定 `lease/heartbeat/poll=30/10/1s`、Worker `max_attempts=3`、retry `base/cap=1/30s`、pool/overflow `5/5`、Run concurrency 1、backlog 4、question quantum 5、Mock delay 80 ms、input reservation 256 与 output limit 64。脚本从容器内 Settings 回读这些值，要求 PostgreSQL `max_connections >= 100`，并把 image ID、Host/Docker 资源、配置与数据指纹跨轮锁定。
+它只允许精确 clean commit，并为每个 trial 创建唯一 Compose project、隔离 PostgreSQL/Redis volume 和随机 loopback 端口。默认串行执行 1 次 warm-up 与 5 次 measured trial；每轮使用一个 API、PostgreSQL 16、Redis 7、两个 Worker、Demo 15 题 Mock，并固定 `lease/heartbeat/poll=30/10/1s`、Worker `max_attempts=3`、retry `base/cap=1/30s`、pool/overflow `5/5`、Run concurrency 1、backlog 4、question quantum 5、Mock delay 80 ms、input reservation 256 与 output limit 64。脚本从容器内 Settings 回读这些值，要求 PostgreSQL `max_connections >= 100`，并把只过滤 Compose project/service labels 后的 image content SHA、Host/Docker 资源、配置与数据指纹跨轮锁定；raw image ID 仅保留在 child evidence。
 
 该 profile 的最低 Host/Docker 资源分别是 8 logical CPU + 8,000,000,000 bytes RAM 和 8 CPU + 4,000,000,000 bytes memory。它描述的是一台主机、一个故障域的 Mock 控制面，不是生产部署模板；不要通过修改 profile、降低断言或在共享 GitHub-hosted runner 上追求绝对数值。Hosted CI 只验证 validator、统计和失败路径。
 

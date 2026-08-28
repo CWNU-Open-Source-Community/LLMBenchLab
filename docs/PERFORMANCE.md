@@ -69,7 +69,7 @@ worker_poll_seconds=0.15
 | 恢复参数 | `lease/heartbeat/poll=30/10/1s`；`max_attempts=3`；retry backoff `base/cap=1/30s`；shutdown grace 30 秒 |
 | Redis/连接参数 | block 1000 ms、operation timeout 1 秒；readiness DB timeout 2 秒 |
 
-Compose 通过 `LLMBENCHLAB_COMPOSE_WORKER_MAX_ATTEMPTS`、`LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_BASE_SECONDS`、`LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_CAP_SECONDS`、`LLMBENCHLAB_COMPOSE_DATABASE_POOL_SIZE` 和 `LLMBENCHLAB_COMPOSE_DATABASE_MAX_OVERFLOW` 显式映射这些资格敏感值。每个 child 还从容器内应用 Settings 回读 lease、heartbeat、poll、retry、pool 和 Redis 参数，并把 PostgreSQL `max_connections`、稳定 image ID 与主机/容器资源纳入环境指纹；任一 trial 漂移都会使整个 suite 失败。
+Compose 通过 `LLMBENCHLAB_COMPOSE_WORKER_MAX_ATTEMPTS`、`LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_BASE_SECONDS`、`LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_CAP_SECONDS`、`LLMBENCHLAB_COMPOSE_DATABASE_POOL_SIZE` 和 `LLMBENCHLAB_COMPOSE_DATABASE_MAX_OVERFLOW` 显式映射这些资格敏感值。每个 child 还从容器内应用 Settings 回读 lease、heartbeat、poll、retry、pool 和 Redis 参数，并把 PostgreSQL `max_connections`、只过滤 Compose project/service labels 后的稳定 image content SHA 与主机/容器资源纳入环境指纹；raw image ID 只作逐轮审计，Compose version、真正内容或资源漂移仍会使整个 suite 失败。
 
 ### 2.2 统计、硬门禁与 evidence
 

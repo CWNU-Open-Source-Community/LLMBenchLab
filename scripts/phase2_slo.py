@@ -583,7 +583,7 @@ def _normalize_environment(environment: Mapping[str, Any]) -> dict[str, Any]:
     expected_counts = {"postgres": 1, "redis": 1, "api": 1, "workers": 2}
     resource_keys = (
         "service",
-        "image_id",
+        "image_content_sha256",
         "memory_limit_bytes",
         "memory_swap_limit_bytes",
         "nano_cpus",
@@ -601,8 +601,16 @@ def _normalize_environment(environment: Mapping[str, Any]) -> dict[str, Any]:
             require(item.get("service") == expected_service_label, f"wrong {service} service label")
             image_id = str(item.get("image_id") or "")
             require(
-                image_id.startswith("sha256:") and len(image_id) == 71,
+                image_id.startswith("sha256:")
+                and len(image_id) == 71
+                and all(character in "0123456789abcdef" for character in image_id[7:]),
                 f"{service} image identity is missing",
+            )
+            image_content = str(item.get("image_content_sha256") or "")
+            require(
+                len(image_content) == 64
+                and all(character in "0123456789abcdef" for character in image_content),
+                f"{service} image content identity is missing",
             )
             normalized_entries.append({key: item.get(key) for key in resource_keys})
         normalized_limits[service] = sorted(
