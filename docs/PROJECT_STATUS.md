@@ -6,7 +6,7 @@
 
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
-- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计与 P2-01 单机资格已完整交付；P2-06 为 `pending_on_docs_ci`，P2-07 为 `not_started`）
+- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计、P2-01 单机资格与 P2-06 已完整交付；P2-07 为 `ready/next`，尚未实现）
 - Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（仅可信本地 MMLU-Pro/GPQA-Diamond 客观题提前切片）
 - Phase 4–6：`planned`
 
@@ -14,7 +14,7 @@
 
 `0.1.0` development baseline，REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`；尚未发布正式 Release。
 
-公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`。P2-06 实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已普通 push 并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 GitHub Actions [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 四个必需 job 全部成功；绑定该 clean SHA 的 capacity 与 9/9 acceptance 也已通过。P2-06 当前为 `pending_on_docs_ci`，只剩本次 evidence closeout 文档 commit 的 push 与精确 SHA CI，不能提前标记 `completed`。历史 P2-01 位于 [PR #2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)：实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
+公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`。P2-06 实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已普通 push 并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 GitHub Actions [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 四个必需 job 全部成功；绑定该 clean SHA 的 capacity 与 9/9 acceptance 也已通过。Evidence closeout 文档 commit [`ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6) 已 push，其精确 SHA 的 GitHub Actions [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 四个必需 job 全部成功，因此 P2-06 已完成仓库级收尾并标记为 `completed`。Phase 2 仍为 `in_progress`，P2-07 为 `ready/next`、尚未实现。历史 P2-01 位于 [PR #2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)：实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
 
 ## 已交付基线
 
@@ -41,19 +41,19 @@
 - 精确 SHA `665244e…` 的增强 capacity 使用有限 policy、PostgreSQL 16、Redis 7 与两个 Worker 完成：并发 backlog 精确为 4 个 `202` + 2 个 typed `429`，cooperative yield 与跨 Model 公平顺序均有 durable audit 证据，最终 18 Runs/270 Responses/271 ledger/1229 audit 对账且无 active/reserved/overdrawn 漂移。
 - P2-01 的 `P2-local-control-plane-v2` 已在干净 SHA `b6a35fe…` 从零执行 1 次 warm-up + 恰好 5 次 measured trial，本次 invocation 的 `discarded_trials=0`；四个 cell、23/23 SLO 与每轮 hard invariant 全部通过，容量模型为 `qualified`。aggregate SHA-256 为 `a76d167b…d0d9`，六轮均精确完成 22 Runs/330 Responses/330 QuestionExecutions/331 reservations，并清理本项目容器、卷、网络和唯一 build image。历史 v1 aggregate `f993c11f…e3b2` 继续保持 `failed/not_qualified`。
 
-## P2-06 实现（`pending_on_docs_ci`）
+## P2-06 实现（`completed`）
 
 - [ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 已接受；实现 SHA `9a20676dcf545040782f04c166205d0043345753` 将 Alembic head 扩展到 `20260828_0005`。`worker_processes` 保存 generation 级 DB UTC `started/seen/scan/claim/progress/lease-heartbeat/stop`，主循环只在真实事件后合并刷新；JSON metrics 公开 expected/registered/live/stalled/shortfall 与最近时间，不公开 Worker/generation ID。dependency probe 固定声明 `main_loop_progress=not_checked`。
 - `GET /api/v1/metrics/prometheus` 已实现固定 Prometheus text `0.0.4` gauge：一个 DB-time 读快照、15 分钟 typed-audit 窗口、1 小时 Run latency、硬读取上限、固定 enum label、整次 fail-closed 与每 API 进程 single-flight。`deploy/observability/` 提供固定八条规则和安全抓取示例；仓库不部署 Prometheus、Alertmanager 或通知发送器。
 - `llmbenchlab-audit-retention archive|verify|reconcile|restore|delete` 已实现 canonical JSONL v1、严格权限/大小/行/schema/hash/rollup 校验、离线 verify、精确 digest 绑定、默认不删除、双方言事务与 commit outcome 分类。Archive 是敏感运维文件，hash 只用于完整性/绑定，不是签名或 WORM，也不替代 P2-07 的数据库+keyring 备份。
 - importer 当前合同为 `0005` 的 13 表精确 count/PK/content digest；live generation 在源 preflight 被拒绝，stopped/stale facts 可复制，终审又补强 committed target canonical integrity postverify。`0005 -> 0004` 在 `worker_processes` 非空时于 DDL 前拒绝，原有 `0004` governance/audit downgrade guard 继续保留。
 - 生产日志源已统一治理：应用日志消息必须是无格式参数字面量，结构化字段按白名单和有限数值输出，第三方动态消息固定化且不能通过 allowlisted extra 注入，raw Uvicorn access handler 关闭。Archive 终审补充了 FIFO/非普通文件拒绝及 decode 前行数上限；retention 零行 mutation 仍须 postverify，PostgreSQL mutation 保持 advisory/row lock。
-- 上述实现的全部实现门禁已完成：合并定向套件、`make lint`（Ruff 152 files、ESLint、TypeScript）、`make test`（后端 `916 passed, 33 skipped`、前端 `38 passed`）、Mock smoke（`1 passed, 7 deselected`）、临时 PostgreSQL 16/Redis 7 migration/check 与真实 integration（`33 passed, 0 skipped`）、隔离 SQLite migration/check、frontend build、Compose config、八规则 `promtool` 和修复后 76-file staged 技术/安全终审均通过；实现 SHA 已 push，精确 SHA run `33164609388` 4/4 成功。Clean acceptance `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-92e173eeee28/evidence.json` 的 SHA-256 为 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`，9/9 通过，Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0`，cleanup C/V/N 全空。Clean capacity `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-ca5673061b0f/evidence.json` 的 SHA-256 为 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`；1W/2W/burst QPS=`7.267474/12.962228/9.333604`、wall=`8.255963/4.628834/6.428385s`，最终 18 Runs/270 Responses/270 question executions/271 reservations/1230 audit，0 question error/drift/duplicate/PEL/lag，Worker expected=2、shortfall=0，cleanup C/V/N/image 全零且 image counters=`1/1/0/0`。两份 evidence 均为 `dirty=false` 并绑定 `9a20676…`；这是 Mock-only、非 SLO。此前 dirty acceptance/capacity 继续作为历史证据保留。默认用户 SQLite 尚未在 head，直接 `alembic check` 失败后按保护原则未擅自迁移。
+- 上述实现的全部实现门禁已完成：合并定向套件、`make lint`（Ruff 152 files、ESLint、TypeScript）、`make test`（后端 `916 passed, 33 skipped`、前端 `38 passed`）、Mock smoke（`1 passed, 7 deselected`）、临时 PostgreSQL 16/Redis 7 migration/check 与真实 integration（`33 passed, 0 skipped`）、隔离 SQLite migration/check、frontend build、Compose config、八规则 `promtool` 和修复后 76-file staged 技术/安全终审均通过；实现 SHA 已 push，精确 SHA run `33164609388` 4/4 成功。Clean acceptance `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-92e173eeee28/evidence.json` 的 SHA-256 为 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`，9/9 通过，Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0`，cleanup C/V/N 全空。Clean capacity `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-ca5673061b0f/evidence.json` 的 SHA-256 为 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`；1W/2W/burst QPS=`7.267474/12.962228/9.333604`、wall=`8.255963/4.628834/6.428385s`，最终 18 Runs/270 Responses/270 question executions/271 reservations/1230 audit，0 question error/drift/duplicate/PEL/lag，Worker expected=2、shortfall=0，cleanup C/V/N/image 全零且 image counters=`1/1/0/0`。两份 evidence 均为 `dirty=false` 并绑定 `9a20676…`；这是 Mock-only、非 SLO。此前 dirty acceptance/capacity 继续作为历史证据保留。Evidence closeout 文档 commit `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 已 push，精确 SHA run `33165775037` 4/4 成功，P2-06 仓库级收尾完成。默认用户 SQLite 尚未在 head，直接 `alembic check` 失败后按保护原则未擅自迁移。
 
-## 仍未完成
+## 状态与后续
 
-- P2-06：状态为 `pending_on_docs_ci`，实现、clean-SHA Compose evidence、push 和实现精确 SHA CI 全部完成；只剩本 evidence closeout 文档 commit 的 push 与精确 SHA CI，因此仍不能标记 `completed`。
-- P2-07：状态为 `not_started`。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的完整运维演练尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。
+- P2-06：状态为 `completed`；实现、clean-SHA Compose evidence、实现 commit 与 evidence closeout 文档 commit 的 push 和精确 SHA CI 均已完成。
+- P2-07：状态为 `ready/next`，尚未实现。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的完整运维演练尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
 ## 已知边界与风险
@@ -88,7 +88,7 @@
 | P2-06 补充静态检查 | 过宽 `scripts/` Ruff 命令暴露 93 条既有 modernization 告警；`--select E,F,I` 通过 | 如实保留首次结果，不把范围外历史告警归为本次回归 |
 | P2-06 staged 技术/安全终审 | structured-extra High 与 Worker `__main__` logger Medium 已修复；76-file index 为 0 Blocker/High/Medium；hydration/import integrity 目标集 `67 passed` | 已进入实现 SHA `9a20676…` |
 | P2-06 实现远程 CI | PR #3；`9a20676dcf545040782f04c166205d0043345753` 的 run `33164609388` 4/4 | 实现精确 SHA 门禁完成 |
-| P2-06 剩余门禁 | 本 evidence closeout 文档 commit 的 push 与精确 SHA CI | 当前 `pending_on_docs_ci`；不得标记 `completed` |
+| P2-06 evidence 文档远程 CI | `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 run `33165775037` 4/4 | 精确文档 SHA 门禁完成；P2-06 为 `completed` |
 | P2-01 实现远程 CI | `b6a35fe…` run `33146681285` 4/4 | 精确实现 SHA 全绿；PR #2 已于 2026-08-28 合并 |
 | P2-01 证据文档收尾 CI | `875f13a…` run `33150080341` 4/4 | 精确文档 SHA 全绿；P2-01 仓库级收尾完成 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
@@ -117,4 +117,4 @@
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。P2-06 当前仅剩 evidence closeout 文档 commit 的 push 与精确 SHA CI；其通过前状态保持 `pending_on_docs_ci`。之后才可单独启动仍为 `not_started` 的 P2-07 数据库/keyring backup/restore、Redis 重建、告警处置和剩余故障演练。Phase 2 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。P2-06 已完成仓库级收尾；下一任务为 `ready/next`、尚未实现的 P2-07 数据库/keyring backup/restore、Redis 重建、告警处置和剩余故障演练。Phase 2 继续保持 `in_progress`。
