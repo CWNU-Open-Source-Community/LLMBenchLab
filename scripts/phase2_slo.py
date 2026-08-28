@@ -807,7 +807,7 @@ def _validate_measurement(measurement: Mapping[str, Any], expected_name: str) ->
     require(wall_duration > 0, f"{expected_name} wall duration was zero")
     recomputed_qps = 60 / wall_duration
     require(
-        math.isclose(observed_qps, recomputed_qps, rel_tol=0, abs_tol=1.1e-6),
+        observed_qps == round(recomputed_qps, 6),
         f"{expected_name} throughput disagrees with completed questions / wall duration",
     )
     require(

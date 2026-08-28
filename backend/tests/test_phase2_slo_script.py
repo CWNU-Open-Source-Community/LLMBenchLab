@@ -641,6 +641,33 @@ def test_child_validator_rejects_commit_environment_configuration_and_data_drift
         )
 
 
+def test_child_validator_requires_qps_from_serialized_wall_duration() -> None:
+    child = _happy_child()
+    multi = next(
+        measurement
+        for measurement in child["measurements"]
+        if measurement["name"] == "configured_multi_worker_baseline"
+    )
+    multi["wall_duration_seconds"] = 5.188009
+    multi["throughput"]["questions_per_second"] = round(60 / 5.188009, 6)
+
+    script.validate_child_evidence(
+        child,
+        expected_commit="d" * 40,
+        expected_hashes=_expected_hashes(),
+        expected_order="single_then_multi",
+    )
+
+    multi["throughput"]["questions_per_second"] -= 0.000001
+    with pytest.raises(script.QualificationFailure, match="throughput disagrees"):
+        script.validate_child_evidence(
+            child,
+            expected_commit="d" * 40,
+            expected_hashes=_expected_hashes(),
+            expected_order="single_then_multi",
+        )
+
+
 def _evaluated_trial() -> dict[str, Any]:
     measurements: dict[str, Any] = {}
     for name in script.MEASUREMENT_NAMES:

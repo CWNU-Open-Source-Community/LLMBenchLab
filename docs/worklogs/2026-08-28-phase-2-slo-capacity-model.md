@@ -86,15 +86,16 @@
 - 单元测试覆盖统计、CLI、strict JSON/path、吞吐/恢复重算、资源/配置漂移、账本投影、child/validator 失败留证、核心 run-suite 编排、Git override、进程组信号、环境 allowlist 和秘密 canary。
 - 提交前对抗性终审额外修正真实 producer/consumer 合同：capacity evidence 现在保留 Demo `slug/schema_version`；非默认合法 workload 的最终 Run/Response/reservation/audit 计数由 `runs_per_phase/backlog_limit` 推导，正式 wrapper 仍锁定 18/270/271。
 - 容量公式不再误用 Mock 固定为 1ms 的兼容 `Response.question_latency_ms`，而是显式使用 `0.08s × quantum 5 = 0.4s` 的 Mock slice 服务预算；所有扫描/接管公式统一并记录 `delta_db=1s`。lease fault 在 pause 后任一路径异常都会 best-effort unpause，避免普通失败留下冻结 Worker。
+- 第一次 clean-SHA warm-up 暴露 producer 先用未舍入 wall time 算吞吐、再分别把两者舍入到 6 位，validator 无法从序列化事实精确复算。producer 现先冻结 6 位 wall time，再由它计算 6 位吞吐；validator 要求与 `round(completed_questions / wall_duration, 6)` 精确一致，并增加真实边界回归。
 
 ## 实际验证
 
-- `cd backend && uv run pytest -q tests/test_phase2_capacity_script.py tests/test_phase2_slo_script.py`：96 passed。
+- `cd backend && uv run pytest -q tests/test_phase2_capacity_script.py tests/test_phase2_slo_script.py`：97 passed。
 - `cd backend && uv run ruff check ...` 与 `ruff format --check ...`：通过。
 - `python3 -I scripts/phase2_capacity.py --self-check-only`、`python3 -I scripts/phase2_slo.py --self-check-only`：通过。
 - `python3 -m py_compile scripts/phase2_capacity.py scripts/phase2_slo.py scripts/phase2_acceptance.py`：通过。
 - `make lint`：通过；Ruff、Ruff format check、ESLint 与 TypeScript typecheck 均为零失败。
-- `make test`：通过；后端 688 passed、29 skipped，前端 38/38 passed。
+- `make test`：通过；后端 689 passed、29 skipped，前端 38/38 passed。
 - `make smoke`：通过；1 passed、7 deselected，完全使用 Mock。
 - `cd frontend && npm run build`：通过；保留既有单个大于 500 kB 的 chunk warning。
 - `docker compose config --quiet`：通过。
@@ -102,12 +103,14 @@
 - 当前候选执行 `make phase2-capacity`：通过；脏树回归 evidence 为 `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-fc7ba5acea65/evidence.json`，SHA-256 `611f70cdec36c9bf5a4aa744e0689ac1e934382a42b161f77e734937a828d4bf`，cleanup 无残留。它记录 `dirty=true`，只证明旧单轮合同兼容，不是正式资格证据。
 - 当前候选执行 `make phase2-acceptance`：9/9 通过；脏树回归 evidence 为 `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-1255ad054266/evidence.json`，SHA-256 `f81a0f84f8279c3e876f7955250861219ab9524cd2feea72656b351ef7283c74`，cleanup 无残留。它同样不替代 clean-SHA 资格 evidence。
 - 两次 Compose 回归后按 project label 复核容器、网络与 volume：均无残留；evidence 凭据模式扫描无命中。
+- 实现 commit `d5a1bd3aa556e84ed88bb17c028b847c8d51c129` 的第一次正式 suite 在 warm-up 后按合同失败，未产生 measured sample：aggregate `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T034014Z-2df252f4bbdb/evidence.json`，SHA-256 `b5d7314eb72ba6bcf6f41cfa042eec46f1123dfbeda76b6c53c7f99e9f4af7ab`；失败原因为序列化 wall time 与旧吞吐舍入顺序不一致。child 自身功能/cleanup 为 passed，project 容器、volume、network 现场复核均为空，artifact 凭据模式扫描无命中；该失败证据永久披露，不计入资格样本。
+- 同一 `d5a1bd3` 的 GitHub Actions run `33139542534` 已完成且 4/4 job success；它证明远程正确性门禁，不会把上述本地正式资格失败变成通过。吞吐合同修复仍须形成新 SHA 并重新走 CI。
 - `git diff --check`：通过。
 - 过程中的两条非产品失败已如实保留：曾在 `frontend/` 误执行根目录 `make smoke`；默认本地 SQLite 的 Alembic marker/schema 与 head 漂移，因此未修改用户 DB，改用临时空 SQLite 验证通过。
 - 提交前曾把整个历史 `phase2_acceptance.py` 额外纳入 backend 的现代化 Ruff 规则，得到 98 个既存风格告警；该脚本不在项目 `make lint` 的 Ruff 文件集内，本切片也不机械重写其无关代码。其窄范围 SQL 增量已由 `py_compile`、脚本单测和真实 9/9 acceptance 验证；新增/主要改动的 capacity/SLO 脚本及测试单独 Ruff/format check 通过。
 
 ## 已知问题与下一步
 
-- 尚未冻结实现 commit、push 或执行该精确 SHA 的真实 1+5 Compose qualification；当前不得声称 P2-01 完成。
+- 修正吞吐序列化合同后尚需形成并 push 新 commit，再在该精确 SHA 上从新的 warm-up 开始完整执行 1+5 Compose qualification；当前不得声称 P2-01 完成。
 - 本地 evidence 能证明单次 invocation 未丢轮，不能证明不存在已删除的更早 suite；正式记录必须披露本次所有资格尝试。
 - P2-06/P2-07 等正式 closure 仍未完成，Phase 2 保持 `in_progress`。

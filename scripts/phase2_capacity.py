@@ -1418,6 +1418,12 @@ WHERE s.datname = current_database();
             "measurement Provider-attempt ledger delta was not exactly one actual per question",
             attempt_delta,
         )
+        serialized_wall_duration = round(elapsed_seconds, 6)
+        self.require(
+            serialized_wall_duration > 0,
+            "measurement wall duration rounded to zero",
+            elapsed_seconds,
+        )
         return {
             "name": name,
             "workers": workers,
@@ -1429,10 +1435,10 @@ WHERE s.datname = current_database();
                 "duration_seconds": submissions["duration_seconds"],
                 "request_latency_seconds": submissions["request_latency_seconds"],
             },
-            "wall_duration_seconds": round(elapsed_seconds, 6),
+            "wall_duration_seconds": serialized_wall_duration,
             "throughput": {
-                "runs_per_second": round(len(completed) / elapsed_seconds, 6),
-                "questions_per_second": round(total_questions / elapsed_seconds, 6),
+                "runs_per_second": round(len(completed) / serialized_wall_duration, 6),
+                "questions_per_second": round(total_questions / serialized_wall_duration, 6),
                 "completed_runs": len(completed),
                 "completed_questions": total_questions,
             },

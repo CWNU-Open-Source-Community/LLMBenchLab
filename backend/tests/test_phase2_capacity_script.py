@@ -497,6 +497,9 @@ def test_phase_result_adds_anonymous_raw_latency_samples_without_changing_summar
         **script.distribution([80.1234567, 90]),
         "samples": [80.123457, 90.0],
     }
+    assert result["throughput"]["questions_per_second"] == round(
+        2 / result["wall_duration_seconds"], 6
+    )
     assert "run-a" not in str(result["latency_seconds"])
 
 

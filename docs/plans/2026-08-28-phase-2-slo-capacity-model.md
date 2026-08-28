@@ -83,9 +83,9 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 
 | 验收项 | 命令或检查 | 预期结果 | 实际结果 |
 | --- | --- | --- | --- |
-| SLO/capacity 单元测试 | `cd backend && uv run pytest -q tests/test_phase2_capacity_script.py tests/test_phase2_slo_script.py` | 全部通过 | 96 passed |
+| SLO/capacity 单元测试 | `cd backend && uv run pytest -q tests/test_phase2_capacity_script.py tests/test_phase2_slo_script.py` | 全部通过 | 97 passed |
 | 静态门禁 | `make lint` | 后端/前端 lint、format、typecheck 全通过 | 已通过 |
-| 全量测试 | `make test` | 后端与前端零失败 | 后端 688 passed、29 skipped；前端 38/38 passed |
+| 全量测试 | `make test` | 后端与前端零失败 | 后端 689 passed、29 skipped；前端 38/38 passed |
 | 离线 smoke | `make smoke` | Mock-only smoke 通过 | 1 passed、7 deselected |
 | 既有 capacity 回归 | `make phase2-capacity` | v1 单轮合同与 cleanup 通过 | 已通过；当前脏树兼容性证据，不能用于正式资格 |
 | 完整 acceptance 回归 | `make phase2-acceptance` | 既有 9 类场景与 cleanup 通过 | 9/9 通过；当前脏树兼容性证据，不能用于正式资格 |
@@ -93,9 +93,9 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 | Alembic metadata | 独立临时 SQLite `alembic upgrade head && alembic check` | 无未迁移 schema diff | 已通过；未改本地默认数据库 |
 | Compose 配置 | `docker compose config --quiet` | exit 0 | 已通过 |
 | harness 自检 | `python3 -I scripts/phase2_slo.py --self-check-only` | 固定合同与安全边界通过 | 已通过 |
-| 真实多轮资格 | `make phase2-slo` | 1 warm-up + 5 measured，所有 SLO/invariant/cleanup 通过 | 待实现 commit 干净后执行 |
+| 真实多轮资格 | `make phase2-slo` | 1 warm-up + 5 measured，所有 SLO/invariant/cleanup 通过 | 首次 clean-SHA 尝试在 warm-up 因吞吐舍入合同不一致 fail closed；0 measured，修正后须从头重跑 |
 | diff/secret | `git diff --check`、staged secret scan | 无无关改动、秘密或 artifact | `git diff --check` 已通过；staged scan 待提交前执行 |
-| 远程门禁 | `gh run view <run-id>` | 精确最终 SHA 的必需 job 全成功 | 待执行 |
+| 远程门禁 | `gh run view <run-id>` | 精确最终 SHA 的必需 job 全成功 | `d5a1bd3` run `33139542534` 4/4 success；吞吐修复后的最终 SHA 仍待重跑 |
 
 ## Rollback
 
@@ -123,3 +123,4 @@ Phase 2 已交付数据库权威的可靠 Worker 与治理/审计切片。精确
 | 2026-08-28 | discovery | 既有 enhanced capacity 只有单轮观测，明确 `production_slo=false`，但已具备完整隔离 Compose、fault、fairness 和 reconciliation 基础。 | 复用单轮 harness，通过外层串行多轮资格工具保持每轮故障覆盖与 cleanup。 |
 | 2026-08-28 | decision | 本切片只做 P2-01，不把 Exporter/retention/backup 混入同一 commit。 | Phase 2 继续 `in_progress`，后续按 P2-06/P2-07 独立交付。 |
 | 2026-08-28 | decision | 正式资格预登记 1 warm-up + 5 measured，并使用部署计时 `30/10/1s`；加速 `6/2/0.15s` 不作为正式证据。 | 真实候选运行约十余分钟；Hosted CI 不门禁绝对数值，只验证脚本和正确性。 |
+| 2026-08-28 | discovery | 首次 clean-SHA warm-up 发现 qps 与 wall time 独立舍入后无法由序列化 evidence 精确复算，suite 在 0 measured 时 fail closed。 | 保留失败 aggregate；producer 改为先冻结 wall time、再计算 qps，并新增精确边界测试后重新提交与整套重跑。 |
