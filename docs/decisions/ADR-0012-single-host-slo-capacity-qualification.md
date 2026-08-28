@@ -8,6 +8,7 @@
 - **Clarifies**: [ADR-0005](ADR-0005-durable-task-execution.md) 的本地可靠执行支持边界、[ADR-0009](ADR-0009-database-governance-audit-fair-scheduling.md) 的容量外推边界
 - **Preserves**: [ADR-0010](ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](ADR-0011-confirmed-pre-send-release-retry-generation.md)
 - **Amended by**: [ADR-0013](ADR-0013-stable-image-content-fingerprint.md) 修正跨隔离 Compose project 的镜像身份口径
+- **Superseded for future qualification by**: [ADR-0014](ADR-0014-dual-backlog-slo-profile.md)；v1 合同和失败 evidence 保持历史事实
 
 ## Context
 

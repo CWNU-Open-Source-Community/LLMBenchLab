@@ -130,13 +130,25 @@ def _latency_distribution(value: float, *, count: int = 4) -> dict[str, object]:
     }
 
 
+def _measurement_run_ids(name: str) -> list[str]:
+    offset = {
+        "single_worker_reference": 100,
+        "configured_multi_worker_baseline": 200,
+        "warmed_pause_burst_and_drain": 300,
+        "cold_start_burst_and_drain": 400,
+    }[name]
+    return [f"00000000-0000-4000-8000-{offset + index:012x}" for index in range(1, 5)]
+
+
 def _measurement(name: str) -> dict[str, Any]:
-    burst = name == "bounded_queue_burst_and_drain"
+    burst = name in script.BURST_MEASUREMENT_NAMES
+    run_ids = _measurement_run_ids(name)
     status_counts = {"202": 4, "429": 2} if burst else {"202": 4}
     questions_per_second = {
         "single_worker_reference": 7.0,
         "configured_multi_worker_baseline": 13.0,
-        "bounded_queue_burst_and_drain": 8.0,
+        "warmed_pause_burst_and_drain": 8.0,
+        "cold_start_burst_and_drain": 8.0,
     }[name]
     measurement: dict[str, Any] = {
         "name": name,
@@ -168,7 +180,15 @@ def _measurement(name: str) -> dict[str, Any]:
         "cooperative_scheduling": {
             "all_runs_dispatched_more_than_once": True,
             "all_runs_yielded": True,
-            "per_run": [{"dispatch_count": 3, "cooperative_yield_events": 2} for _ in range(4)],
+            "per_run": [
+                {
+                    "run_id": run_id,
+                    "dispatch_count": 3,
+                    "claim_events": 3,
+                    "cooperative_yield_events": 2,
+                }
+                for run_id in run_ids
+            ],
         },
         "latency_seconds": {
             "queue": _latency_distribution(1.0),
@@ -178,9 +198,38 @@ def _measurement(name: str) -> dict[str, Any]:
         "question_latency_ms": _latency_distribution(1.0, count=60),
         "database": {"task_metrics": {"final_database_gauges": _zero_gauges()}},
         "queue": {"after": {"group": {"pending": 0, "lag": 0}}},
+        "run_ids": run_ids,
     }
     if burst:
+        workers = [
+            {
+                "container_id": str(index) * 64,
+                "hostname": f"{name}-worker-{index}",
+            }
+            for index in range(1, 3)
+        ]
+        claim_times = [
+            "2026-08-28T00:00:02.100000Z",
+            "2026-08-28T00:00:02.200000Z",
+            "2026-08-28T00:00:02.300000Z",
+            "2026-08-28T00:00:02.400000Z",
+        ]
+        claims = [
+            {
+                "run_id": run_id,
+                "worker_id": (
+                    f"worker:{workers[index % 2]['hostname']}:{index % 2 + 1}:"
+                    f"00000000-0000-4000-8000-00000000000{index % 2 + 1}"
+                ),
+                "occurred_at": claim_times[index],
+            }
+            for index, run_id in enumerate(run_ids)
+        ]
         measurement.update(
+            mode="exact_backlog_limit_concurrent_202_429_then_drain",
+            barrier=("warmed_pause" if name == "warmed_pause_burst_and_drain" else "cold_start"),
+            configured_backlog_limit=4,
+            expected_status_counts=status_counts,
             observed_status_counts=status_counts,
             typed_rejections=[
                 {
@@ -190,10 +239,166 @@ def _measurement(name: str) -> dict[str, Any]:
                 for _ in range(2)
             ],
             accepted_runs_preserved=True,
+            accepted_run_ids=list(run_ids),
             backlog_after_drain=_zero_gauges(),
             backlog_drain_seconds=6.0,
+            worker_participation={
+                "validated_workers": workers,
+                "claims": claims,
+                "distinct_claim_workers": 2,
+                "all_claim_workers_validated": True,
+            },
+            worker_state_after_restart=[
+                {
+                    "id": worker["container_id"],
+                    "hostname": worker["hostname"],
+                    "project": "llmbenchlab-p2-aaaaaaaaaaaa",
+                    "service": "worker",
+                    "status": "running",
+                    "health": "healthy",
+                }
+                for worker in workers
+            ],
+            timing={
+                "clock_domains": {
+                    "monotonic_seconds": "process_monotonic",
+                    "durable_utc": "database_utc",
+                },
+                "monotonic_seconds": {
+                    "suspend": 0.2,
+                    "backlog_build": 1.5,
+                    "restore_command": 0.25,
+                    "drain": 6.0,
+                },
+                "durable_utc": {
+                    "suspend_completed_at": "2026-08-28T00:00:00Z",
+                    "backlog_ready_at": "2026-08-28T00:00:01Z",
+                    "restore_completed_at": "2026-08-28T00:00:02Z",
+                    "first_claim_at": claim_times[0],
+                    "all_workers_first_claim_at": claim_times[1],
+                    "claim_or_yield_events": [
+                        *[
+                            {
+                                "run_id": run_id,
+                                "event_type": "run_claimed",
+                                "occurred_at": claim_times[index],
+                            }
+                            for index, run_id in enumerate(run_ids)
+                        ],
+                        *[
+                            {
+                                "run_id": run_id,
+                                "event_type": "run_yielded",
+                                "occurred_at": f"2026-08-28T00:00:02.{index + 5}00000Z",
+                            }
+                            for index, run_id in enumerate(run_ids)
+                        ],
+                    ],
+                    "run_first_claim_to_finish": [
+                        {
+                            "run_id": run_id,
+                            "first_claim_at": claim_times[index],
+                            "finished_at": f"2026-08-28T00:00:06.{index + 1}00000Z",
+                            "duration_seconds": 4.0,
+                        }
+                        for index, run_id in enumerate(run_ids)
+                    ],
+                },
+                "durable_seconds": {
+                    "backlog_ready_to_first_claim": 1.1,
+                    "backlog_ready_to_all_workers_first_claim": 1.2,
+                    "adjacent_claim_or_yield_gap": _latency_distribution(0.1, count=7),
+                    "first_claim_to_finish": _latency_distribution(4.0),
+                },
+            },
         )
     return measurement
+
+
+FAIRNESS_HIGH_MODEL_ID = "10000000-0000-4000-8000-000000000001"
+FAIRNESS_LOW_MODEL_ID = "10000000-0000-4000-8000-000000000002"
+
+
+def _fairness_evidence() -> dict[str, Any]:
+    high_model_id = FAIRNESS_HIGH_MODEL_ID
+    low_model_id = FAIRNESS_LOW_MODEL_ID
+    high_run_ids = [f"20000000-0000-4000-8000-{index:012x}" for index in range(1, 4)]
+    low_run_id = "20000000-0000-4000-8000-000000000004"
+    all_run_ids = [*high_run_ids, low_run_id]
+    event_specs: list[tuple[str, str, str]] = []
+    for round_number in range(3):
+        for index, run_id in enumerate(all_run_ids, start=1):
+            event_specs.append(
+                (
+                    run_id,
+                    "run_claimed",
+                    f"2026-08-28T00:00:0{round_number * 2 + 1}.{index}00000Z",
+                )
+            )
+        event_type = "run_yielded" if round_number < 2 else "run_terminal"
+        for index, run_id in enumerate(all_run_ids, start=5):
+            event_specs.append(
+                (
+                    run_id,
+                    event_type,
+                    f"2026-08-28T00:00:0{round_number * 2 + 1}.{index}00000Z",
+                )
+            )
+    ordered_events = [
+        {
+            "event_id": f"30000000-0000-4000-8000-{index:012x}",
+            "event_type": event_type,
+            "occurred_at": occurred_at,
+            "run_id": run_id,
+            "role": "low_volume" if run_id == low_run_id else "high_volume",
+        }
+        for index, (run_id, event_type, occurred_at) in enumerate(event_specs, start=1)
+    ]
+    observation_fields = {
+        "status": "pending",
+        "completed_questions": 5,
+        "dispatch_count": 1,
+        "last_scheduled_at": "2026-08-28T00:00:01Z",
+    }
+    return {
+        "name": "cross_model_fair_quantum_ordering",
+        "question_quantum": 5,
+        "configured_backlog_limit": 4,
+        "high_volume_model_id": high_model_id,
+        "low_volume_model_id": low_model_id,
+        "high_volume_run_ids": high_run_ids,
+        "low_volume_run_id": low_run_id,
+        "ordering_evidence": {
+            "low_volume_claim_observed": True,
+            "low_volume_slice_observed": True,
+            "low_claim_before_high_backlog_drained": True,
+            "high_volume_incomplete_at_low_slice": 3,
+            "observation": {
+                "low_run": {
+                    "id": low_run_id,
+                    "model_id": low_model_id,
+                    **observation_fields,
+                    "status": "running",
+                },
+                "high_runs": [
+                    {"id": run_id, "model_id": high_model_id, **observation_fields}
+                    for run_id in high_run_ids
+                ],
+            },
+            "ordered_events": ordered_events,
+        },
+        "terminal_runs": [
+            {
+                "id": run_id,
+                "model_id": low_model_id if run_id == low_run_id else high_model_id,
+                "status": "completed",
+                "completed_questions": 15,
+                "dispatch_count": 3,
+            }
+            for run_id in (*high_run_ids, low_run_id)
+        ],
+        "backlog_after_drain": _zero_gauges(),
+    }
 
 
 def _expected_hashes() -> dict[str, str]:
@@ -215,23 +420,24 @@ def _happy_child(
     reconciliation_database.update(
         policies=2,
         active_policies=1,
-        runs=18,
-        responses=270,
-        distinct_run_question_responses=270,
-        question_executions=270,
-        reservations=271,
+        runs=22,
+        responses=330,
+        distinct_run_question_responses=330,
+        question_executions=330,
+        reservations=331,
         failed_attempt_count=1,
-        reservation_states={"settled_actual": 270, "settled_conservative": 1},
-        audit_events=813,
+        reservation_states={"settled_actual": 330, "settled_conservative": 1},
+        audit_events=993,
         audit_event_types={
-            "provider_attempt_reserved": 271,
-            "provider_attempt_send_started": 271,
-            "provider_attempt_settled": 271,
+            "provider_attempt_reserved": 331,
+            "provider_attempt_send_started": 331,
+            "provider_attempt_settled": 331,
         },
     )
     hashes = _expected_hashes()
     return {
         "schema_version": script.CAPACITY_EVIDENCE_SCHEMA,
+        "project_name": "llmbenchlab-p2-aaaaaaaaaaaa",
         "status": "passed",
         "offline_only": True,
         "production_slo": False,
@@ -254,12 +460,14 @@ def _happy_child(
                 **script.EXPECTED_DEMO,
             },
             "model": {
+                "id": FAIRNESS_HIGH_MODEL_ID,
                 "provider_type": "mock",
                 "enabled": True,
                 "api_key_env": None,
                 "base_url": None,
             },
             "fairness_low_volume_model": {
+                "id": FAIRNESS_LOW_MODEL_ID,
                 "provider_type": "mock",
                 "enabled": True,
                 "api_key_env": None,
@@ -284,19 +492,7 @@ def _happy_child(
             "real_provider_credentials_removed": list(script.PROVIDER_CREDENTIAL_ENV_KEYS),
         },
         "measurements": [_measurement(name) for name in script.MEASUREMENT_ORDERS[order]],
-        "fairness": {
-            "name": "cross_model_fair_quantum_ordering",
-            "question_quantum": 5,
-            "configured_backlog_limit": 4,
-            "ordering_evidence": {
-                "low_volume_claim_observed": True,
-                "low_volume_slice_observed": True,
-                "low_claim_before_high_backlog_drained": True,
-                "high_volume_incomplete_at_low_slice": 1,
-            },
-            "terminal_runs": [{"status": "completed", "completed_questions": 15} for _ in range(4)],
-            "backlog_after_drain": _zero_gauges(),
-        },
+        "fairness": _fairness_evidence(),
         "faults": [
             {
                 "name": "lease_owner_sigkill_and_expiry_recovery",
@@ -364,8 +560,17 @@ def _happy_child(
             "remaining_containers": [],
             "remaining_project_volumes": [],
             "remaining_project_networks": [],
+            "image_cleanup_status": "passed",
+            "project_image_candidates": 1,
+            "removed_project_images": 1,
+            "retained_shared_project_images": 0,
+            "remaining_project_images": 0,
         },
     }
+
+
+def _burst_measurement(child: dict[str, Any], name: str) -> dict[str, Any]:
+    return next(measurement for measurement in child["measurements"] if measurement["name"] == name)
 
 
 def test_sample_statistics_use_student_t_and_report_variation() -> None:
@@ -440,8 +645,8 @@ def test_slo_cli_defaults_bounds_and_self_check_mode() -> None:
     assert args.self_check_only is False
     assert script.parse_arguments(["--self-check-only"]).self_check_only is True
 
-    for count in (4, 11):
-        with pytest.raises(script.QualificationFailure, match="between 5 and 10"):
+    for count in (4, 6):
+        with pytest.raises(script.QualificationFailure, match="exactly 5"):
             script.parse_arguments(["--measured-trials", str(count)])
     for timeout in (299, 3601):
         with pytest.raises(script.QualificationFailure, match="between 300 and 3600"):
@@ -456,11 +661,71 @@ def test_self_check_freezes_mock_profile_and_make_entrypoint() -> None:
     assert review["profile"] == script.PROFILE_NAME
     assert review["warmup_trials"] == 1
     assert review["default_measured_trials"] == 5
-    assert review["measured_trial_bounds"] == [5, 10]
+    assert review["fixed_measured_trials"] == 5
+    assert review["student_t_sample_sizes"] == [5]
     assert review["fixed_configuration"]["mock_generation_delay_seconds"] == 0.08
     assert review["production_sla"] is False
     assert "phase2-slo:" in makefile
     assert "python3 -I scripts/phase2_slo.py" in makefile
+
+
+@pytest.mark.parametrize("count", [4, 6])
+def test_formal_profile_rejects_non_five_order_and_evaluation_samples(count: int) -> None:
+    with pytest.raises(script.QualificationFailure, match="exactly 5"):
+        script.balanced_measurement_orders(seed=20260828, measured_trials=count)
+    with pytest.raises(script.QualificationFailure, match="exactly 5"):
+        script.evaluate_suite([_evaluated_trial() for _ in range(count)])
+
+
+def test_v2_contract_freezes_schema_profile_four_cells_and_dual_thresholds() -> None:
+    assert script.EVIDENCE_SCHEMA == "llmbenchlab-phase2-slo-evidence-v2"
+    assert script.CAPACITY_EVIDENCE_SCHEMA == "llmbenchlab-phase2-capacity-evidence-v2"
+    assert script.PROFILE_NAME == "P2-local-control-plane-v2"
+    assert script.EXPECTED_CONFIGURATION["qualification_profile"] == script.PROFILE_NAME
+    assert {
+        field: script.EXPECTED_CONFIGURATION[field]
+        for field in (
+            "timeout_seconds",
+            "lease_seconds",
+            "heartbeat_seconds",
+            "worker_poll_seconds",
+        )
+    } == {
+        "timeout_seconds": 180.0,
+        "lease_seconds": 30.0,
+        "heartbeat_seconds": 10.0,
+        "worker_poll_seconds": 1.0,
+    }
+    assert script.MEASUREMENT_ORDERS == {
+        "single_then_multi": (
+            "single_worker_reference",
+            "configured_multi_worker_baseline",
+            "warmed_pause_burst_and_drain",
+            "cold_start_burst_and_drain",
+        ),
+        "multi_then_single": (
+            "configured_multi_worker_baseline",
+            "single_worker_reference",
+            "warmed_pause_burst_and_drain",
+            "cold_start_burst_and_drain",
+        ),
+    }
+    assert script.SLO_THRESHOLDS["latency_p95_seconds"]["warmed_pause_burst_and_drain"] == {
+        "queue": 3.0,
+        "execution": 5.0,
+        "end_to_end": 8.0,
+    }
+    assert script.SLO_THRESHOLDS["latency_p95_seconds"]["cold_start_burst_and_drain"] == {
+        "queue": 6.0,
+        "execution": 8.0,
+        "end_to_end": 10.0,
+    }
+    for name in script.BURST_MEASUREMENT_NAMES:
+        assert script.SLO_THRESHOLDS["throughput"][name] == {
+            "lcb_questions_per_second": 6.0,
+            "max_cv": 0.20,
+        }
+        assert script.SLO_THRESHOLDS["backlog_drain_seconds"][name] == 10.0
 
 
 def test_strict_json_loader_accepts_only_finite_unique_bounded_regular_files(
@@ -559,6 +824,234 @@ def test_child_validator_happy_path_accepts_balanced_order_and_dynamic_container
     assert first["data_fingerprint"] == second["data_fingerprint"]
     assert set(first["metrics"]["measurements"]) == set(script.MEASUREMENT_NAMES)
     assert all(first["hard_invariants"].values())
+    assert first["metrics"]["fairness"] == {
+        "low_volume_claim_observed": True,
+        "low_volume_slice_observed": True,
+        "low_claim_before_high_backlog_drained": True,
+    }
+    for name in script.BURST_MEASUREMENT_NAMES:
+        burst = first["metrics"]["measurements"][name]
+        assert burst["worker_participation"] == {
+            "validated_worker_count": 2,
+            "distinct_claim_worker_count": 2,
+            "all_claim_workers_validated": True,
+            "accepted_runs_with_claims": 4,
+        }
+        assert burst["timing_seconds"]["monotonic"] == {
+            "suspend": 0.2,
+            "backlog_build": 1.5,
+            "restore_command": 0.25,
+            "drain": 6.0,
+        }
+
+
+@pytest.mark.parametrize("name", script.BURST_MEASUREMENT_NAMES)
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("status_split", "submission status"),
+        ("barrier", "barrier"),
+        ("typed_rejection", "typed backlog rejection count"),
+        ("boolean_worker_count", "not an integer"),
+        ("malformed_container", "container ID"),
+        ("runtime_worker", "healthy project container"),
+        ("runtime_worker_extra", "runtime Worker field set drift"),
+        ("unmapped_worker", "did not map"),
+        ("wrong_uuid_version", "did not map"),
+        ("pid_out_of_range", "did not map"),
+        ("one_claim_worker", "two distinct"),
+        ("claim_before_backlog", "duration is negative"),
+        ("throughput_wall", "submission through terminal"),
+        ("drain_boundary", "restore invocation"),
+        ("accepted_identity_partition", "did not match measurement Run IDs"),
+        ("accepted_run_duplicate", "accepted Run IDs were not unique"),
+        ("measurement_run_duplicate", "measurement Run IDs were not unique"),
+        ("scheduling_run_duplicate", "scheduling Run IDs were not unique"),
+        ("scheduling_run_identity", "did not match measurement Run IDs"),
+        ("malformed_run_identity", "canonical UUIDv4"),
+        ("foreign_timing_run", "escaped the burst boundary"),
+        ("untyped_participation_claim", "typed timing events"),
+        ("run_duration", "per-Run duration drift"),
+        ("durable_duration", "duration drift"),
+    ],
+)
+def test_burst_validator_fails_closed_on_admission_worker_and_segmented_timing_drift(
+    name: str,
+    case: str,
+    match: str,
+) -> None:
+    child = _happy_child()
+    burst = _burst_measurement(child, name)
+    if case == "status_split":
+        burst["submission"]["status_counts"] = {"202": 5, "429": 1}
+    elif case == "barrier":
+        burst["barrier"] = "cold_start" if name.startswith("warmed") else "warmed_pause"
+    elif case == "typed_rejection":
+        burst["typed_rejections"].pop()
+    elif case == "boolean_worker_count":
+        burst["worker_participation"]["distinct_claim_workers"] = True
+    elif case == "malformed_container":
+        burst["worker_participation"]["validated_workers"][0]["container_id"] = "A" * 64
+    elif case == "runtime_worker":
+        burst["worker_state_after_restart"][0]["health"] = "unhealthy"
+    elif case == "runtime_worker_extra":
+        burst["worker_state_after_restart"][0]["pid"] = 123
+    elif case == "unmapped_worker":
+        burst["worker_participation"]["claims"][0]["worker_id"] = (
+            "worker:not-a-validated-host:1:00000000-0000-4000-8000-000000000001"
+        )
+    elif case == "wrong_uuid_version":
+        burst["worker_participation"]["claims"][0]["worker_id"] = (
+            f"worker:{burst['worker_participation']['validated_workers'][0]['hostname']}:1:"
+            "00000000-0000-1000-8000-000000000001"
+        )
+    elif case == "pid_out_of_range":
+        burst["worker_participation"]["claims"][0]["worker_id"] = (
+            f"worker:{burst['worker_participation']['validated_workers'][0]['hostname']}:"
+            "2147483648:00000000-0000-4000-8000-000000000001"
+        )
+    elif case == "one_claim_worker":
+        first_owner = burst["worker_participation"]["claims"][0]["worker_id"]
+        for claim in burst["worker_participation"]["claims"]:
+            claim["worker_id"] = first_owner
+    elif case == "claim_before_backlog":
+        burst["worker_participation"]["claims"][0]["occurred_at"] = "2026-08-28T00:00:00.500000Z"
+    elif case == "throughput_wall":
+        burst["timing"]["monotonic_seconds"]["backlog_build"] = 1.6
+    elif case == "drain_boundary":
+        burst["backlog_drain_seconds"] = 5.9
+    elif case == "accepted_identity_partition":
+        replacements = {
+            old: f"00000000-0000-4000-9000-{index:012x}"
+            for index, old in enumerate(burst["accepted_run_ids"], start=1)
+        }
+        burst["accepted_run_ids"] = [replacements[run_id] for run_id in burst["accepted_run_ids"]]
+        for claim in burst["worker_participation"]["claims"]:
+            claim["run_id"] = replacements[claim["run_id"]]
+        for event in burst["timing"]["durable_utc"]["claim_or_yield_events"]:
+            event["run_id"] = replacements[event["run_id"]]
+        for run in burst["timing"]["durable_utc"]["run_first_claim_to_finish"]:
+            run["run_id"] = replacements[run["run_id"]]
+    elif case == "accepted_run_duplicate":
+        burst["accepted_run_ids"][-1] = burst["accepted_run_ids"][0]
+    elif case == "measurement_run_duplicate":
+        burst["run_ids"][-1] = burst["run_ids"][0]
+    elif case == "scheduling_run_duplicate":
+        burst["cooperative_scheduling"]["per_run"][-1]["run_id"] = burst["cooperative_scheduling"][
+            "per_run"
+        ][0]["run_id"]
+    elif case == "scheduling_run_identity":
+        burst["cooperative_scheduling"]["per_run"][0]["run_id"] = (
+            "00000000-0000-4000-a000-000000000001"
+        )
+    elif case == "malformed_run_identity":
+        burst["run_ids"][0] = "not-a-run-uuid"
+    elif case == "foreign_timing_run":
+        burst["timing"]["durable_utc"]["claim_or_yield_events"][0]["run_id"] = "foreign"
+    elif case == "untyped_participation_claim":
+        burst["timing"]["durable_utc"]["claim_or_yield_events"][0]["event_type"] = "run_yielded"
+    elif case == "run_duration":
+        burst["timing"]["durable_utc"]["run_first_claim_to_finish"][0]["duration_seconds"] = 3.9
+    elif case == "durable_duration":
+        burst["timing"]["durable_seconds"]["backlog_ready_to_first_claim"] = 1.0
+    else:  # pragma: no cover - parameter contract
+        raise AssertionError(case)
+
+    with pytest.raises(script.QualificationFailure, match=match):
+        script.validate_child_evidence(
+            child,
+            expected_commit="d" * 40,
+            expected_hashes=_expected_hashes(),
+            expected_order="single_then_multi",
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("event_deletion", "event cardinality drift"),
+        ("event_duplicate", "event cardinality drift"),
+        ("terminal_replacement", "escaped the admitted set"),
+        ("high_run_duplicate", "high Run IDs were not unique"),
+        ("event_id_duplicate", "event IDs were not unique"),
+        ("event_role", "event role drift"),
+        ("terminal_model", "terminal Run Model role drift"),
+        ("observation_model", "observed high-volume Model role drift"),
+        ("data_model_binding", "did not match the primary Mock Model"),
+        ("event_order", "events were not ordered"),
+        ("equal_timestamp", "fairness ordering failed"),
+        ("claim_boolean", "claim boolean drift"),
+        ("incomplete_count", "incomplete count drift"),
+    ],
+)
+def test_fairness_validator_recomputes_raw_identity_and_ordering(case: str, match: str) -> None:
+    child = _happy_child()
+    fairness = child["fairness"]
+    ordering = fairness["ordering_evidence"]
+    events = ordering["ordered_events"]
+    if case == "event_deletion":
+        low_run_id = fairness["low_volume_run_id"]
+        ordering["ordered_events"].remove(
+            next(
+                event
+                for event in events
+                if event["run_id"] == low_run_id and event["event_type"] == "run_claimed"
+            )
+        )
+    elif case == "event_duplicate":
+        duplicate = copy.deepcopy(events[0])
+        duplicate["event_id"] = "30000000-0000-4000-8000-00000000ffff"
+        events.insert(1, duplicate)
+    elif case == "terminal_replacement":
+        fairness["terminal_runs"][0]["id"] = "40000000-0000-4000-8000-000000000001"
+    elif case == "high_run_duplicate":
+        fairness["high_volume_run_ids"][-1] = fairness["high_volume_run_ids"][0]
+    elif case == "event_id_duplicate":
+        events[-1]["event_id"] = events[0]["event_id"]
+    elif case == "event_role":
+        low_run_id = fairness["low_volume_run_id"]
+        next(event for event in events if event["run_id"] == low_run_id)["role"] = "high_volume"
+    elif case == "terminal_model":
+        fairness["terminal_runs"][-1]["model_id"] = fairness["high_volume_model_id"]
+    elif case == "observation_model":
+        ordering["observation"]["high_runs"][0]["model_id"] = fairness["low_volume_model_id"]
+    elif case == "data_model_binding":
+        replacement = "10000000-0000-4000-8000-000000000003"
+        old = fairness["high_volume_model_id"]
+        fairness["high_volume_model_id"] = replacement
+        for run in fairness["terminal_runs"]:
+            if run["model_id"] == old:
+                run["model_id"] = replacement
+        for run in ordering["observation"]["high_runs"]:
+            run["model_id"] = replacement
+    elif case == "event_order":
+        events[0], events[1] = events[1], events[0]
+    elif case == "equal_timestamp":
+        low_run_id = fairness["low_volume_run_id"]
+        for event in events:
+            if event["run_id"] == low_run_id and event["event_type"] == "run_claimed":
+                event["occurred_at"] = "2026-08-28T00:00:05.700000Z"
+        events.sort(
+            key=lambda event: (
+                script.parse_datetime(event["occurred_at"]),
+                event["event_id"],
+            )
+        )
+        ordering["low_claim_before_high_backlog_drained"] = False
+    elif case == "claim_boolean":
+        ordering["low_volume_claim_observed"] = False
+    elif case == "incomplete_count":
+        ordering["high_volume_incomplete_at_low_slice"] = 2
+    else:  # pragma: no cover - parameter contract
+        raise AssertionError(case)
+
+    with pytest.raises(script.QualificationFailure, match=match):
+        script.validate_child_evidence(
+            child,
+            expected_commit="d" * 40,
+            expected_hashes=_expected_hashes(),
+            expected_order="single_then_multi",
+        )
 
 
 @pytest.mark.parametrize(
@@ -592,6 +1085,72 @@ def test_child_validator_fails_closed_on_status_profile_cells_faults_and_cleanup
 ) -> None:
     child = _happy_child()
     mutation(child)
+
+    with pytest.raises(script.QualificationFailure, match=match):
+        script.validate_child_evidence(
+            child,
+            expected_commit="d" * 40,
+            expected_hashes=_expected_hashes(),
+            expected_order="single_then_multi",
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "match"),
+    [
+        ("schema", "schema"),
+        ("profile", "qualification_profile"),
+        ("runs", "runs"),
+        ("responses", "responses"),
+        ("question_executions", "question_executions"),
+        ("reservations", "reservations"),
+        ("reservation_states", "terminal-state"),
+        ("audit", "provider_attempt_reserved"),
+        ("image_status", "image cleanup"),
+        ("image_candidates", "project_image_candidates"),
+        ("images_removed", "removed_project_images"),
+        ("images_retained", "retained_shared_project_images"),
+        ("images_remaining", "remaining_project_images"),
+        ("boolean_image_count", "not an integer"),
+    ],
+)
+def test_child_validator_requires_v2_profile_reconciliation_and_exact_image_cleanup(
+    case: str,
+    match: str,
+) -> None:
+    child = _happy_child()
+    database = child["reconciliation"]["database"]
+    cleanup = child["cleanup"]
+    if case == "schema":
+        child["schema_version"] = "llmbenchlab-phase2-capacity-evidence-v1"
+    elif case == "profile":
+        child["configuration"]["qualification_profile"] = "capacity-v1"
+    elif case == "runs":
+        database["runs"] = 21
+    elif case == "responses":
+        database["responses"] = 329
+    elif case == "question_executions":
+        database["question_executions"] = 329
+    elif case == "reservations":
+        database["reservations"] = 330
+    elif case == "reservation_states":
+        database["reservation_states"] = {"settled_actual": 329, "settled_conservative": 2}
+    elif case == "audit":
+        database["audit_event_types"]["provider_attempt_reserved"] = 330
+    elif case == "image_status":
+        cleanup["image_cleanup_status"] = "failed"
+    elif case == "image_candidates":
+        cleanup["project_image_candidates"] = 0
+    elif case == "images_removed":
+        cleanup["removed_project_images"] = 0
+    elif case == "images_retained":
+        cleanup["retained_shared_project_images"] = 1
+    elif case == "images_remaining":
+        cleanup["remaining_project_images"] = 1
+    elif case == "boolean_image_count":
+        cleanup["project_image_candidates"] = True
+    else:  # pragma: no cover - parameter contract
+        raise AssertionError(case)
 
     with pytest.raises(script.QualificationFailure, match=match):
         script.validate_child_evidence(
@@ -700,9 +1259,10 @@ def _evaluated_trial() -> dict[str, Any]:
                 "samples": [1.0] * 60,
             },
         }
-    measurements["bounded_queue_burst_and_drain"]["backlog_drain_seconds"] = script.SLO_THRESHOLDS[
-        "backlog_drain_seconds"
-    ]
+    for name in script.BURST_MEASUREMENT_NAMES:
+        measurements[name]["backlog_drain_seconds"] = script.SLO_THRESHOLDS[
+            "backlog_drain_seconds"
+        ][name]
     return {
         "environment": {"postgres_max_connections": 100},
         "hard_invariants": {"all_child_contracts": True},
@@ -814,7 +1374,7 @@ def test_suite_slo_thresholds_pass_at_exact_boundaries_and_use_correct_direction
     evaluation = script.evaluate_suite(trials)
 
     assert evaluation["status"] == "passed"
-    assert len(evaluation["slo_results"]) == 18
+    assert len(evaluation["slo_results"]) == 23
     assert all(result["passed"] for result in evaluation["slo_results"])
     multi_lcb = script.SLO_THRESHOLDS["throughput"]["configured_multi_worker_baseline"][
         "lcb_questions_per_second"
@@ -843,6 +1403,13 @@ def test_suite_slo_thresholds_pass_at_exact_boundaries_and_use_correct_direction
     assert failed["status"] == "failed"
     assert result["passed"] is False
 
+    assert set(evaluation["statistics"]["backlog_drain_seconds"]) == set(
+        script.BURST_MEASUREMENT_NAMES
+    )
+    assert set(evaluation["statistics"]["question_error_zero_event_bounds"]) == set(
+        script.MEASUREMENT_NAMES
+    )
+
     latency_failure = copy.deepcopy(trials)
     latency_failure[0]["metrics"]["measurements"]["configured_multi_worker_baseline"][
         "latency_seconds"
@@ -853,6 +1420,48 @@ def test_suite_slo_thresholds_pass_at_exact_boundaries_and_use_correct_direction
         for item in failed["slo_results"]
         if item["name"] == "configured_multi_worker_baseline.queue_p95"
     )
+    assert result["passed"] is False
+
+
+@pytest.mark.parametrize("name", script.BURST_MEASUREMENT_NAMES)
+def test_each_burst_is_an_independent_throughput_and_drain_and_gate(name: str) -> None:
+    trials = [_evaluated_trial() for _ in range(5)]
+    throughput_failure = copy.deepcopy(trials)
+    throughput_failure[0]["metrics"]["measurements"][name]["questions_per_second"] = 1.0
+    throughput_evaluation = script.evaluate_suite(throughput_failure)
+    throughput_result = next(
+        item
+        for item in throughput_evaluation["slo_results"]
+        if item["name"] == f"{name}.throughput"
+    )
+    assert throughput_evaluation["status"] == "failed"
+    assert throughput_result["passed"] is False
+
+    drain_failure = copy.deepcopy(trials)
+    drain_failure[0]["metrics"]["measurements"][name]["backlog_drain_seconds"] += 0.000001
+    drain_evaluation = script.evaluate_suite(drain_failure)
+    drain_result = next(
+        item for item in drain_evaluation["slo_results"] if item["name"] == f"{name}.backlog_drain"
+    )
+    assert drain_evaluation["status"] == "failed"
+    assert drain_result["passed"] is False
+
+
+@pytest.mark.parametrize("name", script.BURST_MEASUREMENT_NAMES)
+@pytest.mark.parametrize("dimension", ("queue", "execution", "end_to_end"))
+def test_each_burst_latency_dimension_is_an_independent_and_gate(
+    name: str,
+    dimension: str,
+) -> None:
+    trials = [_evaluated_trial() for _ in range(5)]
+    trials[2]["metrics"]["measurements"][name]["latency_seconds"][dimension]["p95"] += 0.000001
+
+    evaluation = script.evaluate_suite(trials)
+    result = next(
+        item for item in evaluation["slo_results"] if item["name"] == f"{name}.{dimension}_p95"
+    )
+
+    assert evaluation["status"] == "failed"
     assert result["passed"] is False
 
 
@@ -870,8 +1479,12 @@ def test_validator_and_trial_reference_are_strict_allowlists_without_secret_cana
     canary = "sk-slo-secret-canary-must-not-survive"
     child = _happy_child()
     child["commands"] = [{"stdout": canary, "authorization": f"Bearer {canary}"}]
-    child["measurements"][0]["run_ids"] = [canary]
+    child["measurements"][0]["raw_debug_canary"] = canary
     child["environment"]["container_limits"]["api"][0]["container_id"] = canary
+    for name in script.BURST_MEASUREMENT_NAMES:
+        burst = _burst_measurement(child, name)
+        burst["worker_participation"]["validated_workers"][0]["container_id"] = "9" * 64
+        burst["worker_state_after_restart"][0]["id"] = "9" * 64
     validated = script.validate_child_evidence(
         child,
         expected_commit="d" * 40,
@@ -905,6 +1518,11 @@ def test_validator_and_trial_reference_are_strict_allowlists_without_secret_cana
     }
     assert canary not in json.dumps(validated, sort_keys=True)
     assert canary not in json.dumps(reference, sort_keys=True)
+    serialized_metrics = json.dumps(validated["metrics"], sort_keys=True)
+    assert '"run_id"' not in serialized_metrics
+    assert '"worker_id"' not in serialized_metrics
+    assert '"container_id"' not in serialized_metrics
+    assert "9" * 64 not in serialized_metrics
 
 
 def test_single_child_evidence_rejects_missing_and_multiple_files(tmp_path: Path) -> None:
@@ -1232,6 +1850,10 @@ def test_fixed_child_command_uses_formal_timing_and_repository_internal_artifact
     assert "--worker-poll-seconds 1" in joined
     assert "--mock-delay-seconds 0.08" in joined
     assert "--measurement-order multi_then_single" in joined
+    assert command.count("--qualification-profile") == 1
+    profile_index = command.index("--qualification-profile")
+    assert command[profile_index + 1] == "P2-local-control-plane-v2"
+    assert "capacity-v1" not in command
     assert str(trial_root.relative_to(tmp_path)) in command
     assert not any(key in joined for key in script.PROVIDER_CREDENTIAL_ENV_KEYS)
 

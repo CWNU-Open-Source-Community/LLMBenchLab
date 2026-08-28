@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Qualify the fixed Phase 2 single-host control-plane SLO profile.
 
-The wrapper runs one warm-up and five or more isolated ``phase2_capacity``
+The wrapper runs one warm-up and exactly five isolated ``phase2_capacity``
 children, validates their sanitized evidence instead of trusting an exit code,
-and evaluates the preregistered ADR-0012 objectives. It is intentionally
+and evaluates the preregistered ADR-0014 objectives. It is intentionally
 Mock-only and dependency-free. Results apply only to the exact clean commit,
-recorded host, and ``P2-local-control-plane-v1`` profile; they are not a real
+recorded host, and ``P2-local-control-plane-v2`` profile; they are not a real
 Provider benchmark, production SLA, HA proof, or scaling extrapolation.
 """
 
@@ -27,6 +27,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -36,15 +37,13 @@ if str(SCRIPT_DIRECTORY) not in sys.path:
 
 from phase2_acceptance import parse_datetime, redact_text, sanitize, utc_now  # noqa: E402
 
-EVIDENCE_SCHEMA = "llmbenchlab-phase2-slo-evidence-v1"
-CAPACITY_EVIDENCE_SCHEMA = "llmbenchlab-phase2-capacity-evidence-v1"
-PROFILE_NAME = "P2-local-control-plane-v1"
+EVIDENCE_SCHEMA = "llmbenchlab-phase2-slo-evidence-v2"
+CAPACITY_EVIDENCE_SCHEMA = "llmbenchlab-phase2-capacity-evidence-v2"
+PROFILE_NAME = "P2-local-control-plane-v2"
 DEFAULT_ARTIFACTS_ROOT = Path(".pytest_cache/artifacts/phase2-slo")
 DEFAULT_MEASURED_TRIALS = 5
 DEFAULT_SEED = 20260828
 DEFAULT_TRIAL_TIMEOUT_SECONDS = 900
-MIN_MEASURED_TRIALS = 5
-MAX_MEASURED_TRIALS = 10
 MIN_TRIAL_TIMEOUT_SECONDS = 300
 MAX_TRIAL_TIMEOUT_SECONDS = 3600
 MAX_CHILD_EVIDENCE_BYTES = 16 * 1024 * 1024
@@ -54,14 +53,19 @@ WARMUP_TRIALS = 1
 MEASUREMENT_NAMES = (
     "single_worker_reference",
     "configured_multi_worker_baseline",
-    "bounded_queue_burst_and_drain",
+    "warmed_pause_burst_and_drain",
+    "cold_start_burst_and_drain",
+)
+BURST_MEASUREMENT_NAMES = (
+    "warmed_pause_burst_and_drain",
+    "cold_start_burst_and_drain",
 )
 MEASUREMENT_ORDERS = {
     "single_then_multi": MEASUREMENT_NAMES,
     "multi_then_single": (
         "configured_multi_worker_baseline",
         "single_worker_reference",
-        "bounded_queue_burst_and_drain",
+        *BURST_MEASUREMENT_NAMES,
     ),
 }
 FAULT_NAMES = (
@@ -108,7 +112,8 @@ CHILD_ENV_ALLOWLIST = frozenset(
     }
 )
 
-EXPECTED_CONFIGURATION: dict[str, int | float] = {
+EXPECTED_CONFIGURATION: dict[str, int | float | str] = {
+    "qualification_profile": PROFILE_NAME,
     "workers": 2,
     "runs_per_measurement_phase": 4,
     "backlog_limit": 4,
@@ -120,10 +125,10 @@ EXPECTED_CONFIGURATION: dict[str, int | float] = {
     "run_max_tokens": 64,
     "run_input_token_reservation": 256,
     "mock_generation_delay_seconds": 0.08,
-    "timeout_seconds": 180,
-    "lease_seconds": 30,
-    "heartbeat_seconds": 10,
-    "worker_poll_seconds": 1,
+    "timeout_seconds": 180.0,
+    "lease_seconds": 30.0,
+    "heartbeat_seconds": 10.0,
+    "worker_poll_seconds": 1.0,
     "worker_max_attempts": 3,
     "retry_backoff_base_seconds": 1.0,
     "retry_backoff_cap_seconds": 30.0,
@@ -173,7 +178,11 @@ SLO_THRESHOLDS: dict[str, Any] = {
             "lcb_questions_per_second": 10.0,
             "max_cv": 0.15,
         },
-        "bounded_queue_burst_and_drain": {
+        "warmed_pause_burst_and_drain": {
+            "lcb_questions_per_second": 6.0,
+            "max_cv": 0.20,
+        },
+        "cold_start_burst_and_drain": {
             "lcb_questions_per_second": 6.0,
             "max_cv": 0.20,
         },
@@ -189,13 +198,21 @@ SLO_THRESHOLDS: dict[str, Any] = {
             "execution": 5.0,
             "end_to_end": 7.0,
         },
-        "bounded_queue_burst_and_drain": {
+        "warmed_pause_burst_and_drain": {
             "queue": 3.0,
             "execution": 5.0,
             "end_to_end": 8.0,
         },
+        "cold_start_burst_and_drain": {
+            "queue": 6.0,
+            "execution": 8.0,
+            "end_to_end": 10.0,
+        },
     },
-    "backlog_drain_seconds": 10.0,
+    "backlog_drain_seconds": {
+        "warmed_pause_burst_and_drain": 10.0,
+        "cold_start_burst_and_drain": 10.0,
+    },
     "lease_kill_fence_to_reclaim_seconds": 38.0,
     "lease_expiry_to_reclaim_seconds": 6.0,
     "redis_run_created_to_claim_seconds": 3.0,
@@ -414,8 +431,8 @@ def balanced_measurement_orders(seed: int, measured_trials: int) -> list[str]:
 
     require(not isinstance(seed, bool) and isinstance(seed, int), "seed must be an integer")
     require(
-        MIN_MEASURED_TRIALS <= measured_trials <= MAX_MEASURED_TRIALS,
-        f"measured trials must be between {MIN_MEASURED_TRIALS} and {MAX_MEASURED_TRIALS}",
+        measured_trials == DEFAULT_MEASURED_TRIALS,
+        f"formal profile requires exactly {DEFAULT_MEASURED_TRIALS} measured trials",
     )
     first_count = (measured_trials + 1) // 2
     orders = ["single_then_multi"] * first_count
@@ -772,15 +789,488 @@ def _validate_distribution(distribution: Any, name: str, expected_count: int) ->
     return {"samples": samples, "p95": observed_p95, "p99": observed_p99}
 
 
-def _validate_measurement(measurement: Mapping[str, Any], expected_name: str) -> dict[str, Any]:
+def _canonical_uuid4(value: Any, name: str) -> str:
+    """Return one canonical UUIDv4 string or fail the evidence contract."""
+
+    require(isinstance(value, str), f"{name} must be a canonical UUIDv4")
+    try:
+        parsed = uuid.UUID(value)
+    except (AttributeError, ValueError) as exc:
+        raise QualificationFailure(f"{name} must be a canonical UUIDv4") from exc
+    require(
+        parsed.version == 4 and str(parsed) == value,
+        f"{name} must be a canonical UUIDv4",
+    )
+    return value
+
+
+def _parse_utc_fact(value: Any, name: str) -> Any:
+    """Parse one durable timestamp while retaining a stable validation error."""
+
+    require(isinstance(value, str), f"{name} must be a UTC timestamp")
+    try:
+        return parse_datetime(value)
+    except (TypeError, ValueError) as exc:
+        raise QualificationFailure(f"{name} must be a UTC timestamp") from exc
+
+
+def _validate_burst_evidence(
+    measurement: Mapping[str, Any],
+    *,
+    expected_name: str,
+    expected_project: str,
+    wall_duration_seconds: float,
+    measurement_run_ids: set[str],
+) -> dict[str, Any]:
+    """Cross-check raw v2 burst facts and return only anonymous aggregate data."""
+
+    expected_barrier = {
+        "warmed_pause_burst_and_drain": "warmed_pause",
+        "cold_start_burst_and_drain": "cold_start",
+    }[expected_name]
+    require(
+        measurement.get("mode") == "exact_backlog_limit_concurrent_202_429_then_drain"
+        and measurement.get("barrier") == expected_barrier,
+        f"{expected_name} burst barrier drift",
+    )
+    require(
+        _exact_int(
+            measurement.get("configured_backlog_limit"),
+            f"{expected_name}.configured_backlog_limit",
+        )
+        == 4
+        and measurement.get("expected_status_counts") == {"202": 4, "429": 2},
+        f"{expected_name} configured admission boundary drift",
+    )
+    accepted_run_ids_raw = _sequence(
+        measurement.get("accepted_run_ids"), f"{expected_name}.accepted_run_ids"
+    )
+    require(len(accepted_run_ids_raw) == 4, f"{expected_name} accepted Run IDs drift")
+    accepted_run_ids = {
+        _canonical_uuid4(run_id, f"{expected_name} accepted Run ID")
+        for run_id in accepted_run_ids_raw
+    }
+    require(len(accepted_run_ids) == 4, f"{expected_name} accepted Run IDs were not unique")
+    require(
+        accepted_run_ids == measurement_run_ids,
+        f"{expected_name} accepted Run IDs did not match measurement Run IDs",
+    )
+
+    participation = _mapping(
+        measurement.get("worker_participation"), f"{expected_name}.worker_participation"
+    )
+    require(
+        set(participation)
+        == {
+            "validated_workers",
+            "claims",
+            "distinct_claim_workers",
+            "all_claim_workers_validated",
+        },
+        f"{expected_name} Worker participation field set drift",
+    )
+    workers_raw = _sequence(
+        participation.get("validated_workers"), f"{expected_name}.validated_workers"
+    )
+    require(len(workers_raw) == 2, f"{expected_name} validated Worker count drift")
+    validated_hostnames: set[str] = set()
+    validated_container_ids: set[str] = set()
+    validated_runtime_identities: set[tuple[str, str]] = set()
+    for raw_worker in workers_raw:
+        worker = _mapping(raw_worker, f"{expected_name} validated Worker")
+        require(
+            set(worker) == {"container_id", "hostname"},
+            f"{expected_name} validated Worker field set drift",
+        )
+        container_id = worker.get("container_id")
+        hostname = worker.get("hostname")
+        require(
+            isinstance(container_id, str)
+            and len(container_id) == 64
+            and all(character in "0123456789abcdef" for character in container_id),
+            f"{expected_name} validated Worker container ID missing",
+        )
+        require(
+            isinstance(hostname, str)
+            and bool(hostname)
+            and ":" not in hostname
+            and not any(character.isspace() or ord(character) < 32 for character in hostname),
+            f"{expected_name} validated Worker hostname missing",
+        )
+        validated_container_ids.add(container_id)
+        validated_hostnames.add(hostname)
+        validated_runtime_identities.add((container_id, hostname))
+    require(
+        len(validated_container_ids) == len(validated_hostnames) == 2,
+        f"{expected_name} validated Workers were not distinct",
+    )
+    runtime_workers_raw = _sequence(
+        measurement.get("worker_state_after_restart"),
+        f"{expected_name}.worker_state_after_restart",
+    )
+    require(len(runtime_workers_raw) == 2, f"{expected_name} runtime Worker count drift")
+    runtime_workers: set[tuple[str, str]] = set()
+    for raw_worker in runtime_workers_raw:
+        worker = _mapping(raw_worker, f"{expected_name} runtime Worker")
+        require(
+            set(worker) == {"id", "hostname", "project", "service", "status", "health"},
+            f"{expected_name} runtime Worker field set drift",
+        )
+        container_id = worker.get("id")
+        hostname = worker.get("hostname")
+        require(
+            isinstance(container_id, str)
+            and len(container_id) == 64
+            and all(character in "0123456789abcdef" for character in container_id)
+            and isinstance(hostname, str)
+            and worker.get("project") == expected_project
+            and worker.get("service") == "worker"
+            and worker.get("status") == "running"
+            and worker.get("health") == "healthy",
+            f"{expected_name} runtime Worker was not a healthy project container",
+        )
+        runtime_workers.add((container_id, hostname))
+    require(
+        runtime_workers == validated_runtime_identities,
+        f"{expected_name} validated Workers did not match runtime container evidence",
+    )
+
+    timing = _mapping(measurement.get("timing"), f"{expected_name}.timing")
+    require(
+        set(timing) == {"clock_domains", "monotonic_seconds", "durable_utc", "durable_seconds"},
+        f"{expected_name} timing field set drift",
+    )
+    require(
+        timing.get("clock_domains")
+        == {"monotonic_seconds": "process_monotonic", "durable_utc": "database_utc"},
+        f"{expected_name} timing clock-domain drift",
+    )
+    monotonic = _mapping(timing.get("monotonic_seconds"), f"{expected_name}.monotonic_seconds")
+    require(
+        set(monotonic) == {"suspend", "backlog_build", "restore_command", "drain"},
+        f"{expected_name} monotonic timing field set drift",
+    )
+    monotonic_durations = {
+        field: _finite_number(
+            monotonic.get(field), f"{expected_name}.monotonic_seconds.{field}", minimum=0
+        )
+        for field in ("suspend", "backlog_build", "restore_command", "drain")
+    }
+    require(monotonic_durations["drain"] > 0, f"{expected_name} drain duration was zero")
+    require(
+        monotonic_durations["restore_command"] <= monotonic_durations["drain"] + 1e-6,
+        f"{expected_name} restore duration exceeded drain duration",
+    )
+    require(
+        wall_duration_seconds + 2e-6
+        >= monotonic_durations["backlog_build"] + monotonic_durations["drain"],
+        f"{expected_name} throughput wall duration did not span submission through terminal",
+    )
+    observed_drain = _finite_number(
+        measurement.get("backlog_drain_seconds"),
+        f"{expected_name}.backlog_drain_seconds",
+        minimum=0,
+    )
+    require(
+        math.isclose(observed_drain, monotonic_durations["drain"], rel_tol=0, abs_tol=1e-6),
+        f"{expected_name} drain duration did not start at restore invocation",
+    )
+
+    durable_utc = _mapping(timing.get("durable_utc"), f"{expected_name}.durable_utc")
+    require(
+        set(durable_utc)
+        == {
+            "suspend_completed_at",
+            "backlog_ready_at",
+            "restore_completed_at",
+            "first_claim_at",
+            "all_workers_first_claim_at",
+            "claim_or_yield_events",
+            "run_first_claim_to_finish",
+        },
+        f"{expected_name} durable UTC field set drift",
+    )
+    suspend_completed_at = durable_utc.get("suspend_completed_at")
+    backlog_ready_at = durable_utc.get("backlog_ready_at")
+    restore_completed_at = durable_utc.get("restore_completed_at")
+    first_claim_at = durable_utc.get("first_claim_at")
+    all_workers_first_claim_at = durable_utc.get("all_workers_first_claim_at")
+    _utc_elapsed_seconds(suspend_completed_at, backlog_ready_at, f"{expected_name} backlog build")
+    _utc_elapsed_seconds(backlog_ready_at, restore_completed_at, f"{expected_name} restore")
+    ready_to_first = _utc_elapsed_seconds(
+        backlog_ready_at, first_claim_at, f"{expected_name} first durable claim"
+    )
+    ready_to_all_workers = _utc_elapsed_seconds(
+        backlog_ready_at,
+        all_workers_first_claim_at,
+        f"{expected_name} all-Worker durable claim",
+    )
+    require(
+        _utc_elapsed_seconds(first_claim_at, all_workers_first_claim_at, expected_name) >= 0,
+        f"{expected_name} all-Worker claim preceded first claim",
+    )
+
+    claims_raw = _sequence(participation.get("claims"), f"{expected_name}.claims")
+    require(len(claims_raw) >= 4, f"{expected_name} durable claim evidence was incomplete")
+    claimed_run_ids: set[str] = set()
+    claim_worker_ids: set[str] = set()
+    claim_hostnames: set[str] = set()
+    worker_first_claims: dict[str, Any] = {}
+    claim_instants: list[Any] = []
+    participation_claim_facts: set[tuple[str, str, str]] = set()
+    for raw_claim in claims_raw:
+        claim = _mapping(raw_claim, f"{expected_name} durable claim")
+        require(
+            set(claim) == {"run_id", "worker_id", "occurred_at"},
+            f"{expected_name} durable claim field set drift",
+        )
+        run_id = claim.get("run_id")
+        worker_id = claim.get("worker_id")
+        occurred_at = claim.get("occurred_at")
+        require(
+            isinstance(run_id, str) and run_id in accepted_run_ids,
+            f"{expected_name} claim was not for an accepted Run",
+        )
+        require(isinstance(worker_id, str), f"{expected_name} claim Worker ID missing")
+        worker_parts = worker_id.split(":")
+        canonical_owner = False
+        if (
+            len(worker_parts) == 4
+            and worker_parts[0] == "worker"
+            and worker_parts[1] in validated_hostnames
+            and worker_parts[2].isdigit()
+            and int(worker_parts[2]) > 0
+            and int(worker_parts[2]) <= 2_147_483_647
+            and worker_parts[2] == str(int(worker_parts[2]))
+        ):
+            try:
+                worker_instance = uuid.UUID(worker_parts[3])
+                canonical_owner = (
+                    worker_instance.version == 4 and str(worker_instance) == worker_parts[3]
+                )
+            except (AttributeError, ValueError):
+                canonical_owner = False
+        require(
+            canonical_owner,
+            f"{expected_name} claim Worker did not map to a validated container",
+        )
+        _utc_elapsed_seconds(backlog_ready_at, occurred_at, f"{expected_name} claim boundary")
+        instant = parse_datetime(str(occurred_at))
+        claimed_run_ids.add(run_id)
+        claim_worker_ids.add(worker_id)
+        claim_hostnames.add(worker_parts[1])
+        claim_instants.append(instant)
+        participation_claim_facts.add((run_id, worker_id, str(occurred_at)))
+        previous = worker_first_claims.get(worker_id)
+        if previous is None or instant < previous:
+            worker_first_claims[worker_id] = instant
+    require(
+        claimed_run_ids == accepted_run_ids,
+        f"{expected_name} not every accepted Run had durable claim evidence",
+    )
+    require(
+        len(participation_claim_facts) == len(claims_raw),
+        f"{expected_name} durable claim evidence contained duplicates",
+    )
+    require(
+        len(claim_worker_ids) == len(claim_hostnames) == 2
+        and claim_hostnames == validated_hostnames,
+        f"{expected_name} did not prove two distinct validated claim Workers",
+    )
+    require(
+        _exact_int(
+            participation.get("distinct_claim_workers"),
+            f"{expected_name}.distinct_claim_workers",
+        )
+        == len(claim_worker_ids)
+        == 2,
+        f"{expected_name} distinct claim Worker count drift",
+    )
+    require(
+        participation.get("all_claim_workers_validated") is True,
+        f"{expected_name} claim Worker validation did not pass",
+    )
+    require(
+        parse_datetime(str(first_claim_at)) == min(claim_instants),
+        f"{expected_name} first durable claim timestamp drift",
+    )
+    require(
+        parse_datetime(str(all_workers_first_claim_at)) == max(worker_first_claims.values()),
+        f"{expected_name} all-Worker first claim timestamp drift",
+    )
+
+    claim_or_yield_raw = _sequence(
+        durable_utc.get("claim_or_yield_events"), f"{expected_name}.claim_or_yield_events"
+    )
+    require(len(claim_or_yield_raw) >= 2, f"{expected_name} claim/yield timing was incomplete")
+    ordered_event_instants: list[Any] = []
+    timing_claim_facts: set[tuple[str, str]] = set()
+    timing_claim_count = 0
+    for raw_event in claim_or_yield_raw:
+        event = _mapping(raw_event, f"{expected_name} claim/yield event")
+        require(
+            set(event) == {"run_id", "event_type", "occurred_at"},
+            f"{expected_name} claim/yield event field set drift",
+        )
+        require(
+            event.get("run_id") in accepted_run_ids
+            and event.get("event_type") in {"run_claimed", "run_yielded"},
+            f"{expected_name} claim/yield event escaped the burst boundary",
+        )
+        _utc_elapsed_seconds(
+            backlog_ready_at, event.get("occurred_at"), f"{expected_name} claim/yield boundary"
+        )
+        ordered_event_instants.append(parse_datetime(str(event.get("occurred_at"))))
+        if event.get("event_type") == "run_claimed":
+            timing_claim_facts.add((str(event.get("run_id")), str(event.get("occurred_at"))))
+            timing_claim_count += 1
+    require(
+        {(run_id, occurred_at) for run_id, _worker_id, occurred_at in participation_claim_facts}
+        == timing_claim_facts,
+        f"{expected_name} participation claims did not match typed timing events",
+    )
+    require(
+        timing_claim_count == len(claims_raw),
+        f"{expected_name} participation claims did not match typed timing events",
+    )
+    require(
+        ordered_event_instants == sorted(ordered_event_instants),
+        f"{expected_name} claim/yield events were not ordered",
+    )
+    adjacent_gap_samples = [
+        round((current - previous).total_seconds(), 6)
+        for previous, current in pairwise(ordered_event_instants)
+    ]
+    require(
+        all(sample >= 0 for sample in adjacent_gap_samples),
+        f"{expected_name} adjacent claim/yield gap was negative",
+    )
+
+    per_run_raw = _sequence(
+        durable_utc.get("run_first_claim_to_finish"),
+        f"{expected_name}.run_first_claim_to_finish",
+    )
+    require(len(per_run_raw) == 4, f"{expected_name} per-Run timing count drift")
+    timed_run_ids: set[str] = set()
+    run_duration_samples: list[float] = []
+    for raw_run in per_run_raw:
+        run = _mapping(raw_run, f"{expected_name} per-Run timing")
+        require(
+            set(run) == {"run_id", "first_claim_at", "finished_at", "duration_seconds"},
+            f"{expected_name} per-Run timing field set drift",
+        )
+        run_id = run.get("run_id")
+        require(
+            isinstance(run_id, str) and run_id in accepted_run_ids and run_id not in timed_run_ids,
+            f"{expected_name} per-Run timing identity drift",
+        )
+        recomputed = _utc_elapsed_seconds(
+            run.get("first_claim_at"), run.get("finished_at"), f"{expected_name} Run duration"
+        )
+        observed = _finite_number(
+            run.get("duration_seconds"), f"{expected_name} Run duration", minimum=0
+        )
+        require(
+            math.isclose(observed, round(recomputed, 6), rel_tol=0, abs_tol=1e-6),
+            f"{expected_name} per-Run duration drift",
+        )
+        matching_claims = [
+            parse_datetime(str(_mapping(raw_claim, "claim").get("occurred_at")))
+            for raw_claim in claims_raw
+            if _mapping(raw_claim, "claim").get("run_id") == run_id
+        ]
+        require(
+            matching_claims
+            and parse_datetime(str(run.get("first_claim_at"))) == min(matching_claims),
+            f"{expected_name} per-Run first claim drift",
+        )
+        timed_run_ids.add(run_id)
+        run_duration_samples.append(observed)
+    require(timed_run_ids == accepted_run_ids, f"{expected_name} per-Run timing coverage drift")
+
+    durable_seconds = _mapping(timing.get("durable_seconds"), f"{expected_name}.durable_seconds")
+    require(
+        set(durable_seconds)
+        == {
+            "backlog_ready_to_first_claim",
+            "backlog_ready_to_all_workers_first_claim",
+            "adjacent_claim_or_yield_gap",
+            "first_claim_to_finish",
+        },
+        f"{expected_name} durable duration field set drift",
+    )
+    for field, recomputed in (
+        ("backlog_ready_to_first_claim", ready_to_first),
+        ("backlog_ready_to_all_workers_first_claim", ready_to_all_workers),
+    ):
+        observed = _finite_number(
+            durable_seconds.get(field), f"{expected_name}.durable_seconds.{field}", minimum=0
+        )
+        require(
+            math.isclose(observed, round(recomputed, 6), rel_tol=0, abs_tol=1e-6),
+            f"{expected_name} {field} duration drift",
+        )
+
+    adjacent_distribution = _validate_distribution(
+        durable_seconds.get("adjacent_claim_or_yield_gap"),
+        f"{expected_name}.adjacent_claim_or_yield_gap",
+        expected_count=len(adjacent_gap_samples),
+    )
+    require(
+        all(
+            math.isclose(observed, expected, rel_tol=0, abs_tol=1e-6)
+            for observed, expected in zip(
+                adjacent_distribution["samples"], adjacent_gap_samples, strict=True
+            )
+        ),
+        f"{expected_name} adjacent claim/yield duration drift",
+    )
+    run_distribution = _validate_distribution(
+        durable_seconds.get("first_claim_to_finish"),
+        f"{expected_name}.first_claim_to_finish",
+        expected_count=4,
+    )
+    require(
+        all(
+            math.isclose(observed, expected, rel_tol=0, abs_tol=1e-6)
+            for observed, expected in zip(
+                run_distribution["samples"], run_duration_samples, strict=True
+            )
+        ),
+        f"{expected_name} first-claim-to-finish duration drift",
+    )
+
+    return {
+        "worker_participation": {
+            "validated_worker_count": 2,
+            "distinct_claim_worker_count": 2,
+            "all_claim_workers_validated": True,
+            "accepted_runs_with_claims": 4,
+        },
+        "timing_seconds": {
+            "monotonic": monotonic_durations,
+            "durable": {
+                "backlog_ready_to_first_claim": ready_to_first,
+                "backlog_ready_to_all_workers_first_claim": ready_to_all_workers,
+                "adjacent_claim_or_yield_gap": adjacent_distribution,
+                "first_claim_to_finish": run_distribution,
+            },
+        },
+    }
+
+
+def _validate_measurement(
+    measurement: Mapping[str, Any], expected_name: str, *, expected_project: str
+) -> dict[str, Any]:
     require(measurement.get("name") == expected_name, "measurement name/order drift")
     expected_workers = 1 if expected_name == "single_worker_reference" else 2
+    is_burst = expected_name in BURST_MEASUREMENT_NAMES
     require(
         _exact_int(measurement.get("workers"), f"{expected_name}.workers") == expected_workers,
         f"{expected_name} worker count drift",
     )
     submission = _mapping(measurement.get("submission"), f"{expected_name}.submission")
-    expected_requested = 6 if expected_name == "bounded_queue_burst_and_drain" else 4
+    expected_requested = 6 if is_burst else 4
     require(
         _exact_int(submission.get("requested"), "submission.requested") == expected_requested,
         "submission count drift",
@@ -823,6 +1313,17 @@ def _validate_measurement(measurement: Mapping[str, Any], expected_name: str) ->
         "Response count drift",
     )
 
+    measurement_run_ids_raw = _sequence(measurement.get("run_ids"), f"{expected_name}.run_ids")
+    require(len(measurement_run_ids_raw) == 4, f"{expected_name} measurement Run count drift")
+    measurement_run_ids = {
+        _canonical_uuid4(run_id, f"{expected_name} measurement Run ID")
+        for run_id in measurement_run_ids_raw
+    }
+    require(
+        len(measurement_run_ids) == 4,
+        f"{expected_name} measurement Run IDs were not unique",
+    )
+
     errors = _mapping(measurement.get("errors_and_retries"), f"{expected_name}.errors")
     require(errors.get("terminal_statuses") == {"completed": 4}, "terminal status drift")
     require(
@@ -863,8 +1364,17 @@ def _validate_measurement(measurement: Mapping[str, Any], expected_name: str) ->
     require(scheduling.get("all_runs_yielded") is True, "Run did not cooperatively yield")
     per_run = _sequence(scheduling.get("per_run"), "cooperative scheduling per_run")
     require(len(per_run) == 4, "cooperative scheduling Run count drift")
+    scheduling_run_ids: set[str] = set()
     for run in per_run:
         item = _mapping(run, "cooperative scheduling Run")
+        run_id = _canonical_uuid4(
+            item.get("run_id"), f"{expected_name} cooperative scheduling Run ID"
+        )
+        require(
+            run_id not in scheduling_run_ids,
+            f"{expected_name} cooperative scheduling Run IDs were not unique",
+        )
+        scheduling_run_ids.add(run_id)
         require(
             _exact_int(item.get("dispatch_count"), "dispatch count") >= 3,
             "Run dispatch count too low",
@@ -873,6 +1383,10 @@ def _validate_measurement(measurement: Mapping[str, Any], expected_name: str) ->
             _exact_int(item.get("cooperative_yield_events"), "yield count") >= 2,
             "Run yield count too low",
         )
+    require(
+        scheduling_run_ids == measurement_run_ids,
+        f"{expected_name} cooperative scheduling Run IDs did not match measurement Run IDs",
+    )
 
     latency = _mapping(measurement.get("latency_seconds"), f"{expected_name}.latency")
     latency_metrics = {
@@ -906,7 +1420,7 @@ def _validate_measurement(measurement: Mapping[str, Any], expected_name: str) ->
         "provider_attempts_per_question": 1.0,
         "all_runs_yielded": True,
     }
-    if expected_name == "bounded_queue_burst_and_drain":
+    if is_burst:
         require(
             measurement.get("observed_status_counts") == expected_statuses, "burst status drift"
         )
@@ -929,30 +1443,266 @@ def _validate_measurement(measurement: Mapping[str, Any], expected_name: str) ->
             measurement.get("backlog_drain_seconds"), "backlog drain seconds", minimum=0
         )
         result["admission_status_counts"] = expected_statuses
+        result.update(
+            _validate_burst_evidence(
+                measurement,
+                expected_name=expected_name,
+                expected_project=expected_project,
+                wall_duration_seconds=wall_duration,
+                measurement_run_ids=measurement_run_ids,
+            )
+        )
     return result
 
 
-def _validate_fairness(value: Any) -> dict[str, bool]:
+def _validate_fairness(
+    value: Any,
+    *,
+    expected_high_model_id: str,
+    expected_low_model_id: str,
+) -> dict[str, bool]:
     fairness = _mapping(value, "fairness")
     require(fairness.get("name") == "cross_model_fair_quantum_ordering", "fairness scenario drift")
     require(fairness.get("question_quantum") == 5, "fairness quantum drift")
     require(fairness.get("configured_backlog_limit") == 4, "fairness backlog drift")
-    ordering = _mapping(fairness.get("ordering_evidence"), "fairness ordering")
-    require(ordering.get("low_volume_claim_observed") is True, "low-volume claim missing")
-    require(ordering.get("low_volume_slice_observed") is True, "low-volume slice missing")
+
+    high_run_ids_raw = _sequence(fairness.get("high_volume_run_ids"), "fairness high Run IDs")
+    require(len(high_run_ids_raw) == 3, "fairness high Run count drift")
+    high_run_ids = {_canonical_uuid4(run_id, "fairness high Run ID") for run_id in high_run_ids_raw}
+    require(len(high_run_ids) == 3, "fairness high Run IDs were not unique")
+    low_run_id = _canonical_uuid4(fairness.get("low_volume_run_id"), "fairness low Run ID")
+    require(low_run_id not in high_run_ids, "fairness low Run duplicated a high Run")
+    all_run_ids = {*high_run_ids, low_run_id}
+
+    high_model_id = _canonical_uuid4(fairness.get("high_volume_model_id"), "fairness high Model ID")
+    low_model_id = _canonical_uuid4(fairness.get("low_volume_model_id"), "fairness low Model ID")
+    require(high_model_id != low_model_id, "fairness Models were not distinct")
     require(
-        ordering.get("low_claim_before_high_backlog_drained") is True, "fairness ordering failed"
+        high_model_id == expected_high_model_id,
+        "fairness high Model did not match the primary Mock Model",
     )
     require(
-        _exact_int(ordering.get("high_volume_incomplete_at_low_slice"), "incomplete high Runs") > 0,
-        "high-volume backlog was already drained",
+        low_model_id == expected_low_model_id,
+        "fairness low Model did not match the low-volume Mock Model",
     )
+    expected_models = {
+        **{run_id: high_model_id for run_id in high_run_ids},
+        low_run_id: low_model_id,
+    }
+
     terminal_runs = _sequence(fairness.get("terminal_runs"), "fairness terminal Runs")
     require(len(terminal_runs) == 4, "fairness terminal Run count drift")
+    terminal_run_ids: set[str] = set()
     for run in terminal_runs:
         item = _mapping(run, "fairness terminal Run")
+        require(
+            set(item) == {"id", "model_id", "status", "completed_questions", "dispatch_count"},
+            "fairness terminal Run field set drift",
+        )
+        run_id = _canonical_uuid4(item.get("id"), "fairness terminal Run ID")
+        require(run_id not in terminal_run_ids, "fairness terminal Run IDs were not unique")
+        terminal_run_ids.add(run_id)
+        require(run_id in expected_models, "fairness terminal Run escaped the admitted set")
+        require(
+            _canonical_uuid4(item.get("model_id"), "fairness terminal Model ID")
+            == expected_models[run_id],
+            "fairness terminal Run Model role drift",
+        )
         require(item.get("status") == "completed", "fairness Run was not completed")
-        require(item.get("completed_questions") == 15, "fairness Run was incomplete")
+        require(
+            _exact_int(item.get("completed_questions"), "fairness completed questions") == 15,
+            "fairness Run was incomplete",
+        )
+        require(
+            _exact_int(item.get("dispatch_count"), "fairness terminal dispatch count") == 3,
+            "fairness terminal Run dispatch count drift",
+        )
+    require(terminal_run_ids == all_run_ids, "fairness terminal Run set drift")
+
+    ordering = _mapping(fairness.get("ordering_evidence"), "fairness ordering")
+    require(
+        set(ordering)
+        == {
+            "low_volume_claim_observed",
+            "low_volume_slice_observed",
+            "high_volume_incomplete_at_low_slice",
+            "low_claim_before_high_backlog_drained",
+            "observation",
+            "ordered_events",
+        },
+        "fairness ordering field set drift",
+    )
+    observation = _mapping(ordering.get("observation"), "fairness observation")
+    require(
+        set(observation) == {"low_run", "high_runs"},
+        "fairness observation field set drift",
+    )
+
+    observation_fields = {
+        "id",
+        "model_id",
+        "status",
+        "completed_questions",
+        "dispatch_count",
+        "last_scheduled_at",
+    }
+
+    def validate_observed_run(
+        raw: Any,
+        *,
+        expected_run_id: str,
+        expected_model_id: str,
+        role: str,
+    ) -> dict[str, Any]:
+        item = _mapping(raw, f"fairness observed {role} Run")
+        require(set(item) == observation_fields, f"fairness observed {role} Run field set drift")
+        require(
+            _canonical_uuid4(item.get("id"), f"fairness observed {role} Run ID") == expected_run_id,
+            f"fairness observed {role} Run identity drift",
+        )
+        require(
+            _canonical_uuid4(item.get("model_id"), f"fairness observed {role} Model ID")
+            == expected_model_id,
+            f"fairness observed {role} Model role drift",
+        )
+        completed = _exact_int(
+            item.get("completed_questions"),
+            f"fairness observed {role} completed questions",
+            minimum=0,
+        )
+        require(completed <= 15, f"fairness observed {role} completed questions drift")
+        dispatches = _exact_int(
+            item.get("dispatch_count"), f"fairness observed {role} dispatch count", minimum=0
+        )
+        last_scheduled_at = item.get("last_scheduled_at")
+        if last_scheduled_at is not None:
+            _parse_utc_fact(last_scheduled_at, f"fairness observed {role} last_scheduled_at")
+        if dispatches > 0:
+            require(
+                isinstance(last_scheduled_at, str),
+                f"fairness observed {role} scheduling timestamp missing",
+            )
+        return {
+            "status": item.get("status"),
+            "completed_questions": completed,
+            "dispatch_count": dispatches,
+        }
+
+    low_observed = validate_observed_run(
+        observation.get("low_run"),
+        expected_run_id=low_run_id,
+        expected_model_id=low_model_id,
+        role="low-volume",
+    )
+    require(
+        low_observed["status"] in {"pending", "running", "completed"}
+        and low_observed["completed_questions"] >= 1
+        and low_observed["dispatch_count"] >= 1,
+        "fairness low-volume slice observation drift",
+    )
+    high_observed_raw = _sequence(observation.get("high_runs"), "fairness observed high Runs")
+    require(len(high_observed_raw) == 3, "fairness observed high Run count drift")
+    high_observed_ids: set[str] = set()
+    high_incomplete = 0
+    for raw in high_observed_raw:
+        item = _mapping(raw, "fairness observed high-volume Run")
+        run_id = _canonical_uuid4(item.get("id"), "fairness observed high-volume Run ID")
+        require(
+            run_id in high_run_ids and run_id not in high_observed_ids,
+            "fairness observed high Run set drift",
+        )
+        high_observed_ids.add(run_id)
+        observed = validate_observed_run(
+            item,
+            expected_run_id=run_id,
+            expected_model_id=high_model_id,
+            role="high-volume",
+        )
+        require(
+            observed["status"] in {"pending", "running"},
+            "fairness high Run was terminal at the low-volume slice",
+        )
+        high_incomplete += 1
+    require(high_observed_ids == high_run_ids, "fairness observed high Run set drift")
+
+    events_raw = _sequence(ordering.get("ordered_events"), "fairness ordered events")
+    event_ids: set[str] = set()
+    event_sort_keys: list[tuple[Any, str]] = []
+    event_facts: list[tuple[str, str]] = []
+    event_type_counts_by_run = {
+        run_id: {"run_claimed": 0, "run_yielded": 0, "run_terminal": 0} for run_id in all_run_ids
+    }
+    for raw_event in events_raw:
+        event = _mapping(raw_event, "fairness ordered event")
+        require(
+            set(event) == {"event_id", "event_type", "occurred_at", "run_id", "role"},
+            "fairness ordered event field set drift",
+        )
+        event_id = _canonical_uuid4(event.get("event_id"), "fairness audit event ID")
+        require(event_id not in event_ids, "fairness audit event IDs were not unique")
+        event_ids.add(event_id)
+        event_type = event.get("event_type")
+        require(
+            event_type in {"run_claimed", "run_yielded", "run_terminal"},
+            "fairness audit event type drift",
+        )
+        run_id = _canonical_uuid4(event.get("run_id"), "fairness audit event Run ID")
+        require(run_id in all_run_ids, "fairness audit event escaped the admitted Run set")
+        expected_role = "low_volume" if run_id == low_run_id else "high_volume"
+        require(event.get("role") == expected_role, "fairness audit event role drift")
+        occurred_at = _parse_utc_fact(event.get("occurred_at"), "fairness audit event occurred_at")
+        event_sort_keys.append((occurred_at, event_id))
+        event_facts.append((run_id, str(event_type)))
+        event_type_counts_by_run[run_id][str(event_type)] += 1
+    require(event_sort_keys == sorted(event_sort_keys), "fairness audit events were not ordered")
+    require(
+        all(
+            counts == {"run_claimed": 3, "run_yielded": 2, "run_terminal": 1}
+            for counts in event_type_counts_by_run.values()
+        ),
+        "fairness audit event cardinality drift",
+    )
+
+    low_claim_times = [
+        sort_key[0]
+        for sort_key, fact in zip(event_sort_keys, event_facts, strict=True)
+        if fact == (low_run_id, "run_claimed")
+    ]
+    high_terminal_times = [
+        sort_key[0]
+        for sort_key, (run_id, event_type) in zip(event_sort_keys, event_facts, strict=True)
+        if run_id in high_run_ids and event_type == "run_terminal"
+    ]
+    low_claim_observed = bool(low_claim_times)
+    low_slice_observed = low_observed["completed_questions"] >= 1
+    low_claim_before_high_drained = (
+        bool(low_claim_times)
+        and bool(high_terminal_times)
+        and min(low_claim_times) < max(high_terminal_times)
+    )
+    require(
+        ordering.get("low_volume_claim_observed") is low_claim_observed,
+        "fairness low-volume claim boolean drift",
+    )
+    require(
+        ordering.get("low_volume_slice_observed") is low_slice_observed,
+        "fairness low-volume slice boolean drift",
+    )
+    require(
+        _exact_int(
+            ordering.get("high_volume_incomplete_at_low_slice"), "fairness incomplete high Runs"
+        )
+        == high_incomplete
+        == 3,
+        "fairness high-volume incomplete count drift",
+    )
+    require(
+        ordering.get("low_claim_before_high_backlog_drained") is low_claim_before_high_drained,
+        "fairness ordering boolean drift",
+    )
+    require(low_claim_observed, "low-volume claim missing")
+    require(low_slice_observed, "low-volume slice missing")
+    require(low_claim_before_high_drained, "fairness ordering failed")
     _validate_zero_gauges(fairness.get("backlog_after_drain"), "fairness backlog after drain")
     return {
         "low_volume_claim_observed": True,
@@ -1120,11 +1870,11 @@ def _validate_reconciliation(value: Any) -> dict[str, Any]:
     for field, expected in {
         "policies": 2,
         "active_policies": 1,
-        "runs": 18,
-        "responses": 270,
-        "distinct_run_question_responses": 270,
-        "question_executions": 270,
-        "reservations": 271,
+        "runs": 22,
+        "responses": 330,
+        "distinct_run_question_responses": 330,
+        "question_executions": 330,
+        "reservations": 331,
         "failed_attempt_count": 1,
     }.items():
         require(
@@ -1132,7 +1882,7 @@ def _validate_reconciliation(value: Any) -> dict[str, Any]:
             f"reconciliation.{field} drift",
         )
     require(
-        database.get("reservation_states") == {"settled_actual": 270, "settled_conservative": 1},
+        database.get("reservation_states") == {"settled_actual": 330, "settled_conservative": 1},
         "Provider attempt terminal-state counts drift",
     )
     audit_events = _exact_int(database.get("audit_events"), "reconciliation.audit_events")
@@ -1144,7 +1894,7 @@ def _validate_reconciliation(value: Any) -> dict[str, Any]:
         "provider_attempt_settled",
     ):
         require(
-            _exact_int(audit_types.get(event_type), f"audit count {event_type}") == 271,
+            _exact_int(audit_types.get(event_type), f"audit count {event_type}") == 331,
             f"{event_type} count drift",
         )
     queue = _mapping(reconciliation.get("queue"), "reconciliation.queue")
@@ -1162,9 +1912,9 @@ def _validate_reconciliation(value: Any) -> dict[str, Any]:
         "final Worker state was unhealthy",
     )
     return {
-        "runs": 18,
-        "responses": 270,
-        "question_executions": 270,
+        "runs": 22,
+        "responses": 330,
+        "question_executions": 330,
         "duplicate_operation_keys": 0,
         "duplicate_audit_event_keys": 0,
         "question_errors": 0,
@@ -1177,19 +1927,38 @@ def _validate_reconciliation(value: Any) -> dict[str, Any]:
 def _validate_cleanup(value: Any) -> dict[str, Any]:
     cleanup = _mapping(value, "cleanup")
     require(cleanup.get("status") == "passed", "child cleanup did not pass")
-    require(cleanup.get("down_returncode") == 0, "Compose down failed")
+    require(
+        _exact_int(cleanup.get("down_returncode"), "cleanup.down_returncode") == 0,
+        "Compose down failed",
+    )
     for field in (
         "remaining_containers",
         "remaining_project_volumes",
         "remaining_project_networks",
     ):
         require(cleanup.get(field) == [], f"cleanup left {field}")
+    require(cleanup.get("image_cleanup_status") == "passed", "project image cleanup did not pass")
+    for field, expected in {
+        "project_image_candidates": 1,
+        "removed_project_images": 1,
+        "retained_shared_project_images": 0,
+        "remaining_project_images": 0,
+    }.items():
+        require(
+            _exact_int(cleanup.get(field), f"cleanup.{field}") == expected,
+            f"cleanup.{field} drift",
+        )
     return {
         "status": "passed",
         "down_returncode": 0,
         "remaining_containers": 0,
         "remaining_project_volumes": 0,
         "remaining_project_networks": 0,
+        "image_cleanup_status": "passed",
+        "project_image_candidates": 1,
+        "removed_project_images": 1,
+        "retained_shared_project_images": 0,
+        "remaining_project_images": 0,
     }
 
 
@@ -1232,6 +2001,11 @@ def validate_child_evidence(
                 ),
                 f"configuration.{field} drift",
             )
+        elif isinstance(expected, int):
+            require(
+                _exact_int(actual, f"configuration.{field}") == expected,
+                f"configuration.{field} drift",
+            )
         else:
             require(
                 actual == expected and not isinstance(actual, bool), f"configuration.{field} drift"
@@ -1255,7 +2029,20 @@ def validate_child_evidence(
             "child environment changed between trials",
         )
 
-    data = _normalize_data(_mapping(evidence.get("data"), "data"))
+    raw_data = _mapping(evidence.get("data"), "data")
+    primary_model_id = _canonical_uuid4(
+        _mapping(raw_data.get("model"), "data.model").get("id"),
+        "primary Mock Model ID",
+    )
+    low_volume_model_id = _canonical_uuid4(
+        _mapping(
+            raw_data.get("fairness_low_volume_model"),
+            "data.fairness_low_volume_model",
+        ).get("id"),
+        "low-volume Mock Model ID",
+    )
+    require(primary_model_id != low_volume_model_id, "Mock Model identities were not distinct")
+    data = _normalize_data(raw_data)
     data_fingerprint = normalized_fingerprint(data)
     if expected_data_fingerprint is not None:
         require(
@@ -1275,8 +2062,17 @@ def validate_child_evidence(
         "Provider credentials were not removed",
     )
 
+    project_name = str(evidence.get("project_name") or "")
+    project_suffix = project_name.removeprefix("llmbenchlab-p2-")
+    require(
+        project_name.startswith("llmbenchlab-p2-")
+        and len(project_suffix) == 12
+        and all(character in "0123456789abcdef" for character in project_suffix),
+        "child project identity was unsafe",
+    )
+
     measurements_raw = _sequence(evidence.get("measurements"), "measurements")
-    require(len(measurements_raw) == 3, "measurement count drift")
+    require(len(measurements_raw) == 4, "measurement count drift")
     expected_names = MEASUREMENT_ORDERS[expected_order]
     require(
         [str(_mapping(item, "measurement").get("name")) for item in measurements_raw]
@@ -1285,10 +2081,16 @@ def validate_child_evidence(
     )
     measurements: dict[str, Any] = {}
     for raw, name in zip(measurements_raw, expected_names, strict=True):
-        measurements[name] = _validate_measurement(_mapping(raw, f"measurement {name}"), name)
+        measurements[name] = _validate_measurement(
+            _mapping(raw, f"measurement {name}"), name, expected_project=project_name
+        )
     require(set(measurements) == set(MEASUREMENT_NAMES), "measurement names were not unique")
 
-    fairness = _validate_fairness(evidence.get("fairness"))
+    fairness = _validate_fairness(
+        evidence.get("fairness"),
+        expected_high_model_id=primary_model_id,
+        expected_low_model_id=low_volume_model_id,
+    )
     faults = _validate_faults(evidence.get("faults"))
     reconciliation = _validate_reconciliation(evidence.get("reconciliation"))
     cleanup = _validate_cleanup(evidence.get("cleanup"))
@@ -1297,17 +2099,20 @@ def validate_child_evidence(
         "mock_only": True,
         "clean_exact_commit": True,
         "fixed_finite_profile": True,
-        "three_unique_measurements": True,
+        "four_unique_measurements": True,
         "all_measurement_runs_completed": True,
         "all_measurement_questions_answered": True,
         "zero_measurement_question_errors": True,
         "all_measurement_runs_yielded": True,
         "exact_typed_backlog_admission": True,
+        "dual_burst_distinct_validated_claim_workers": True,
+        "dual_burst_segmented_timing": True,
         "cross_model_fairness": True,
         "three_faults_recovered": True,
         "zero_reconciliation_drift": True,
         "redis_pel_and_lag_zero": True,
         "cleanup_empty": True,
+        "exact_project_image_cleanup": True,
     }
     return {
         "environment": environment,
@@ -1329,8 +2134,8 @@ def evaluate_suite(measured_trials: Sequence[dict[str, Any]]) -> dict[str, Any]:
     """Evaluate preregistered performance SLOs after all hard gates pass."""
 
     require(
-        MIN_MEASURED_TRIALS <= len(measured_trials) <= MAX_MEASURED_TRIALS,
-        "measured trial count is outside the qualification contract",
+        len(measured_trials) == DEFAULT_MEASURED_TRIALS,
+        f"formal profile requires exactly {DEFAULT_MEASURED_TRIALS} measured trials",
     )
     for trial in measured_trials:
         invariants = _mapping(trial.get("hard_invariants"), "trial hard invariants")
@@ -1439,20 +2244,22 @@ def evaluate_suite(measured_trials: Sequence[dict[str, Any]]) -> dict[str, Any]:
         }
     )
 
-    drain_samples = [
-        trial["metrics"]["measurements"]["bounded_queue_burst_and_drain"]["backlog_drain_seconds"]
-        for trial in measured_trials
-    ]
-    slo_results.append(
-        {
-            "name": "backlog.drain",
-            "objective": {"each_trial_lte_seconds": SLO_THRESHOLDS["backlog_drain_seconds"]},
-            "observed": {"samples_seconds": drain_samples},
-            "passed": all(
-                value <= SLO_THRESHOLDS["backlog_drain_seconds"] for value in drain_samples
-            ),
-        }
-    )
+    drain_statistics: dict[str, list[float]] = {}
+    for name in BURST_MEASUREMENT_NAMES:
+        drain_samples = [
+            trial["metrics"]["measurements"][name]["backlog_drain_seconds"]
+            for trial in measured_trials
+        ]
+        drain_statistics[name] = finite_samples(drain_samples)
+        drain_objective = SLO_THRESHOLDS["backlog_drain_seconds"][name]
+        slo_results.append(
+            {
+                "name": f"{name}.backlog_drain",
+                "objective": {"each_trial_lte_seconds": drain_objective},
+                "observed": {"samples_seconds": drain_samples},
+                "passed": all(value <= drain_objective for value in drain_samples),
+            }
+        )
 
     recovery_statistics: dict[str, list[float]] = {}
     for metric, threshold_name in (
@@ -1597,7 +2404,7 @@ def evaluate_suite(measured_trials: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "throughput_questions_per_second": throughput_statistics,
             "paired_multi_to_single_scaling_ratio": scaling_statistics,
             "latency_seconds": latency_statistics,
-            "backlog_drain_seconds": finite_samples(drain_samples),
+            "backlog_drain_seconds": drain_statistics,
             "recovery_seconds": recovery_statistics,
             "question_error_zero_event_bounds": error_bounds,
         },
@@ -1625,12 +2432,12 @@ def self_check_contract() -> dict[str, Any]:
         "profile": PROFILE_NAME,
         "warmup_trials": WARMUP_TRIALS,
         "default_measured_trials": DEFAULT_MEASURED_TRIALS,
-        "measured_trial_bounds": [MIN_MEASURED_TRIALS, MAX_MEASURED_TRIALS],
+        "fixed_measured_trials": DEFAULT_MEASURED_TRIALS,
         "default_seed": DEFAULT_SEED,
         "default_measurement_orders": orders,
         "fixed_configuration": EXPECTED_CONFIGURATION,
         "slo_thresholds": SLO_THRESHOLDS,
-        "student_t_sample_sizes": [MIN_MEASURED_TRIALS, MAX_MEASURED_TRIALS],
+        "student_t_sample_sizes": [DEFAULT_MEASURED_TRIALS],
         "child_environment_is_allowlisted": True,
         "provider_credential_names_not_inherited": list(PROVIDER_CREDENTIAL_ENV_KEYS),
         "child_process_isolation": True,
@@ -1642,8 +2449,8 @@ def self_check_contract() -> dict[str, Any]:
 
 def _validate_arguments(args: argparse.Namespace) -> None:
     require(
-        MIN_MEASURED_TRIALS <= args.measured_trials <= MAX_MEASURED_TRIALS,
-        f"--measured-trials must be between {MIN_MEASURED_TRIALS} and {MAX_MEASURED_TRIALS}",
+        args.measured_trials == DEFAULT_MEASURED_TRIALS,
+        f"--measured-trials must be exactly {DEFAULT_MEASURED_TRIALS}",
     )
     require(not isinstance(args.seed, bool), "--seed must be an integer")
     require(
@@ -1665,7 +2472,7 @@ def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
         "--measured-trials",
         type=int,
         default=DEFAULT_MEASURED_TRIALS,
-        help=f"measured trials after one warm-up ({MIN_MEASURED_TRIALS}..{MAX_MEASURED_TRIALS})",
+        help=f"fixed measured trials after one warm-up (exactly {DEFAULT_MEASURED_TRIALS})",
     )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument(
@@ -1855,6 +2662,8 @@ def _child_command(
         "1",
         "--measurement-order",
         measurement_order,
+        "--qualification-profile",
+        PROFILE_NAME,
         "--artifacts-root",
         str(artifacts_root.relative_to(repository_root)),
     ]

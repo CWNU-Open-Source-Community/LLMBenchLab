@@ -25,12 +25,84 @@ def _load_script() -> ModuleType:
 script = _load_script()
 
 
+def _formal_profile_argv() -> list[str]:
+    return [
+        "--qualification-profile",
+        script.FORMAL_QUALIFICATION_PROFILE,
+        "--workers",
+        "2",
+        "--runs-per-phase",
+        "4",
+        "--backlog-limit",
+        "4",
+        "--burst-runs",
+        "6",
+        "--submit-concurrency",
+        "6",
+        "--run-concurrency",
+        "1",
+        "--question-quantum",
+        "5",
+        "--mock-delay-seconds",
+        "0.08",
+        "--timeout-seconds",
+        "180",
+        "--lease-seconds",
+        "30",
+        "--heartbeat-seconds",
+        "10",
+        "--worker-poll-seconds",
+        "1",
+        "--worker-max-attempts",
+        "3",
+        "--retry-backoff-base-seconds",
+        "1",
+        "--retry-backoff-cap-seconds",
+        "30",
+        "--worker-shutdown-grace-seconds",
+        "30",
+        "--redis-block-milliseconds",
+        "1000",
+        "--redis-operation-timeout-seconds",
+        "1",
+    ]
+
+
+def _formal_worker_state(project: str) -> list[dict[str, object]]:
+    return [
+        {
+            "id": "a" * 64,
+            "hostname": "worker-a",
+            "project": project,
+            "service": "worker",
+            "status": "running",
+            "health": "healthy",
+        },
+        {
+            "id": "b" * 64,
+            "hostname": "worker-b",
+            "project": project,
+            "service": "worker",
+            "status": "running",
+            "health": "healthy",
+        },
+    ]
+
+
+def _worker_owner(hostname: str, suffix: int) -> str:
+    return f"worker:{hostname}:1:00000000-0000-4000-8000-{suffix:012d}"
+
+
 def _valid_reconciliation_snapshot(
-    *, runs_per_phase: int = 4, backlog_limit: int = 4
+    *,
+    runs_per_phase: int = 4,
+    backlog_limit: int = 4,
+    formal_slo_v2: bool = False,
 ) -> dict[str, object]:
     expected_counts, expected_states, expected_audit_counts = script.reconciliation_expectations(
         runs_per_phase=runs_per_phase,
         backlog_limit=backlog_limit,
+        formal_slo_v2=formal_slo_v2,
     )
     snapshot: dict[str, object] = {field: 0 for field in script.RECONCILIATION_ZERO_FIELDS}
     snapshot.update(expected_counts)
@@ -231,6 +303,7 @@ def test_capacity_cli_defaults_are_bounded_and_require_two_workers() -> None:
     assert args.heartbeat_seconds == 2
     assert args.worker_poll_seconds == 0.15
     assert args.measurement_order == "single_then_multi"
+    assert args.qualification_profile == script.DEFAULT_QUALIFICATION_PROFILE
 
     with pytest.raises(ValueError, match="at least 2"):
         script.parse_arguments(["--workers", "1"])
@@ -250,6 +323,135 @@ def test_capacity_cli_defaults_are_bounded_and_require_two_workers() -> None:
         script.parse_arguments(["--worker-poll-seconds", "0.01"])
     with pytest.raises(SystemExit):
         script.parse_arguments(["--measurement-order", "unknown"])
+
+
+def test_formal_profile_is_one_fixed_switch_with_an_independent_schema() -> None:
+    args = script.parse_arguments(_formal_profile_argv())
+    harness = script.Phase2Capacity(_REPOSITORY_ROOT, args)
+    try:
+        assert harness.formal_slo_v2 is True
+        assert harness.evidence["schema_version"] == script.CAPACITY_EVIDENCE_SCHEMA_V2
+        assert (
+            harness.evidence["configuration"]["qualification_profile"]
+            == script.FORMAL_QUALIFICATION_PROFILE
+        )
+        assert {
+            field: harness.evidence["configuration"][field]
+            for field in (
+                "timeout_seconds",
+                "lease_seconds",
+                "heartbeat_seconds",
+                "worker_poll_seconds",
+            )
+        } == {
+            "timeout_seconds": 180.0,
+            "lease_seconds": 30.0,
+            "heartbeat_seconds": 10.0,
+            "worker_poll_seconds": 1.0,
+        }
+    finally:
+        harness._credential_secret_dir.cleanup()
+
+    with pytest.raises(ValueError, match='"differing_fields"'):
+        script.parse_arguments(["--qualification-profile", script.FORMAL_QUALIFICATION_PROFILE])
+
+
+@pytest.mark.parametrize(
+    ("argument", "drifted_value", "field"),
+    [
+        ("--workers", "3", "workers"),
+        ("--runs-per-phase", "3", "runs_per_phase"),
+        ("--backlog-limit", "5", "backlog_limit"),
+        ("--burst-runs", "7", "burst_runs"),
+        ("--submit-concurrency", "5", "submit_concurrency"),
+        ("--run-concurrency", "2", "run_concurrency"),
+        ("--question-quantum", "4", "question_quantum"),
+        ("--mock-delay-seconds", "0.09", "mock_delay_seconds"),
+        ("--timeout-seconds", "181", "timeout_seconds"),
+        ("--lease-seconds", "31", "lease_seconds"),
+        ("--heartbeat-seconds", "9", "heartbeat_seconds"),
+        ("--worker-poll-seconds", "1.1", "worker_poll_seconds"),
+        ("--worker-max-attempts", "4", "worker_max_attempts"),
+        ("--retry-backoff-base-seconds", "2", "retry_backoff_base_seconds"),
+        ("--retry-backoff-cap-seconds", "31", "retry_backoff_cap_seconds"),
+        ("--worker-shutdown-grace-seconds", "31", "worker_shutdown_grace_seconds"),
+        ("--redis-block-milliseconds", "1001", "redis_block_milliseconds"),
+        ("--redis-operation-timeout-seconds", "1.1", "redis_operation_timeout_seconds"),
+    ],
+)
+def test_formal_profile_rejects_every_fixed_argument_drift(
+    argument: str,
+    drifted_value: str,
+    field: str,
+) -> None:
+    argv = _formal_profile_argv()
+    argv[argv.index(argument) + 1] = drifted_value
+
+    with pytest.raises(ValueError) as exc_info:
+        script.parse_arguments(argv)
+
+    assert str(exc_info.value) == (
+        f'P2-local-control-plane-v2 fixed configuration drift: {{"differing_fields":["{field}"]}}'
+    )
+
+
+def test_default_profile_retains_v1_schema_and_single_burst_identity() -> None:
+    harness = script.Phase2Capacity(_REPOSITORY_ROOT, script.parse_arguments([]))
+    try:
+        assert harness.formal_slo_v2 is False
+        assert harness.evidence["schema_version"] == script.CAPACITY_EVIDENCE_SCHEMA_V1
+        assert (
+            harness.evidence["configuration"]["qualification_profile"]
+            == script.DEFAULT_QUALIFICATION_PROFILE
+        )
+    finally:
+        harness._credential_secret_dir.cleanup()
+
+    configurable = script.parse_arguments(
+        [
+            "--workers",
+            "3",
+            "--runs-per-phase",
+            "3",
+            "--backlog-limit",
+            "5",
+            "--burst-runs",
+            "7",
+            "--submit-concurrency",
+            "5",
+            "--run-concurrency",
+            "2",
+            "--question-quantum",
+            "4",
+            "--mock-delay-seconds",
+            "0.09",
+            "--timeout-seconds",
+            "181",
+            "--lease-seconds",
+            "32",
+            "--heartbeat-seconds",
+            "10",
+            "--worker-poll-seconds",
+            "1.1",
+            "--worker-max-attempts",
+            "4",
+            "--retry-backoff-base-seconds",
+            "2",
+            "--retry-backoff-cap-seconds",
+            "31",
+            "--worker-shutdown-grace-seconds",
+            "31",
+            "--redis-block-milliseconds",
+            "1001",
+            "--redis-operation-timeout-seconds",
+            "1.1",
+        ]
+    )
+    assert configurable.qualification_profile == script.DEFAULT_QUALIFICATION_PROFILE
+    assert configurable.workers == 3
+    assert configurable.run_concurrency == 2
+    assert configurable.lease_seconds == 32
+    assert configurable.redis_operation_timeout_seconds == 1.1
 
 
 def test_demo_producer_retains_slo_identity_fields() -> None:
@@ -558,6 +760,305 @@ def test_cooperative_scheduling_summary_requires_multiple_dispatches_and_yields(
     }
 
 
+def test_formal_burst_claims_map_strict_owners_to_two_validated_hostnames() -> None:
+    project = "llmbenchlab-p2-123456789abc"
+    owner_a = _worker_owner("worker-a", 1)
+    owner_b = _worker_owner("worker-b", 2)
+    audit_events = {
+        "run-a": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": "legacy-invalid-owner",
+                "occurred_at": "2026-08-28T00:00:00Z",
+            },
+            {
+                "event_type": "run_claimed",
+                "worker_id": owner_a,
+                "occurred_at": "2026-08-28T00:00:02Z",
+            },
+        ],
+        "run-b": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": owner_b,
+                "occurred_at": "2026-08-28T00:00:03Z",
+            }
+        ],
+    }
+
+    result = script.burst_worker_participation(
+        accepted_run_ids=["run-a", "run-b"],
+        audit_events=audit_events,
+        worker_state=_formal_worker_state(project),
+        project=project,
+        backlog_ready_at="2026-08-28T00:00:01Z",
+    )
+
+    assert result == {
+        "validated_workers": [
+            {"container_id": "a" * 64, "hostname": "worker-a"},
+            {"container_id": "b" * 64, "hostname": "worker-b"},
+        ],
+        "claims": [
+            {
+                "run_id": "run-a",
+                "worker_id": owner_a,
+                "occurred_at": "2026-08-28T00:00:02Z",
+            },
+            {
+                "run_id": "run-b",
+                "worker_id": owner_b,
+                "occurred_at": "2026-08-28T00:00:03Z",
+            },
+        ],
+        "distinct_claim_workers": 2,
+        "all_claim_workers_validated": True,
+    }
+    assert "pid" not in result["validated_workers"][0]
+
+
+def test_formal_worker_state_witness_drops_raw_container_metadata() -> None:
+    project = "llmbenchlab-p2-123456789abc"
+    raw_workers = _formal_worker_state(project)
+    forbidden = {
+        "pid": 987654321,
+        "name": "raw-worker-name-canary",
+        "restart_count": 42424242,
+        "exit_code": 31313131,
+        "started_at": "raw-started-at-canary",
+        "image_id": "sha256:" + "c" * 64,
+    }
+    for worker in raw_workers:
+        worker.update(forbidden)
+
+    witness = script.formal_worker_state_witness(raw_workers)
+
+    assert len(witness) == 2
+    assert all(
+        set(worker) == {"id", "hostname", "project", "service", "status", "health"}
+        for worker in witness
+    )
+    serialized = json.dumps(witness)
+    for key, value in forbidden.items():
+        assert f'"{key}"' not in serialized
+        assert json.dumps(value) not in serialized
+
+
+@pytest.mark.parametrize(
+    ("owner_a", "owner_b", "message"),
+    [
+        ("worker-a", _worker_owner("worker-b", 2), "exact runtime format"),
+        (
+            "worker:worker-a:1:00000000-0000-1000-8000-000000000001",
+            _worker_owner("worker-b", 2),
+            "not canonical",
+        ),
+        (_worker_owner("worker-c", 1), _worker_owner("worker-b", 2), "did not map"),
+        (_worker_owner("worker-a", 1), _worker_owner("worker-a", 1), "exactly two"),
+    ],
+)
+def test_formal_burst_rejects_legacy_invalid_unmapped_or_single_owner(
+    owner_a: str,
+    owner_b: str,
+    message: str,
+) -> None:
+    project = "llmbenchlab-p2-123456789abc"
+    events = {
+        "run-a": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": owner_a,
+                "occurred_at": "2026-08-28T00:00:02Z",
+            }
+        ],
+        "run-b": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": owner_b,
+                "occurred_at": "2026-08-28T00:00:03Z",
+            }
+        ],
+    }
+
+    with pytest.raises(script.AcceptanceFailure, match=message):
+        script.burst_worker_participation(
+            accepted_run_ids=["run-a", "run-b"],
+            audit_events=events,
+            worker_state=_formal_worker_state(project),
+            project=project,
+            backlog_ready_at="2026-08-28T00:00:01Z",
+        )
+
+
+def test_formal_burst_rejects_a_third_owner_even_on_a_validated_hostname() -> None:
+    project = "llmbenchlab-p2-123456789abc"
+    events = {
+        "run-a": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": _worker_owner("worker-a", 1),
+                "occurred_at": "2026-08-28T00:00:02Z",
+            },
+            {
+                "event_type": "run_claimed",
+                "worker_id": _worker_owner("worker-a", 3),
+                "occurred_at": "2026-08-28T00:00:03Z",
+            },
+        ],
+        "run-b": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": _worker_owner("worker-b", 2),
+                "occurred_at": "2026-08-28T00:00:04Z",
+            }
+        ],
+    }
+
+    with pytest.raises(script.AcceptanceFailure, match="exactly two"):
+        script.burst_worker_participation(
+            accepted_run_ids=["run-a", "run-b"],
+            audit_events=events,
+            worker_state=_formal_worker_state(project),
+            project=project,
+            backlog_ready_at="2026-08-28T00:00:01Z",
+        )
+
+
+def test_formal_burst_segmented_timing_keeps_utc_and_monotonic_domains_separate() -> None:
+    project = "llmbenchlab-p2-123456789abc"
+    audit_events = {
+        "run-a": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": _worker_owner("worker-a", 1),
+                "occurred_at": "2026-08-28T00:00:02Z",
+            },
+            {
+                "event_type": "run_yielded",
+                "worker_id": _worker_owner("worker-a", 1),
+                "occurred_at": "2026-08-28T00:00:03Z",
+            },
+        ],
+        "run-b": [
+            {
+                "event_type": "run_claimed",
+                "worker_id": _worker_owner("worker-b", 2),
+                "occurred_at": "2026-08-28T00:00:04Z",
+            },
+            {
+                "event_type": "run_yielded",
+                "worker_id": _worker_owner("worker-b", 2),
+                "occurred_at": "2026-08-28T00:00:05Z",
+            },
+        ],
+    }
+    participation = script.burst_worker_participation(
+        accepted_run_ids=["run-a", "run-b"],
+        audit_events=audit_events,
+        worker_state=_formal_worker_state(project),
+        project=project,
+        backlog_ready_at="2026-08-28T00:00:01Z",
+    )
+
+    timing = script.burst_segmented_timing(
+        final_runs=[
+            {"id": "run-a", "finished_at": "2026-08-28T00:00:08Z"},
+            {"id": "run-b", "finished_at": "2026-08-28T00:00:10Z"},
+        ],
+        audit_events=audit_events,
+        participation=participation,
+        suspend_completed_at="2026-08-28T00:00:00Z",
+        backlog_ready_at="2026-08-28T00:00:01Z",
+        restore_completed_at="2026-08-28T00:00:01.500000Z",
+        suspend_seconds=0.25,
+        backlog_build_seconds=0.5,
+        restore_command_seconds=0.125,
+        drain_seconds=9.0,
+    )
+
+    assert timing["clock_domains"] == {
+        "monotonic_seconds": "process_monotonic",
+        "durable_utc": "database_utc",
+    }
+    assert timing["monotonic_seconds"] == {
+        "suspend": 0.25,
+        "backlog_build": 0.5,
+        "restore_command": 0.125,
+        "drain": 9.0,
+    }
+    assert timing["durable_seconds"]["backlog_ready_to_first_claim"] == 1.0
+    assert timing["durable_seconds"]["backlog_ready_to_all_workers_first_claim"] == 3.0
+    assert timing["durable_seconds"]["adjacent_claim_or_yield_gap"]["samples"] == [
+        1.0,
+        1.0,
+        1.0,
+    ]
+    assert timing["durable_seconds"]["first_claim_to_finish"]["samples"] == [
+        6.0,
+        6.0,
+    ]
+
+
+def test_formal_burst_admission_requires_exact_four_202_and_two_typed_429() -> None:
+    harness = object.__new__(script.Phase2Capacity)
+    harness.burst_runs = 6
+    harness.backlog_limit = 4
+    harness.require = script.Phase2Acceptance.require.__get__(harness)
+    submissions = {
+        "status_counts": {"202": 4, "429": 2},
+        "accepted": [{"id": f"run-{index}"} for index in range(4)],
+        "rejected": [
+            {
+                "status_code": 429,
+                "payload": {
+                    "detail": {
+                        "code": "run_backlog_full",
+                        "limit": 4,
+                    }
+                },
+            }
+            for _index in range(2)
+        ],
+    }
+
+    assert harness._validate_burst_submissions(submissions) == (
+        ["run-0", "run-1", "run-2", "run-3"],
+        2,
+    )
+
+    submissions["rejected"][1]["payload"]["detail"]["code"] = "different"
+    with pytest.raises(script.AcceptanceFailure, match="typed local admission"):
+        harness._validate_burst_submissions(submissions)
+
+
+def test_default_and_formal_burst_wrappers_are_not_combinable() -> None:
+    harness = object.__new__(script.Phase2Capacity)
+    calls: list[dict[str, object]] = []
+    harness._backlog_burst = lambda **kwargs: calls.append(kwargs) or {}
+
+    harness.bounded_queue_burst()
+    harness.warmed_pause_burst()
+    harness.cold_start_burst()
+
+    assert calls == [
+        {
+            "name": "bounded_queue_burst_and_drain",
+            "barrier": "cold_start",
+            "require_worker_participation": False,
+        },
+        {
+            "name": "warmed_pause_burst_and_drain",
+            "barrier": "warmed_pause",
+            "require_worker_participation": True,
+        },
+        {
+            "name": "cold_start_burst_and_drain",
+            "barrier": "cold_start",
+            "require_worker_participation": True,
+        },
+    ]
+
+
 def test_phase_result_adds_anonymous_raw_latency_samples_without_changing_summaries() -> None:
     harness = object.__new__(script.Phase2Capacity)
     harness.responses = lambda _run_id: {
@@ -690,6 +1191,58 @@ def test_run_all_honors_measurement_order_without_renaming_cells(
     assert harness.evidence["comparison"]["multi_worker_questions_per_second"] == 2.0
 
 
+def test_formal_run_all_appends_fixed_warmed_then_cold_bursts() -> None:
+    harness = object.__new__(script.Phase2Capacity)
+    harness.evidence = {}
+    harness.worker_count = 2
+    harness.measurement_order = "multi_then_single"
+    harness.formal_slo_v2 = True
+    calls: list[str] = []
+    harness.write_evidence = lambda: None
+    harness.setup_stack = lambda: None
+    harness.topology_and_data = lambda: None
+
+    def measurement(name: str, workers: int) -> dict[str, object]:
+        calls.append(name)
+        return {
+            "run_ids": [f"{name}-run"],
+            "throughput": {"questions_per_second": float(workers)},
+        }
+
+    harness.run_measurement_phase = measurement
+    harness.scale_workers = lambda _count: []
+    harness.warmed_pause_burst = lambda: (
+        calls.append("warmed_pause_burst_and_drain")
+        or {"throughput": {"questions_per_second": 7.0}}
+    )
+    harness.cold_start_burst = lambda: (
+        calls.append("cold_start_burst_and_drain") or {"throughput": {"questions_per_second": 6.0}}
+    )
+    harness.bounded_queue_burst = lambda: pytest.fail("default burst must not run")
+    harness.model_fairness_scenario = lambda: {
+        "ordering_evidence": {"low_claim_before_high_backlog_drained": True}
+    }
+    harness.lease_expiry_fault = lambda: {}
+    harness.redis_outage_fault = lambda: {}
+    harness.duplicate_delivery_fault = lambda _run_id: {}
+    harness.governance_reconciliation = lambda: {}
+    harness.queue_pressure = lambda: {}
+    harness.task_metrics = lambda: {}
+    harness.wait_service_healthy = lambda *_args, **_kwargs: []
+
+    harness.run_all()
+
+    assert calls == [
+        "configured_multi_worker_baseline",
+        "single_worker_reference",
+        "warmed_pause_burst_and_drain",
+        "cold_start_burst_and_drain",
+    ]
+    assert harness.evidence["comparison"]["warmed_pause_burst_questions_per_second"] == 7.0
+    assert harness.evidence["comparison"]["cold_start_burst_questions_per_second"] == 6.0
+    assert "bounded_burst_questions_per_second" not in harness.evidence["comparison"]
+
+
 def test_governance_reconciliation_sql_independently_rebuilds_both_projections() -> None:
     sql = script.GOVERNANCE_RECONCILIATION_SQL
 
@@ -753,6 +1306,334 @@ def test_governance_reconciliation_derives_counts_from_nondefault_workload() -> 
     assert expected["reservations"] == 181
 
 
+def test_formal_governance_reconciliation_requires_22_330_331() -> None:
+    harness = object.__new__(script.Phase2Capacity)
+    harness.runs_per_phase = 4
+    harness.backlog_limit = 4
+    harness.formal_slo_v2 = True
+    expected = _valid_reconciliation_snapshot(formal_slo_v2=True)
+    harness.psql = lambda _query: SimpleNamespace(stdout=json.dumps(expected))
+
+    assert harness.governance_reconciliation() == expected
+    assert expected["runs"] == 22
+    assert expected["responses"] == 330
+    assert expected["question_executions"] == 330
+    assert expected["reservations"] == 331
+    assert expected["reservation_states"] == {
+        "settled_actual": 330,
+        "settled_conservative": 1,
+    }
+    assert expected["audit_event_types"] == {
+        "provider_attempt_reserved": 331,
+        "provider_attempt_send_started": 331,
+        "provider_attempt_settled": 331,
+        "question_evidence_persisted": 330,
+    }
+
+
+def _capacity_cleanup_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    pre_cleanup_images: set[str],
+) -> script.Phase2Capacity:
+    harness = object.__new__(script.Phase2Capacity)
+    harness.project = "llmbenchlab-p2-123456789abc"
+    harness.stack_touched = True
+    harness.formal_slo_v2 = True
+    harness.evidence = {"cleanup": {}}
+    harness._backend_image_ids_before_cleanup = lambda: pre_cleanup_images
+
+    def base_cleanup(self: object) -> None:
+        harness.evidence["cleanup"] = {
+            "status": "passed",
+            "remaining_containers": [],
+            "remaining_project_volumes": [],
+            "remaining_project_networks": [],
+        }
+        return None
+
+    monkeypatch.setattr(script.Phase2Acceptance, "cleanup", base_cleanup)
+    return harness
+
+
+def _cleanup_image_payload(
+    image_id: str,
+    *,
+    project: str = "llmbenchlab-p2-123456789abc",
+    tags: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "Id": image_id,
+        "Config": {
+            "Env": ["SHOULD-NOT-ENTER-EVIDENCE=marker"],
+            "Labels": {
+                "com.docker.compose.project": project,
+                "com.docker.compose.service": "worker",
+            },
+        },
+        "RepoTags": tags if tags is not None else ["llmbenchlab-backend:p2-123456789abc"],
+        "RepoDigests": ["llmbenchlab-backend@sha256:" + "d" * 64],
+        "RootFS": {"Layers": ["sha256:" + "e" * 64]},
+    }
+
+
+def test_capacity_cleanup_removes_exact_tag_and_retains_only_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_id = "sha256:" + "a" * 64
+    harness = _capacity_cleanup_harness(monkeypatch, pre_cleanup_images={image_id})
+    commands: list[tuple[list[str], dict[str, object]]] = []
+    image_list_calls = 0
+
+    def run_command(command: list[str], **kwargs: object) -> SimpleNamespace:
+        nonlocal image_list_calls
+        commands.append((command, kwargs))
+        if command[:3] == ["docker", "image", "ls"]:
+            image_list_calls += 1
+            stdout = f"{image_id}\n" if image_list_calls == 1 else ""
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        if command[:3] == ["docker", "image", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([_cleanup_image_payload(image_id)]),
+                stderr="",
+            )
+        if command[:3] == ["docker", "container", "ls"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[:3] == ["docker", "image", "rm"]:
+            assert command == [
+                "docker",
+                "image",
+                "rm",
+                "llmbenchlab-backend:p2-123456789abc",
+            ]
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        raise AssertionError(command)
+
+    harness.run_command = run_command
+
+    assert harness.cleanup() is None
+    assert harness.evidence["cleanup"] == {
+        "status": "passed",
+        "remaining_containers": [],
+        "remaining_project_volumes": [],
+        "remaining_project_networks": [],
+        "image_cleanup_status": "passed",
+        "project_image_candidates": 1,
+        "removed_project_images": 1,
+        "retained_shared_project_images": 0,
+        "remaining_project_images": 0,
+    }
+    for command, kwargs in commands:
+        if command[:2] == ["docker", "image"]:
+            assert kwargs["check"] is False
+            assert kwargs["record"] is False
+    serialized = json.dumps(harness.evidence)
+    assert image_id not in serialized
+    assert "llmbenchlab-backend:p2-123456789abc" not in serialized
+    assert "SHOULD-NOT-ENTER-EVIDENCE" not in serialized
+    flattened_commands = " ".join(" ".join(command) for command, _kwargs in commands)
+    assert "--force" not in flattened_commands
+    assert "prune" not in flattened_commands
+    assert "--rmi" not in flattened_commands
+
+
+def test_capacity_cleanup_never_touches_images_when_generic_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_id = "sha256:" + "a" * 64
+    harness = object.__new__(script.Phase2Capacity)
+    harness.project = "llmbenchlab-p2-123456789abc"
+    harness.stack_touched = True
+    harness.formal_slo_v2 = True
+    harness.evidence = {"cleanup": {}}
+    harness._backend_image_ids_before_cleanup = lambda: {image_id}
+
+    def failed_base_cleanup(_self: object) -> str:
+        harness.evidence["cleanup"] = {
+            "status": "failed",
+            "remaining_containers": ["container"],
+            "remaining_project_volumes": [],
+            "remaining_project_networks": [],
+        }
+        return "isolated Compose project cleanup was incomplete"
+
+    monkeypatch.setattr(script.Phase2Acceptance, "cleanup", failed_base_cleanup)
+    harness.run_command = lambda *_args, **_kwargs: pytest.fail("image commands must not run")
+
+    assert harness.cleanup() == "isolated Compose project cleanup was incomplete"
+    assert harness.evidence["cleanup"]["image_cleanup_status"] == "not_attempted"
+
+
+def test_formal_capacity_cleanup_requires_one_candidate_and_one_verified_removal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _capacity_cleanup_harness(monkeypatch, pre_cleanup_images=set())
+    harness.run_command = lambda command, **_kwargs: SimpleNamespace(
+        returncode=0,
+        stdout="",
+        stderr="",
+    )
+
+    assert harness.cleanup() == "formal capacity image cleanup counts were not exact"
+    assert harness.evidence["cleanup"]["image_cleanup_status"] == "failed"
+    assert (
+        harness.evidence["cleanup"]["project_image_candidates"],
+        harness.evidence["cleanup"]["removed_project_images"],
+        harness.evidence["cleanup"]["retained_shared_project_images"],
+        harness.evidence["cleanup"]["remaining_project_images"],
+    ) == (0, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["label_mismatch", "extra_alias", "container_reference", "multiple", "id_mismatch"],
+)
+def test_capacity_cleanup_fails_closed_for_unsafe_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+) -> None:
+    image_a = "sha256:" + "a" * 64
+    image_b = "sha256:" + "b" * 64
+    candidates = [image_a, image_b] if case == "multiple" else [image_a]
+    pre_images = set(candidates)
+    if case == "id_mismatch":
+        pre_images = {image_b}
+    harness = _capacity_cleanup_harness(monkeypatch, pre_cleanup_images=pre_images)
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        if command[:3] == ["docker", "image", "ls"]:
+            return SimpleNamespace(returncode=0, stdout="\n".join(candidates) + "\n", stderr="")
+        if command[:3] == ["docker", "image", "inspect"]:
+            inspected_id = command[-1]
+            project = "llmbenchlab-p2-ffffffffffff" if case == "label_mismatch" else harness.project
+            tags = (
+                [
+                    "llmbenchlab-backend:p2-123456789abc",
+                    "llmbenchlab-backend:shared",
+                ]
+                if case == "extra_alias"
+                else None
+            )
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [_cleanup_image_payload(inspected_id, project=project, tags=tags)]
+                ),
+                stderr="",
+            )
+        if command[:3] == ["docker", "container", "ls"]:
+            stdout = "c" * 64 + "\n" if case == "container_reference" else ""
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        raise AssertionError(command)
+
+    harness.run_command = run_command
+
+    assert harness.cleanup() == "capacity image cleanup safety validation failed"
+    assert harness.evidence["cleanup"]["image_cleanup_status"] == "failed"
+    assert harness.evidence["cleanup"]["project_image_candidates"] == len(candidates)
+    assert harness.evidence["cleanup"]["removed_project_images"] == 0
+    assert harness.evidence["cleanup"]["remaining_project_images"] == len(candidates)
+    assert not any(command[:3] == ["docker", "image", "rm"] for command in commands)
+
+
+@pytest.mark.parametrize("removal_succeeds", [False, True])
+def test_capacity_cleanup_fails_when_removal_fails_or_image_remains(
+    monkeypatch: pytest.MonkeyPatch,
+    removal_succeeds: bool,
+) -> None:
+    image_id = "sha256:" + "a" * 64
+    harness = _capacity_cleanup_harness(monkeypatch, pre_cleanup_images={image_id})
+
+    def run_command(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        if command[:3] == ["docker", "image", "ls"]:
+            return SimpleNamespace(returncode=0, stdout=image_id + "\n", stderr="")
+        if command[:3] == ["docker", "image", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([_cleanup_image_payload(image_id)]),
+                stderr="",
+            )
+        if command[:3] == ["docker", "container", "ls"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[:3] == ["docker", "image", "rm"]:
+            return SimpleNamespace(
+                returncode=0 if removal_succeeds else 1,
+                stdout="",
+                stderr="fixed failure",
+            )
+        raise AssertionError(command)
+
+    harness.run_command = run_command
+
+    expected = (
+        "capacity image cleanup left a project image"
+        if removal_succeeds
+        else "capacity image cleanup removal failed"
+    )
+    assert harness.cleanup() == expected
+    assert harness.evidence["cleanup"]["image_cleanup_status"] == "failed"
+    assert harness.evidence["cleanup"]["removed_project_images"] == 0
+    assert harness.evidence["cleanup"]["remaining_project_images"] == 1
+
+
+@pytest.mark.parametrize(
+    ("timeout_command", "expected_error"),
+    [
+        ("container_reference", "capacity image cleanup reference verification failed"),
+        ("image_removal", "capacity image cleanup removal failed"),
+    ],
+)
+def test_capacity_cleanup_redacts_image_command_timeouts(
+    monkeypatch: pytest.MonkeyPatch,
+    timeout_command: str,
+    expected_error: str,
+) -> None:
+    image_id = "sha256:" + "a" * 64
+    image_tag = "llmbenchlab-backend:p2-123456789abc"
+    config_secret = "SHOULD-NOT-ENTER-EVIDENCE=marker"
+    harness = _capacity_cleanup_harness(monkeypatch, pre_cleanup_images={image_id})
+    image_list_calls = 0
+
+    def run_command(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        nonlocal image_list_calls
+        if command[:3] == ["docker", "image", "ls"]:
+            image_list_calls += 1
+            return SimpleNamespace(returncode=0, stdout=image_id + "\n", stderr="")
+        if command[:3] == ["docker", "image", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([_cleanup_image_payload(image_id)]),
+                stderr="",
+            )
+        if command[:3] == ["docker", "container", "ls"]:
+            if timeout_command == "container_reference":
+                raise script.AcceptanceFailure(
+                    f"timed out: ancestor={image_id} {image_tag} {config_secret}"
+                )
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if command[:3] == ["docker", "image", "rm"]:
+            assert timeout_command == "image_removal"
+            raise script.AcceptanceFailure(f"timed out: {image_id} {image_tag} {config_secret}")
+        raise AssertionError(command)
+
+    harness.run_command = run_command
+
+    cleanup_error = harness.cleanup()
+
+    assert cleanup_error == expected_error
+    assert image_list_calls == 2
+    assert harness.evidence["cleanup"]["image_cleanup_status"] == "failed"
+    assert harness.evidence["cleanup"]["removed_project_images"] == 0
+    assert harness.evidence["cleanup"]["remaining_project_images"] == 1
+    serialized = json.dumps({"cleanup_error": cleanup_error, "evidence": harness.evidence})
+    assert image_id not in serialized
+    assert image_tag not in serialized
+    assert config_secret not in serialized
+
+
 def test_lease_fault_unpauses_worker_when_fence_snapshot_fails() -> None:
     harness = object.__new__(script.Phase2Capacity)
     harness.worker_count = 2
@@ -789,6 +1670,98 @@ def test_lease_fault_unpauses_worker_when_fence_snapshot_fails() -> None:
     assert commands == [
         ["docker", "pause", "container-a"],
         ["docker", "unpause", "container-a"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("expected", "docker_status"),
+    [(True, "paused"), (False, "running")],
+)
+def test_worker_pause_state_uses_docker_engine_status(
+    expected: bool,
+    docker_status: str,
+) -> None:
+    harness = object.__new__(script.Phase2Capacity)
+    harness.project = "llmbenchlab-p2-123456789abc"
+    harness.require = script.Phase2Acceptance.require.__get__(harness)
+    workers = _formal_worker_state(harness.project)
+
+    def run_command(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        assert command == ["docker", "inspect", "a" * 64, "b" * 64]
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "Id": worker["id"],
+                        "Config": {
+                            "Labels": {
+                                "com.docker.compose.project": harness.project,
+                                "com.docker.compose.service": "worker",
+                            }
+                        },
+                        "State": {"Status": docker_status, "Paused": expected},
+                    }
+                    for worker in workers
+                ]
+            ),
+            stderr="",
+        )
+
+    harness.run_command = run_command
+
+    harness._assert_worker_pause_state(workers, expected=expected)
+
+
+def test_warmed_burst_unpauses_full_worker_set_when_second_pause_fails() -> None:
+    harness = object.__new__(script.Phase2Capacity)
+    harness.project = "llmbenchlab-p2-123456789abc"
+    harness.worker_count = 2
+    harness.evidence = {"measurements": []}
+    workers = _formal_worker_state(harness.project)
+    harness.require = script.Phase2Acceptance.require.__get__(harness)
+    harness.service_metas = lambda *_args, **_kwargs: workers
+    harness.wait_queue_drained = lambda **_kwargs: {}
+    harness.task_metrics = lambda: {"managed_backlog": 0}
+    commands: list[list[str]] = []
+
+    def run_command(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        if command == ["docker", "pause", "b" * 64]:
+            raise script.AcceptanceFailure("second pause failed")
+        if command[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "Id": worker["id"],
+                            "Config": {
+                                "Labels": {
+                                    "com.docker.compose.project": harness.project,
+                                    "com.docker.compose.service": "worker",
+                                }
+                            },
+                            "State": {"Status": "running", "Paused": False},
+                        }
+                        for worker in workers
+                    ]
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    harness.run_command = run_command
+
+    with pytest.raises(script.AcceptanceFailure, match="second pause failed"):
+        harness.warmed_pause_burst()
+
+    assert commands == [
+        ["docker", "pause", "a" * 64],
+        ["docker", "pause", "b" * 64],
+        ["docker", "unpause", "a" * 64],
+        ["docker", "unpause", "b" * 64],
+        ["docker", "inspect", "a" * 64, "b" * 64],
     ]
 
 
@@ -942,6 +1915,18 @@ def test_fairness_summary_proves_low_volume_slice_before_high_backlog_drains() -
         "high_volume",
         "low_volume",
     ]
+
+    equal_timestamp_events = {
+        run_id: [dict(event) for event in events] for run_id, events in audit_events.items()
+    }
+    equal_timestamp_events[low_run_id][0]["occurred_at"] = "2026-08-28T00:00:06Z"
+    equal_timestamp = script.fairness_ordering_summary(
+        high_run_ids=high_run_ids,
+        low_run_id=low_run_id,
+        audit_events=equal_timestamp_events,
+        observation=observation,
+    )
+    assert equal_timestamp["low_claim_before_high_backlog_drained"] is False
 
 
 def test_capacity_harness_is_mock_only_sanitized_and_make_addressable() -> None:

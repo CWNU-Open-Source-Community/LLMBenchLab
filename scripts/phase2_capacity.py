@@ -25,7 +25,9 @@ import statistics
 import sys
 import time
 import traceback
+import uuid
 from collections.abc import Sequence
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +36,7 @@ if str(SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
 from phase2_acceptance import (  # noqa: E402
+    PROJECT_PATTERN,
     RUN_SNAPSHOT_FIELDS,
     TASK_MESSAGE_VERSION,
     TASK_STREAM,
@@ -46,7 +49,35 @@ from phase2_acceptance import (  # noqa: E402
     utc_now,
 )
 
-EVIDENCE_SCHEMA = "llmbenchlab-phase2-capacity-evidence-v1"
+CAPACITY_EVIDENCE_SCHEMA_V1 = "llmbenchlab-phase2-capacity-evidence-v1"
+CAPACITY_EVIDENCE_SCHEMA_V2 = "llmbenchlab-phase2-capacity-evidence-v2"
+EVIDENCE_SCHEMA = CAPACITY_EVIDENCE_SCHEMA_V1
+DEFAULT_QUALIFICATION_PROFILE = "capacity-v1"
+FORMAL_QUALIFICATION_PROFILE = "P2-local-control-plane-v2"
+QUALIFICATION_PROFILES = (
+    DEFAULT_QUALIFICATION_PROFILE,
+    FORMAL_QUALIFICATION_PROFILE,
+)
+FORMAL_V2_ARGUMENTS: dict[str, int | float] = {
+    "workers": 2,
+    "runs_per_phase": 4,
+    "backlog_limit": 4,
+    "burst_runs": 6,
+    "submit_concurrency": 6,
+    "run_concurrency": 1,
+    "question_quantum": 5,
+    "mock_delay_seconds": 0.08,
+    "timeout_seconds": 180,
+    "lease_seconds": 30,
+    "heartbeat_seconds": 10,
+    "worker_poll_seconds": 1,
+    "worker_max_attempts": 3,
+    "retry_backoff_base_seconds": 1,
+    "retry_backoff_cap_seconds": 30,
+    "worker_shutdown_grace_seconds": 30,
+    "redis_block_milliseconds": 1000,
+    "redis_operation_timeout_seconds": 1,
+}
 DEFAULT_ARTIFACTS_ROOT = Path(".pytest_cache/artifacts/phase2-capacity")
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 DEMO_QUESTIONS_PER_RUN = 15
@@ -85,6 +116,14 @@ def _is_sha256_identity(value: object) -> bool:
         and value.startswith("sha256:")
         and len(value) == 71
         and all(character in "0123456789abcdef" for character in value[7:])
+    )
+
+
+def _is_container_identity(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
     )
 
 
@@ -131,11 +170,15 @@ def image_content_sha256(inspected_image: dict[str, Any]) -> str:
 
 
 def reconciliation_expectations(
-    *, runs_per_phase: int, backlog_limit: int
+    *,
+    runs_per_phase: int,
+    backlog_limit: int,
+    formal_slo_v2: bool = False,
 ) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
     """Derive terminal ledger counts from the accepted capacity workload."""
 
-    completed_runs = 2 * runs_per_phase + 2 * backlog_limit + 2
+    backlog_groups = 3 if formal_slo_v2 else 2
+    completed_runs = 2 * runs_per_phase + backlog_groups * backlog_limit + 2
     settled_actual = completed_runs * DEMO_QUESTIONS_PER_RUN
     reservations = settled_actual + 1
     return (
@@ -616,30 +659,27 @@ def fairness_ordering_summary(
                 }
             )
     ordered.sort(key=lambda event: (parse_datetime(event["occurred_at"]), event["event_id"]))
-    low_claim_index = next(
-        (
-            index
-            for index, event in enumerate(ordered)
-            if event["run_id"] == low_run_id and event["event_type"] == "run_claimed"
-        ),
-        None,
-    )
-    high_terminal_indices = [
-        index
-        for index, event in enumerate(ordered)
+    low_claim_times = [
+        parse_datetime(event["occurred_at"])
+        for event in ordered
+        if event["run_id"] == low_run_id and event["event_type"] == "run_claimed"
+    ]
+    high_terminal_times = [
+        parse_datetime(event["occurred_at"])
+        for event in ordered
         if event["run_id"] in high_ids and event["event_type"] == "run_terminal"
     ]
     low_observed = dict(observation["low_run"])
     high_observed = [dict(run) for run in observation["high_runs"]]
     return {
-        "low_volume_claim_observed": low_claim_index is not None,
+        "low_volume_claim_observed": bool(low_claim_times),
         "low_volume_slice_observed": int(low_observed.get("completed_questions") or 0) > 0,
         "high_volume_incomplete_at_low_slice": sum(
             run.get("status") not in TERMINAL_STATUSES for run in high_observed
         ),
-        "low_claim_before_high_backlog_drained": low_claim_index is not None
-        and bool(high_terminal_indices)
-        and low_claim_index < max(high_terminal_indices),
+        "low_claim_before_high_backlog_drained": bool(low_claim_times)
+        and bool(high_terminal_times)
+        and min(low_claim_times) < max(high_terminal_times),
         "observation": {
             "low_run": low_observed,
             "high_runs": high_observed,
@@ -721,6 +761,232 @@ def first_claim_at_or_after(
     )
 
 
+def _validated_worker_owner(
+    worker_id: object,
+    validated_workers: dict[str, dict[str, Any]],
+) -> str:
+    """Parse an exact production Worker owner and map it to inspected runtime facts."""
+
+    if not isinstance(worker_id, str):
+        raise AcceptanceFailure("burst claim omitted a typed Worker owner")
+    parts = worker_id.split(":")
+    if len(parts) != 4 or parts[0] != "worker":
+        raise AcceptanceFailure("burst claim Worker owner did not use the exact runtime format")
+    hostname, pid_text, instance_text = parts[1:]
+    try:
+        pid = int(pid_text)
+        instance = uuid.UUID(instance_text)
+    except (ValueError, AttributeError) as exc:
+        raise AcceptanceFailure("burst claim Worker owner was malformed") from exc
+    if (
+        pid <= 0
+        or pid > 2_147_483_647
+        or pid_text != str(pid)
+        or instance.version != 4
+        or str(instance) != instance_text
+    ):
+        raise AcceptanceFailure("burst claim Worker owner was not canonical")
+    if hostname not in validated_workers:
+        raise AcceptanceFailure("burst claim owner did not map to a validated Worker")
+    return hostname
+
+
+def burst_worker_participation(
+    *,
+    accepted_run_ids: Sequence[str],
+    audit_events: dict[str, Sequence[dict[str, Any]]],
+    worker_state: Sequence[dict[str, Any]],
+    project: str,
+    backlog_ready_at: str,
+) -> dict[str, Any]:
+    """Return raw, independently checkable claim ownership for one formal burst."""
+
+    accepted = set(accepted_run_ids)
+    if len(accepted) != len(accepted_run_ids) or set(audit_events) != accepted:
+        raise AcceptanceFailure("burst claim evidence did not match the accepted Run set")
+    if len(worker_state) != 2:
+        raise AcceptanceFailure("formal burst did not validate exactly two Workers")
+
+    validated: dict[str, dict[str, Any]] = {}
+    for worker in worker_state:
+        hostname = worker.get("hostname")
+        container_id = worker.get("id")
+        if (
+            not isinstance(hostname, str)
+            or not hostname
+            or ":" in hostname
+            or any(character.isspace() or ord(character) < 32 for character in hostname)
+            or not _is_container_identity(container_id)
+            or worker.get("project") != project
+            or worker.get("service") != "worker"
+            or worker.get("status") != "running"
+            or worker.get("health") != "healthy"
+        ):
+            raise AcceptanceFailure("formal burst Worker runtime metadata was invalid")
+        if hostname in validated:
+            raise AcceptanceFailure("formal burst Worker runtime identities were not unique")
+        validated[hostname] = {
+            "container_id": container_id,
+            "hostname": hostname,
+        }
+
+    threshold = parse_datetime(backlog_ready_at)
+    claims: list[dict[str, str]] = []
+    owner_ids: set[str] = set()
+    mapped_workers: set[str] = set()
+    for run_id in accepted_run_ids:
+        for event in audit_events[run_id]:
+            if event.get("event_type") != "run_claimed":
+                continue
+            occurred_at = event.get("occurred_at")
+            if not isinstance(occurred_at, str) or parse_datetime(occurred_at) < threshold:
+                continue
+            worker_id = event.get("worker_id")
+            mapped_hostname = _validated_worker_owner(worker_id, validated)
+            owner_ids.add(str(worker_id))
+            mapped_workers.add(mapped_hostname)
+            claims.append(
+                {
+                    "run_id": run_id,
+                    "worker_id": str(worker_id),
+                    "occurred_at": occurred_at,
+                }
+            )
+
+    claims.sort(key=lambda item: (parse_datetime(item["occurred_at"]), item["run_id"]))
+    if {claim["run_id"] for claim in claims} != accepted:
+        raise AcceptanceFailure("formal burst did not retain a boundary claim for every Run")
+    if len(owner_ids) != 2 or len(mapped_workers) != 2:
+        raise AcceptanceFailure("formal burst did not prove exactly two distinct claim Workers")
+    return {
+        "validated_workers": sorted(validated.values(), key=lambda item: item["container_id"]),
+        "claims": claims,
+        "distinct_claim_workers": len(owner_ids),
+        "all_claim_workers_validated": True,
+    }
+
+
+def formal_worker_state_witness(
+    worker_state: Sequence[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project validated formal Worker metadata onto the consumer contract."""
+
+    fields = ("id", "hostname", "project", "service", "status", "health")
+    return [{field: worker[field] for field in fields} for worker in worker_state]
+
+
+def burst_segmented_timing(
+    *,
+    final_runs: Sequence[dict[str, Any]],
+    audit_events: dict[str, Sequence[dict[str, Any]]],
+    participation: dict[str, Any],
+    suspend_completed_at: str,
+    backlog_ready_at: str,
+    restore_completed_at: str,
+    suspend_seconds: float,
+    backlog_build_seconds: float,
+    restore_command_seconds: float,
+    drain_seconds: float,
+) -> dict[str, Any]:
+    """Keep UTC durable facts and process-monotonic durations in separate domains."""
+
+    claims = list(participation["claims"])
+    first_claim = min(claims, key=lambda item: parse_datetime(item["occurred_at"]))
+    first_by_owner: dict[str, dict[str, str]] = {}
+    for claim in claims:
+        first_by_owner.setdefault(claim["worker_id"], claim)
+    all_workers_first_claim = max(
+        first_by_owner.values(), key=lambda item: parse_datetime(item["occurred_at"])
+    )
+
+    accepted = {str(run["id"]) for run in final_runs}
+    threshold = parse_datetime(backlog_ready_at)
+    claim_or_yield: list[dict[str, str]] = []
+    for run_id in sorted(accepted):
+        for event in audit_events[run_id]:
+            event_type = event.get("event_type")
+            occurred_at = event.get("occurred_at")
+            if (
+                event_type in {"run_claimed", "run_yielded"}
+                and isinstance(occurred_at, str)
+                and parse_datetime(occurred_at) >= threshold
+            ):
+                claim_or_yield.append(
+                    {
+                        "run_id": run_id,
+                        "event_type": str(event_type),
+                        "occurred_at": occurred_at,
+                    }
+                )
+    claim_or_yield.sort(
+        key=lambda item: (parse_datetime(item["occurred_at"]), item["run_id"], item["event_type"])
+    )
+    adjacent_gaps = [
+        nonnegative_utc_elapsed_seconds(previous["occurred_at"], current["occurred_at"])
+        for previous, current in pairwise(claim_or_yield)
+    ]
+
+    claims_by_run: dict[str, list[dict[str, str]]] = {run_id: [] for run_id in accepted}
+    for claim in claims:
+        claims_by_run[claim["run_id"]].append(claim)
+    run_timings: list[dict[str, Any]] = []
+    for run in sorted(final_runs, key=lambda item: str(item["id"])):
+        run_id = str(run["id"])
+        finished_at = run.get("finished_at")
+        if not isinstance(finished_at, str) or not claims_by_run[run_id]:
+            raise AcceptanceFailure("formal burst Run timing facts were incomplete")
+        run_first_claim = min(
+            claims_by_run[run_id], key=lambda item: parse_datetime(item["occurred_at"])
+        )["occurred_at"]
+        run_timings.append(
+            {
+                "run_id": run_id,
+                "first_claim_at": run_first_claim,
+                "finished_at": finished_at,
+                "duration_seconds": nonnegative_utc_elapsed_seconds(run_first_claim, finished_at),
+            }
+        )
+
+    first_claim_to_finish = [float(item["duration_seconds"]) for item in run_timings]
+    return {
+        "clock_domains": {
+            "monotonic_seconds": "process_monotonic",
+            "durable_utc": "database_utc",
+        },
+        "monotonic_seconds": {
+            "suspend": round(suspend_seconds, 6),
+            "backlog_build": round(backlog_build_seconds, 6),
+            "restore_command": round(restore_command_seconds, 6),
+            "drain": round(drain_seconds, 6),
+        },
+        "durable_utc": {
+            "suspend_completed_at": suspend_completed_at,
+            "backlog_ready_at": backlog_ready_at,
+            "restore_completed_at": restore_completed_at,
+            "first_claim_at": first_claim["occurred_at"],
+            "all_workers_first_claim_at": all_workers_first_claim["occurred_at"],
+            "claim_or_yield_events": claim_or_yield,
+            "run_first_claim_to_finish": run_timings,
+        },
+        "durable_seconds": {
+            "backlog_ready_to_first_claim": nonnegative_utc_elapsed_seconds(
+                backlog_ready_at, first_claim["occurred_at"]
+            ),
+            "backlog_ready_to_all_workers_first_claim": nonnegative_utc_elapsed_seconds(
+                backlog_ready_at, all_workers_first_claim["occurred_at"]
+            ),
+            "adjacent_claim_or_yield_gap": {
+                **distribution(adjacent_gaps),
+                "samples": adjacent_gaps,
+            },
+            "first_claim_to_finish": {
+                **distribution(first_claim_to_finish),
+                "samples": first_claim_to_finish,
+            },
+        },
+    }
+
+
 def validate_arguments(args: argparse.Namespace) -> None:
     if args.workers < 2:
         raise ValueError("--workers must be at least 2")
@@ -764,6 +1030,21 @@ def validate_arguments(args: argparse.Namespace) -> None:
         raise ValueError("--redis-operation-timeout-seconds must be between 0 and 30")
     if not 0 <= args.worker_shutdown_grace_seconds <= 3600:
         raise ValueError("--worker-shutdown-grace-seconds must be between 0 and 3600")
+    if args.qualification_profile == FORMAL_QUALIFICATION_PROFILE:
+        differing_fields = [
+            field
+            for field, expected in FORMAL_V2_ARGUMENTS.items()
+            if getattr(args, field) != expected
+        ]
+        if differing_fields:
+            raise ValueError(
+                "P2-local-control-plane-v2 fixed configuration drift: "
+                + json.dumps(
+                    {"differing_fields": differing_fields},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
 
 
 class Phase2Capacity(Phase2Acceptance):
@@ -790,6 +1071,8 @@ class Phase2Capacity(Phase2Acceptance):
         self.redis_operation_timeout_seconds = float(args.redis_operation_timeout_seconds)
         self.worker_shutdown_grace_seconds = float(args.worker_shutdown_grace_seconds)
         self.measurement_order = str(args.measurement_order)
+        self.qualification_profile = str(args.qualification_profile)
+        self.formal_slo_v2 = self.qualification_profile == FORMAL_QUALIFICATION_PROFILE
         self.low_volume_model_id: str | None = None
         self.policy_document: dict[str, Any] | None = None
         self.env["LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS"] = str(self.mock_delay_seconds)
@@ -830,7 +1113,9 @@ class Phase2Capacity(Phase2Acceptance):
         ).resolve() / self.project
         self.evidence_path = self.artifact_dir / "evidence.json"
         self.evidence = {
-            "schema_version": EVIDENCE_SCHEMA,
+            "schema_version": (
+                CAPACITY_EVIDENCE_SCHEMA_V2 if self.formal_slo_v2 else CAPACITY_EVIDENCE_SCHEMA_V1
+            ),
             "status": "initializing",
             "started_at": utc_now(),
             "finished_at": None,
@@ -848,6 +1133,7 @@ class Phase2Capacity(Phase2Acceptance):
                 "real-Provider capacity, HA, or unlimited scaling."
             ),
             "configuration": {
+                "qualification_profile": self.qualification_profile,
                 "workers": self.worker_count,
                 "runs_per_measurement_phase": self.runs_per_phase,
                 "backlog_limit": self.backlog_limit,
@@ -909,7 +1195,7 @@ class Phase2Capacity(Phase2Acceptance):
                     1 <= self.question_quantum < DEMO_QUESTIONS_PER_RUN
                 ),
                 "local_admission_not_provider_sla": True,
-                "capacity_evidence_schema": EVIDENCE_SCHEMA,
+                "capacity_evidence_schema": self.evidence.get("schema_version", EVIDENCE_SCHEMA),
                 "real_provider_credentials_removed": list(PROVIDER_CREDENTIAL_ENV_KEYS),
             }
         )
@@ -1415,6 +1701,7 @@ WHERE s.datname = current_database();
         database_after: dict[str, Any],
         queue_before: dict[str, Any],
         queue_after: dict[str, Any],
+        audit_events: dict[str, Sequence[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         completed = [run for run in final_runs if run["status"] == "completed"]
         question_latencies: list[float] = []
@@ -1449,7 +1736,9 @@ WHERE s.datname = current_database();
             terminal_statuses[status] = terminal_statuses.get(status, 0) + 1
         total_questions = sum(int(run["completed_questions"]) for run in final_runs)
         failure_retries = sum(int(run.get("failed_attempt_count") or 0) for run in final_runs)
-        audit_events = {run["id"]: self.run_audit_events(run["id"]) for run in final_runs}
+        audit_events = audit_events or {
+            run["id"]: self.run_audit_events(run["id"]) for run in final_runs
+        }
         scheduling = cooperative_scheduling_summary(final_runs, audit_events)
         self.require(
             scheduling["all_runs_dispatched_more_than_once"] and scheduling["all_runs_yielded"],
@@ -1585,26 +1874,74 @@ WHERE s.datname = current_database();
         self.write_evidence()
         return result
 
-    def bounded_queue_burst(self) -> dict[str, Any]:
-        running_workers = self.service_metas("worker")
+    def _validated_running_workers(self) -> list[dict[str, Any]]:
+        workers = self.service_metas("worker")
         self.require(
-            len(running_workers) == self.worker_count,
-            "backlog admission scenario requires the configured Worker count",
-            running_workers,
+            len(workers) == self.worker_count
+            and all(
+                worker.get("project") == self.project
+                and worker.get("service") == "worker"
+                and worker.get("status") == "running"
+                and worker.get("health") == "healthy"
+                for worker in workers
+            ),
+            "backlog admission scenario requires the configured healthy Workers",
+            workers,
         )
-        self.wait_queue_drained(timeout=90)
-        metrics_before_stop = self.task_metrics()
-        self.require(
-            int(metrics_before_stop["managed_backlog"]) == 0,
-            "backlog admission scenario did not start from an empty managed backlog",
-            metrics_before_stop,
+        return workers
+
+    def _assert_worker_pause_state(
+        self,
+        workers: Sequence[dict[str, Any]],
+        *,
+        expected: bool,
+    ) -> None:
+        completed = self.run_command(
+            ["docker", "inspect", *[str(worker["id"]) for worker in workers]],
+            timeout=20,
+            record=False,
         )
-        self.compose("stop", "worker", timeout=120)
-        stopped_workers = self.service_metas("worker", include_stopped=True)
-        database_before = self.database_pressure()
-        queue_before = self.queue_pressure()
-        started = time.monotonic()
-        submissions = self.submit_runs(self.burst_runs)
+        try:
+            inspected = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise AcceptanceFailure("Worker pause-state inspect was not valid JSON") from exc
+        by_id = {item.get("Id"): item for item in inspected if isinstance(item, dict)}
+        expected_status = "paused" if expected else "running"
+        for worker in workers:
+            item = by_id.get(worker["id"])
+            labels = ((item or {}).get("Config") or {}).get("Labels") or {}
+            state = (item or {}).get("State") or {}
+            self.require(
+                labels.get("com.docker.compose.project") == self.project
+                and labels.get("com.docker.compose.service") == "worker"
+                and state.get("Status") == expected_status
+                and state.get("Paused") is expected,
+                "Worker pause-state verification failed",
+            )
+
+    def _pause_workers(self, workers: Sequence[dict[str, Any]]) -> None:
+        for worker in workers:
+            self.run_command(["docker", "pause", str(worker["id"])], timeout=30)
+        self._assert_worker_pause_state(workers, expected=True)
+
+    def _unpause_workers(self, workers: Sequence[dict[str, Any]]) -> None:
+        for worker in workers:
+            self.run_command(["docker", "unpause", str(worker["id"])], timeout=30)
+        self._assert_worker_pause_state(workers, expected=False)
+
+    def _recover_unpaused_workers(self, workers: Sequence[dict[str, Any]]) -> None:
+        for worker in workers:
+            # Continue across the full validated set; the exact state read-back below
+            # is authoritative even if one idempotent recovery command timed out.
+            with contextlib.suppress(AcceptanceFailure):
+                self.run_command(
+                    ["docker", "unpause", str(worker["id"])],
+                    timeout=30,
+                    check=False,
+                )
+        self._assert_worker_pause_state(workers, expected=False)
+
+    def _validate_burst_submissions(self, submissions: dict[str, Any]) -> tuple[list[str], int]:
         expected_rejections = self.burst_runs - self.backlog_limit
         self.require(
             submissions["status_counts"] == {"202": self.backlog_limit, "429": expected_rejections}
@@ -1628,84 +1965,197 @@ WHERE s.datname = current_database();
             "accepted backlog submissions did not produce unique durable Run IDs",
             run_ids,
         )
-        pending = [self.get_run(run_id) for run_id in run_ids]
-        self.require(
-            all(run["status"] == "pending" and run["completed_questions"] == 0 for run in pending),
-            "stopped-Worker burst did not remain durably pending",
-            pending,
-        )
-        backlog_metrics = self.task_metrics()
-        self.require(
-            int(backlog_metrics["managed_backlog"]) == self.backlog_limit
-            and int(backlog_metrics["pending"]) == self.backlog_limit
-            and int(backlog_metrics["running"]) == 0,
-            "database backlog gauge did not reach the exact configured limit",
-            backlog_metrics,
-        )
-        drain_started = time.monotonic()
-        self.start_validated_containers(stopped_workers, expected_service="worker")
-        worker_state = self.wait_service_healthy("worker", count=self.worker_count, timeout=120)
-        final_runs, metrics = self.wait_runs_terminal(run_ids)
-        backlog_drain_seconds = round(time.monotonic() - drain_started, 6)
-        self.require(
-            {run["id"] for run in final_runs} == set(run_ids)
-            and all(
-                run["status"] == "completed"
-                and int(run["completed_questions"]) == DEMO_QUESTIONS_PER_RUN
-                for run in final_runs
-            ),
-            "an accepted Run was lost or incomplete while draining the full backlog",
-            final_runs,
-        )
-        elapsed = time.monotonic() - started
+        return run_ids, expected_rejections
+
+    def _backlog_burst(
+        self,
+        *,
+        name: str,
+        barrier: str,
+        require_worker_participation: bool,
+    ) -> dict[str, Any]:
+        running_workers = self._validated_running_workers()
         self.wait_queue_drained(timeout=90)
-        drained_metrics = self.task_metrics()
+        initial_metrics = self.task_metrics()
         self.require(
-            int(drained_metrics["managed_backlog"]) == 0
-            and int(drained_metrics["pending"]) == 0
-            and int(drained_metrics["running"]) == 0,
-            "accepted backlog did not drain to zero",
-            drained_metrics,
+            int(initial_metrics["managed_backlog"]) == 0,
+            "backlog admission scenario did not start from an empty managed backlog",
+            initial_metrics,
         )
-        database_after = self.database_pressure()
-        queue_after = self.queue_pressure()
-        result = self.phase_result(
-            name="bounded_queue_burst_and_drain",
-            workers=self.worker_count,
-            submissions=submissions,
-            final_runs=final_runs,
-            elapsed_seconds=elapsed,
-            metrics=metrics,
-            database_before=database_before,
-            database_after=database_after,
-            queue_before=queue_before,
-            queue_after=queue_after,
-        )
-        result.update(
-            {
-                "mode": "exact_backlog_limit_concurrent_202_429_then_drain",
-                "local_admission_boundary": (
-                    "Database-serialized local Run admission only; this is not Provider "
-                    "admission, Provider billing truth, or a Provider SLA."
+
+        pause_may_be_active = False
+        try:
+            suspend_started = time.monotonic()
+            if barrier == "warmed_pause":
+                pause_may_be_active = True
+                self._pause_workers(running_workers)
+                suspended_workers = list(running_workers)
+            elif barrier == "cold_start":
+                self.compose("stop", "worker", timeout=120)
+                suspended_workers = self.service_metas("worker", include_stopped=True)
+                self.require(
+                    len(suspended_workers) == self.worker_count
+                    and all(
+                        worker.get("project") == self.project
+                        and worker.get("service") == "worker"
+                        and worker.get("status") == "exited"
+                        for worker in suspended_workers
+                    ),
+                    "cold burst did not stop every validated Worker",
+                    suspended_workers,
+                )
+            else:  # pragma: no cover - internal caller contract
+                raise AcceptanceFailure("unsupported backlog barrier")
+            suspend_seconds = time.monotonic() - suspend_started
+            suspend_metrics = self.task_metrics()
+            database_before = self.database_pressure()
+            queue_before = self.queue_pressure()
+
+            wall_started = time.monotonic()
+            submissions = self.submit_runs(self.burst_runs)
+            run_ids, expected_rejections = self._validate_burst_submissions(submissions)
+            pending = [self.get_run(run_id) for run_id in run_ids]
+            self.require(
+                all(
+                    run["status"] == "pending" and run["completed_questions"] == 0
+                    for run in pending
                 ),
-                "configured_backlog_limit": self.backlog_limit,
-                "expected_status_counts": {
-                    "202": self.backlog_limit,
-                    "429": expected_rejections,
-                },
-                "observed_status_counts": submissions["status_counts"],
-                "typed_rejections": submissions["rejected"],
-                "accepted_run_ids": run_ids,
-                "accepted_runs_preserved": {run["id"] for run in final_runs} == set(run_ids),
-                "backlog_drain_seconds": backlog_drain_seconds,
-                "backlog_at_configured_limit": backlog_metrics,
-                "backlog_after_drain": drained_metrics,
-                "worker_state_after_restart": worker_state,
-            }
+                "suspended-Worker burst did not remain durably pending",
+                pending,
+            )
+            backlog_metrics = self.task_metrics()
+            self.require(
+                int(backlog_metrics["managed_backlog"]) == self.backlog_limit
+                and int(backlog_metrics["pending"]) == self.backlog_limit
+                and int(backlog_metrics["running"]) == 0,
+                "database backlog gauge did not reach the exact configured limit",
+                backlog_metrics,
+            )
+            backlog_build_seconds = time.monotonic() - wall_started
+
+            drain_started = time.monotonic()
+            restore_started = drain_started
+            if barrier == "warmed_pause":
+                self._unpause_workers(suspended_workers)
+                pause_may_be_active = False
+            else:
+                self.start_validated_containers(suspended_workers, expected_service="worker")
+            restore_command_seconds = time.monotonic() - restore_started
+            restore_metrics = self.task_metrics()
+            worker_state = self.wait_service_healthy("worker", count=self.worker_count, timeout=120)
+            final_runs, metrics = self.wait_runs_terminal(run_ids)
+            drain_seconds = time.monotonic() - drain_started
+            self.require(
+                {str(run["id"]) for run in final_runs} == set(run_ids)
+                and all(
+                    run["status"] == "completed"
+                    and int(run["completed_questions"]) == DEMO_QUESTIONS_PER_RUN
+                    for run in final_runs
+                ),
+                "an accepted Run was lost or incomplete while draining the full backlog",
+                final_runs,
+            )
+            elapsed = time.monotonic() - wall_started
+            self.wait_queue_drained(timeout=90)
+            drained_metrics = self.task_metrics()
+            self.require(
+                int(drained_metrics["managed_backlog"]) == 0
+                and int(drained_metrics["pending"]) == 0
+                and int(drained_metrics["running"]) == 0,
+                "accepted backlog did not drain to zero",
+                drained_metrics,
+            )
+            database_after = self.database_pressure()
+            queue_after = self.queue_pressure()
+            audit_events = {run_id: self.run_audit_events(run_id) for run_id in run_ids}
+            result = self.phase_result(
+                name=name,
+                workers=self.worker_count,
+                submissions=submissions,
+                final_runs=final_runs,
+                elapsed_seconds=elapsed,
+                metrics=metrics,
+                database_before=database_before,
+                database_after=database_after,
+                queue_before=queue_before,
+                queue_after=queue_after,
+                audit_events=audit_events,
+            )
+            result.update(
+                {
+                    "mode": "exact_backlog_limit_concurrent_202_429_then_drain",
+                    "local_admission_boundary": (
+                        "Database-serialized local Run admission only; this is not Provider "
+                        "admission, Provider billing truth, or a Provider SLA."
+                    ),
+                    "configured_backlog_limit": self.backlog_limit,
+                    "expected_status_counts": {
+                        "202": self.backlog_limit,
+                        "429": expected_rejections,
+                    },
+                    "observed_status_counts": submissions["status_counts"],
+                    "typed_rejections": submissions["rejected"],
+                    "accepted_run_ids": run_ids,
+                    "accepted_runs_preserved": {str(run["id"]) for run in final_runs}
+                    == set(run_ids),
+                    "backlog_drain_seconds": round(drain_seconds, 6),
+                    "backlog_at_configured_limit": backlog_metrics,
+                    "backlog_after_drain": drained_metrics,
+                    "worker_state_after_restart": worker_state,
+                }
+            )
+            if require_worker_participation:
+                result["barrier"] = barrier
+                participation = burst_worker_participation(
+                    accepted_run_ids=run_ids,
+                    audit_events=audit_events,
+                    worker_state=worker_state,
+                    project=self.project,
+                    backlog_ready_at=str(backlog_metrics["timestamp"]),
+                )
+                result["worker_state_after_restart"] = formal_worker_state_witness(worker_state)
+                result["worker_participation"] = participation
+                result["timing"] = burst_segmented_timing(
+                    final_runs=final_runs,
+                    audit_events=audit_events,
+                    participation=participation,
+                    suspend_completed_at=str(suspend_metrics["timestamp"]),
+                    backlog_ready_at=str(backlog_metrics["timestamp"]),
+                    restore_completed_at=str(restore_metrics["timestamp"]),
+                    suspend_seconds=suspend_seconds,
+                    backlog_build_seconds=backlog_build_seconds,
+                    restore_command_seconds=restore_command_seconds,
+                    drain_seconds=drain_seconds,
+                )
+            self.evidence["measurements"].append(result)
+            self.write_evidence()
+            return result
+        finally:
+            if pause_may_be_active:
+                self._recover_unpaused_workers(running_workers)
+
+    def bounded_queue_burst(self) -> dict[str, Any]:
+        """Preserve the default capacity profile's single cold burst."""
+
+        return self._backlog_burst(
+            name="bounded_queue_burst_and_drain",
+            barrier="cold_start",
+            require_worker_participation=False,
         )
-        self.evidence["measurements"].append(result)
-        self.write_evidence()
-        return result
+
+    def warmed_pause_burst(self) -> dict[str, Any]:
+        return self._backlog_burst(
+            name="warmed_pause_burst_and_drain",
+            barrier="warmed_pause",
+            require_worker_participation=True,
+        )
+
+    def cold_start_burst(self) -> dict[str, Any]:
+        return self._backlog_burst(
+            name="cold_start_burst_and_drain",
+            barrier="cold_start",
+            require_worker_participation=True,
+        )
 
     def model_fairness_scenario(self) -> dict[str, Any]:
         self.require(self.model_id is not None, "high-volume Mock model was not initialized")
@@ -2110,6 +2560,210 @@ WHERE s.datname = current_database();
         self.write_evidence()
         return fault
 
+    def _backend_image_ids_before_cleanup(self) -> set[str]:
+        image_ids: set[str] = set()
+        for service in ("api", "migrate", "worker"):
+            for metadata in self.service_metas(service, include_stopped=True):
+                image_id = metadata.get("image_id")
+                self.require(
+                    metadata.get("project") == self.project
+                    and metadata.get("service") == service
+                    and _is_sha256_identity(image_id),
+                    "backend container image identity failed cleanup validation",
+                )
+                image_ids.add(str(image_id))
+        return image_ids
+
+    def _project_image_ids(self) -> list[str]:
+        completed = self.run_command(
+            [
+                "docker",
+                "image",
+                "ls",
+                "--filter",
+                f"label=com.docker.compose.project={self.project}",
+                "--quiet",
+                "--no-trunc",
+            ],
+            timeout=20,
+            check=False,
+            record=False,
+        )
+        if completed.returncode != 0:
+            raise AcceptanceFailure("project image enumeration failed")
+        image_ids = sorted(set(completed.stdout.split()))
+        if not all(_is_sha256_identity(image_id) for image_id in image_ids):
+            raise AcceptanceFailure("project image enumeration returned an invalid identity")
+        return image_ids
+
+    def _inspect_cleanup_image(self, image_id: str) -> dict[str, Any]:
+        completed = self.run_command(
+            ["docker", "image", "inspect", image_id],
+            timeout=20,
+            check=False,
+            record=False,
+        )
+        if completed.returncode != 0:
+            raise AcceptanceFailure("project image inspection failed")
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise AcceptanceFailure("project image inspection was not valid JSON") from exc
+        if (
+            not isinstance(payload, list)
+            or len(payload) != 1
+            or not isinstance(payload[0], dict)
+            or payload[0].get("Id") != image_id
+        ):
+            raise AcceptanceFailure("project image inspection identity did not match")
+        return payload[0]
+
+    def cleanup(self) -> str | None:
+        """Run generic cleanup first, then remove only this capacity build's exact tag."""
+
+        image_counts: dict[str, Any] = {
+            "image_cleanup_status": "not_attempted",
+            "project_image_candidates": 0,
+            "removed_project_images": 0,
+            "retained_shared_project_images": 0,
+            "remaining_project_images": None,
+        }
+        if not self.stack_touched or PROJECT_PATTERN.fullmatch(self.project) is None:
+            base_error = super().cleanup()
+            self.evidence.setdefault("cleanup", {}).update(image_counts)
+            return base_error
+
+        pre_cleanup_images: set[str] | None = None
+        pre_cleanup_error = False
+        try:
+            pre_cleanup_images = self._backend_image_ids_before_cleanup()
+        except (AcceptanceFailure, KeyError, TypeError, ValueError):
+            pre_cleanup_error = True
+
+        base_error = super().cleanup()
+        cleanup_evidence = self.evidence.setdefault("cleanup", {})
+        cleanup_evidence.update(image_counts)
+        if base_error is not None:
+            return base_error
+        if (
+            cleanup_evidence.get("remaining_containers")
+            or cleanup_evidence.get("remaining_project_volumes")
+            or cleanup_evidence.get("remaining_project_networks")
+        ):
+            return "isolated Compose project cleanup was incomplete"
+        if pre_cleanup_error or pre_cleanup_images is None:
+            cleanup_evidence["image_cleanup_status"] = "failed"
+            return "capacity image cleanup precondition failed"
+
+        try:
+            candidates = self._project_image_ids()
+        except AcceptanceFailure:
+            cleanup_evidence["image_cleanup_status"] = "failed"
+            return "capacity image cleanup enumeration failed"
+        cleanup_evidence["project_image_candidates"] = len(candidates)
+        cleanup_evidence["remaining_project_images"] = len(candidates)
+
+        expected_tag = f"llmbenchlab-backend:p2-{self.project.rsplit('-', 1)[-1]}"
+        unsafe_candidates = len(candidates) > 1
+        inspected_candidates: dict[str, dict[str, Any]] = {}
+        for image_id in candidates:
+            try:
+                inspected = self._inspect_cleanup_image(image_id)
+            except AcceptanceFailure:
+                unsafe_candidates = True
+                continue
+            inspected_candidates[image_id] = inspected
+            config = inspected.get("Config")
+            labels = config.get("Labels") if isinstance(config, dict) else None
+            repo_tags = inspected.get("RepoTags")
+            if (
+                not isinstance(labels, dict)
+                or labels.get("com.docker.compose.project") != self.project
+                or labels.get("com.docker.compose.service") not in {"api", "migrate", "worker"}
+                or repo_tags != [expected_tag]
+            ):
+                unsafe_candidates = True
+                continue
+            try:
+                references = self.run_command(
+                    [
+                        "docker",
+                        "container",
+                        "ls",
+                        "-a",
+                        "--filter",
+                        f"ancestor={image_id}",
+                        "--quiet",
+                        "--no-trunc",
+                    ],
+                    timeout=20,
+                    check=False,
+                    record=False,
+                )
+            except AcceptanceFailure:
+                cleanup_evidence["image_cleanup_status"] = "failed"
+                cleanup_evidence["retained_shared_project_images"] = len(candidates)
+                with contextlib.suppress(AcceptanceFailure):
+                    cleanup_evidence["remaining_project_images"] = len(self._project_image_ids())
+                return "capacity image cleanup reference verification failed"
+            if references.returncode != 0 or references.stdout.split():
+                unsafe_candidates = True
+
+        if set(candidates) != pre_cleanup_images:
+            unsafe_candidates = True
+        if unsafe_candidates or len(inspected_candidates) != len(candidates):
+            cleanup_evidence["image_cleanup_status"] = "failed"
+            cleanup_evidence["retained_shared_project_images"] = len(candidates)
+            with contextlib.suppress(AcceptanceFailure):
+                cleanup_evidence["remaining_project_images"] = len(self._project_image_ids())
+            return "capacity image cleanup safety validation failed"
+
+        if candidates:
+            try:
+                removal = self.run_command(
+                    ["docker", "image", "rm", expected_tag],
+                    timeout=60,
+                    check=False,
+                    record=False,
+                )
+            except AcceptanceFailure:
+                cleanup_evidence["image_cleanup_status"] = "failed"
+                with contextlib.suppress(AcceptanceFailure):
+                    cleanup_evidence["remaining_project_images"] = len(self._project_image_ids())
+                return "capacity image cleanup removal failed"
+            if removal.returncode != 0:
+                cleanup_evidence["image_cleanup_status"] = "failed"
+                with contextlib.suppress(AcceptanceFailure):
+                    cleanup_evidence["remaining_project_images"] = len(self._project_image_ids())
+                return "capacity image cleanup removal failed"
+
+        try:
+            remaining = self._project_image_ids()
+            for image_id in remaining:
+                inspected = self._inspect_cleanup_image(image_id)
+                labels = (inspected.get("Config") or {}).get("Labels") or {}
+                if labels.get("com.docker.compose.project") != self.project:
+                    raise AcceptanceFailure("remaining project image label did not match")
+        except (AcceptanceFailure, AttributeError):
+            cleanup_evidence["image_cleanup_status"] = "failed"
+            return "capacity image cleanup verification failed"
+        cleanup_evidence["remaining_project_images"] = len(remaining)
+        if remaining:
+            cleanup_evidence["image_cleanup_status"] = "failed"
+            return "capacity image cleanup left a project image"
+
+        cleanup_evidence["removed_project_images"] = len(candidates)
+        cleanup_evidence["image_cleanup_status"] = "passed"
+        if getattr(self, "formal_slo_v2", False) and (
+            cleanup_evidence["project_image_candidates"],
+            cleanup_evidence["removed_project_images"],
+            cleanup_evidence["retained_shared_project_images"],
+            cleanup_evidence["remaining_project_images"],
+        ) != (1, 1, 0, 0):
+            cleanup_evidence["image_cleanup_status"] = "failed"
+            return "formal capacity image cleanup counts were not exact"
+        return None
+
     def governance_reconciliation(self) -> dict[str, Any]:
         raw = self.psql(GOVERNANCE_RECONCILIATION_SQL).stdout.strip()
         try:
@@ -2121,6 +2775,7 @@ WHERE s.datname = current_database();
         expected_counts, expected_states, expected_audit_counts = reconciliation_expectations(
             runs_per_phase=self.runs_per_phase,
             backlog_limit=self.backlog_limit,
+            formal_slo_v2=getattr(self, "formal_slo_v2", False),
         )
         validate_governance_reconciliation_snapshot(
             snapshot,
@@ -2151,7 +2806,12 @@ WHERE s.datname = current_database();
         one_worker = measured["single_worker_reference"]
         scaled = measured["configured_multi_worker_baseline"]
         self.scale_workers(self.worker_count)
-        burst = self.bounded_queue_burst()
+        if getattr(self, "formal_slo_v2", False):
+            warmed_burst = self.warmed_pause_burst()
+            cold_burst = self.cold_start_burst()
+        else:
+            warmed_burst = None
+            cold_burst = self.bounded_queue_burst()
         fairness = self.model_fairness_scenario()
         self.lease_expiry_fault()
         self.redis_outage_fault()
@@ -2164,20 +2824,37 @@ WHERE s.datname = current_database();
             "task_metrics": self.task_metrics(),
             "workers": self.wait_service_healthy("worker", count=self.worker_count, timeout=90),
         }
-        self.evidence["comparison"] = {
+        comparison = {
             "single_worker_questions_per_second": one_worker["throughput"]["questions_per_second"],
             "multi_worker_questions_per_second": scaled["throughput"]["questions_per_second"],
-            "bounded_burst_questions_per_second": burst["throughput"]["questions_per_second"],
             "cross_model_low_volume_claim_before_high_backlog_drained": fairness[
                 "ordering_evidence"
             ]["low_claim_before_high_backlog_drained"],
             "interpretation": "observed values only; no pass/fail scaling ratio is asserted",
         }
+        if warmed_burst is None:
+            comparison["bounded_burst_questions_per_second"] = cold_burst["throughput"][
+                "questions_per_second"
+            ]
+        else:
+            comparison["warmed_pause_burst_questions_per_second"] = warmed_burst["throughput"][
+                "questions_per_second"
+            ]
+            comparison["cold_start_burst_questions_per_second"] = cold_burst["throughput"][
+                "questions_per_second"
+            ]
+        self.evidence["comparison"] = comparison
         self.write_evidence()
 
 
 def parse_arguments(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--qualification-profile",
+        choices=QUALIFICATION_PROFILES,
+        default=DEFAULT_QUALIFICATION_PROFILE,
+        help="select the default single-burst workload or the inseparable formal v2 profile",
+    )
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--runs-per-phase", type=int, default=4)
     parser.add_argument("--backlog-limit", type=int, default=4)
