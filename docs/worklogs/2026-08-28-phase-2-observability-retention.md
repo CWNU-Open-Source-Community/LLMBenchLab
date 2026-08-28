@@ -10,7 +10,7 @@
 - 关联计划：[Phase 2 可观测性与审计保留执行计划](../plans/2026-08-28-phase-2-observability-retention.md)
 - 决策基础：[ADR-0005](../decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](../decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)
 - 本轮决策：[ADR-0015](../decisions/ADR-0015-observability-worker-progress-audit-retention.md)
-- 当前状态：`in_progress`；P2-06 单独推进，Phase 2 仍为 `in_progress`
+- 当前状态：`pending_on_docs_ci`；P2-06 implementation/clean-SHA/remote gate 已通过，证据文档精确 SHA CI 尚待；Phase 2 仍为 `in_progress`
 
 ## 目标与背景
 
@@ -117,7 +117,7 @@ P2-01 已在精确提交与远程 CI 上闭环，现有系统也已经提供 Pos
 
 ### 状态边界
 
-- 以上功能已进入当前工作树，lint/test/smoke/integration/migration/build/config/rules 与 dirty capacity/9/9 acceptance 已通过；后续 staged security review 发现 structured logging High，继续复核又发现 `python -m app.worker` logger Medium，两项修复与定向回归均已落盘。最新 76-file staged 技术/安全终审重新收敛为 0 Blocker/High/Medium。独立 commit、clean-SHA Compose、push 与精确 SHA GitHub Actions 尚未完成，因此 P2-06 仓库级状态保持 `in_progress`。
+- 以上功能已进入 clean implementation commit `9a20676dcf545040782f04c166205d0043345753`。lint/test/smoke/integration/migration/build/config/rules、clean-SHA capacity/9/9 acceptance、push 与该实现 SHA 的 GitHub Actions 4/4 均已通过。staged security review 发现的 structured logging High 与 `python -m app.worker` logger Medium 已修复，最终技术/安全终审为 0 Blocker/High/Medium。当前只待本次证据文档提交及其自身精确 SHA CI，因此 P2-06 仓库级状态为 `pending_on_docs_ci`。
 - P2-06 archive restore 只恢复 typed audit archive 自身。PostgreSQL+keyring 配对 backup/restore、Redis 重建、Worker 扩缩/告警处置与剩余故障矩阵仍属于 P2-07；Phase 2 继续 `in_progress`。
 
 ## 实际命令与结果
@@ -145,14 +145,17 @@ P2-01 已在精确提交与远程 CI 上闭环，现有系统也已经提供 Pos
 | 过宽 Ruff scripts 命令 | 报告 93 条既有 modernization 告警；随后按本任务静态合同运行 `--select E,F,I` 并通过，未修改范围外历史现代化问题 |
 | `make phase2-acceptance`（dirty 工作树） | 9/9；evidence `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-11554c25ec2d/evidence.json`，SHA-256 `d5f058457dbc29875cbac4bc38345b810b5ed556ea538862d309116ceb629fde`，`dirty=true`；Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0`；application populated `0005` refusal、isolated populated `0004` refusal、两层空库往返、cleanup containers/volumes/networks empty |
 | `make phase2-capacity`（最新 dirty 工作树） | artifact `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-c6de062ab77e/evidence.json`，SHA-256 `4aeb8271dd81e8671fc287942839f8d06862140ea9a6bf1d7ee5660265aa8453`，`dirty=true`；1W/2W/burst wall `8.257520/4.640051/7.161722s`、`7.266104/12.930892/8.377873 q/s`；18 Runs/270 Responses/270 QuestionExecutions/271 reservations（270 actual + 1 conservative）/1229 audit，0 error/drift/duplicate/PEL/lag，Worker expected 2，cleanup C/V/N/image 全零且 image `1/1/0/0`；offline Mock、非 SLO |
+| `make phase2-acceptance`（clean SHA） | implementation commit `9a20676dcf545040782f04c166205d0043345753`，artifact `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-92e173eeee28/evidence.json`，SHA-256 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`，`dirty=false`、9/9；Worker `2/2/2/0/0`，两级 populated refusal、两层空库往返、queue 0/0 与 cleanup C/V/N empty；脚本不承诺 build image cleanup |
+| `make phase2-capacity`（clean SHA） | 同一 implementation commit，artifact `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-ca5673061b0f/evidence.json`，SHA-256 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`，`dirty=false`；1W/2W/burst wall `8.255963/4.628834/6.428385s`、`7.267474/12.962228/9.333604 q/s`；18/270/270/271/1230，0 question error/drift/duplicate/PEL/lag，expected Worker=2、stalled/shortfall=0，故障恢复后的瞬时 registered/live=3；cleanup C/V/N/image=0 且 image `1/1/0/0`；offline Mock、非 SLO |
+| implementation commit / push / exact-SHA CI | commit `9a20676dcf545040782f04c166205d0043345753` 已普通 push 至 `origin/codex/complete-evaluation-workflow`；PR [#3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)；[run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 精确绑定该 SHA，Frontend、Compose reliability、Backend、PG/Redis integration 四个 job 全 success |
 | 先前 code review 与 hydration/import integrity 回归 | 当时结论为 0 Blocker/High/Medium、目标集 `67 passed`；其后 staged security review 发现 structured logging High 与 Worker entrypoint Medium，均已修复并重新复核 |
-| 最新 staged 技术/安全终审 | 76-file index 为 0 Blocker/High/Medium；独立 logging/source/queue `19 passed`，archive/retention/CLI/exporter/Docker-script `167 passed`；secret/path/blob/category 扫描无真实凭据或禁止产物 |
+| Implementation staged 技术/安全终审 | 76-file implementation index 为 0 Blocker/High/Medium；独立 logging/source/queue `19 passed`，archive/retention/CLI/exporter/Docker-script `167 passed`；secret/path/blob/category 扫描无真实凭据或禁止产物 |
 | README、TESTING、CHANGELOG、PROJECT_STATUS、ROADMAP、Phase 2、NEXT_TASK、计划/工作日志状态同步 | 已把实现事实与 pending-gate/P2-07 边界写入当前 diff；本轮链接/diff 检查通过 |
 | 九份状态文档相对链接检查 | 全部目标存在 |
 | 七份 tracked 状态文档 `git diff --check` + 新 plan/worklog 的 `git diff --no-index --check` | 无 whitespace error；no-index 命令因文件整体为新增返回差异状态 1，且没有 `--check` 诊断 |
 
 ## 已知问题与下一步
 
-- P2-06 三条实现线、structured logging High 与 Worker entrypoint Medium 修复已落地；lint、全量 test、smoke、frontend build、临时 SQLite/真实 PG migration、真实 PG/Redis integration、Compose config、八规则 promtool、dirty capacity/9/9 acceptance 与最新 staged 技术/安全终审均已通过。
-- 全门禁通过后形成独立 commit，在 clean SHA 重跑 capacity/acceptance，普通 push 当前分支并等待该精确 SHA 四个必需 CI job 全绿；在此之前不得写成 P2-06 completed。
+- P2-06 三条实现线、structured logging High 与 Worker entrypoint Medium 修复已落地；lint、全量 test、smoke、frontend build、临时 SQLite/真实 PG migration、真实 PG/Redis integration、Compose config、八规则 promtool、clean-SHA capacity/9/9 acceptance、implementation push 与精确 SHA 4/4 CI 均已通过。
+- 当前只需完成本次 evidence-doc commit、普通 push 与该文档精确 SHA 四个 CI job；绿色前 P2-06 为 `pending_on_docs_ci`，不得写成 completed。绿色后另做状态收尾提交并等待其自身 CI。
 - P2-07 未开始，仍缺数据库+keyring 配对 backup/restore、Redis 重建、告警响应与完整恢复矩阵；Phase 2 继续 `in_progress`。

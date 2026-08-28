@@ -6,7 +6,7 @@ GitHub：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open
 
 LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测工作台。它把模型注册、版本化 Benchmark、后台评测、逐题证据、汇总指标和排行榜放进一条可审计的本地流程，并以“默认离线、严格评分、结果可复现”为首要约束。
 
-当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理候选，并实现待仓库级收尾的 P2-06 可观测性/审计保留切片：PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger、typed audit 与 Worker progress 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。
+当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理候选；P2-06 可观测性/审计保留切片处于 `pending_on_docs_ci`：实现及其精确 SHA 门禁已完成，仅剩本次 evidence closeout 文档 commit 自身的精确 SHA CI。PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger、typed audit 与 Worker progress 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。
 
 ## 当前状态
 
@@ -17,7 +17,9 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - Phase 2 候选已通过真实 PostgreSQL/Redis 和进程故障验证：除租约、心跳、fencing、幂等 Response 与数据库恢复外，Web/API managed Run 还具有 global/provider/model/run 四层数据库 admission、fixed-minute RPM/TPM、lifetime request/Token/cost budget、有限 backlog、公平 slice、逐 attempt reservation/settlement、typed audit 和历史延迟。
 - 可信本地 CLI 已提供 MMLU-Pro 与 GPQA-Diamond 的固定来源转换、真实 OpenAI-compatible 预检、可恢复执行和完整报告导出；这是 Phase 3 的客观题垂直切片，不代表 Phase 2 或 Phase 3 已完成。
 - 自动化、CI、Compose 故障验收和容量演练的模型执行都只使用 Mock；根据层级使用临时 SQLite 或隔离 PostgreSQL 16/Redis 7，不访问真实模型服务，也不产生模型费用。
-- Phase 2 仍为 `in_progress`。P2-01 已完整交付：`P2-local-control-plane-v2` 在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 次 warm-up + 5 次 measured trial，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；该实现的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run 33150080341](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。P2-06 已在当前工作树实现 `0005`/13 表 importer、Worker DB-time progress、固定低基数 Prometheus exporter、八条规则、canonical audit archive/verify/reconcile/restore/delete 与全日志源治理；当前 lint、全量 test（后端 `916 passed, 33 skipped`、前端 `38 passed`）、Mock smoke、真实 PostgreSQL 16/Redis 7 integration（`33 passed, 0 skipped`）、隔离 migration、frontend build、Compose config、Prometheus `v3.5.0` 的八规则 `promtool` 校验，以及 dirty 工作树 9/9 Compose acceptance 与最新 capacity 均已通过。此前 code review 为 0 Blocker/High/Medium；随后 staged 安全审查发现的 structured-extra 反射 High 与 `python -m app.worker` logger Medium 均已修复，最新 76-file staged 技术/安全复核重新收敛为 0 Blocker/High/Medium。独立 commit/push、clean-SHA Compose 证据和该精确 SHA 的远程 CI 尚未完成，因此 P2-06 仓库级收尾仍为 `in_progress`。P2-07 的数据库/keyring 配对 backup/restore、Redis 重建和剩余故障矩阵仍未完成。上述资格只限固定 Mock-only 单机控制面，不是生产或真实 Provider SLA；Phase 3 也只交付客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
+- Phase 2 仍为 `in_progress`。P2-01 已完整交付：`P2-local-control-plane-v2` 在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 次 warm-up + 5 次 measured trial，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；该实现的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run 33150080341](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
+- P2-06 当前状态为 `pending_on_docs_ci`，不能标记为 `completed`。实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已 push 到当前分支并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 [GitHub Actions run 33164609388](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 成功。绑定同一 clean SHA 的 Compose acceptance 9/9 通过，evidence 为 `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-92e173eeee28/evidence.json`（SHA-256 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`），Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0` 且 cleanup C/V/N 全空；clean capacity evidence 为 `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-ca5673061b0f/evidence.json`（SHA-256 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`），1W/2W/burst QPS=`7.267474/12.962228/9.333604`、wall=`8.255963/4.628834/6.428385s`，最终 18 Runs/270 Responses/270 QuestionExecutions/271 reservations/1230 audit，0 question error/drift/duplicate/PEL/lag，Worker expected=2、shortfall=0，cleanup C/V/N/image 全零且 image counters=`1/1/0/0`。这是 Mock-only 单机观测，不是生产或真实 Provider SLO；此前 dirty evidence 继续保留为历史，不替代该 clean-SHA 结果。实现门禁已全部完成，仅剩本 evidence closeout 文档 commit 的 push 与精确 SHA CI。
+- P2-07 明确为 `not_started`；数据库/keyring 配对 backup/restore、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵仍未开始，因此 Phase 2 不能完成。Phase 3 也只交付客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
 
 最新、可复核的完成状态与测试证据以 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) 和 [`docs/worklogs/`](docs/worklogs/) 为准；Roadmap 中的计划能力不等于已交付能力。
 
@@ -394,7 +396,7 @@ uv run llmbenchlab-audit-retention delete \
 | --- | --- | --- |
 | Phase 0 | 项目治理、需求、架构、协议 | 已完成 |
 | Phase 1 | FastAPI + React + SQLite 的 MVP 垂直链路 | 已完成 |
-| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：P2-01 的 Mock-only 单机 v2 资格已闭环；P2-06 已实现且 dirty capacity/9/9 acceptance、修复后 staged 技术/安全终审已通过，尚待 commit/clean-SHA Compose/push/精确 SHA CI；P2-07 backup/restore 和剩余恢复矩阵未完成 |
+| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：P2-01 已闭环；P2-06 为 `pending_on_docs_ci`，实现 SHA `9a20676…` 已 push、PR #3 与实现 run `33164609388` 4/4、clean capacity/9/9 acceptance 全绿，仅剩 evidence-doc commit 自身精确 CI；P2-07 为 `not_started` |
 | Phase 3 | 合规标准 Benchmark 与隔离代码评测 | MMLU-Pro/GPQA 客观数据切片已交付；IFEval、沙箱及其余验收未完成 |
 | Phase 4 | LLM Judge、人工校准与 Arena | 计划中 |
 | Phase 5 | Agent、工具调用与 Live Benchmark | 计划中 |
@@ -431,7 +433,7 @@ uv run llmbenchlab-audit-retention delete \
 - Dataset Hash 用于一致性检查，不是发布者签名，也不能证明数据没有污染。
 - `/tasks/metrics`、retained `/tasks/history`、单 Run typed audit、固定 Prometheus exporter、八条规则和显式 audit retention CLI 已实现；仓库仍不部署 Prometheus/Alertmanager、告警发送器或 trace，也不提供 WORM/数据库管理员防篡改、自动请求链路清理或对象存储上传。`resume` 的新 canary 仍不会追加独立事件。
 - 逐题 Provider request ID、returned model、system fingerprint、finish reason 和 HTTP attempt count 已按字符/长度/秘密规则 fail closed 持久化并可导出；它们是关联证据，不是供应商真实性或账单证明。
-- 已保留 dirty-worktree 增强前基线、clean `665244e…` 容量候选和永久 `unqualified` 的 v1 资格历史；clean `b6a35fe…` 的 v2 `qualified` 结果也只证明固定 Mock 配置下的单机本地控制面，不是真实 Provider、生产 SLO/SLA、HA 或灾难恢复证明。仍无 SBOM 和生产部署支持。
+- 已保留 dirty-worktree 增强前基线、P2-06 dirty acceptance/capacity 历史、clean `665244e…` 容量候选和永久 `unqualified` 的 v1 资格历史；clean `b6a35fe…` 的 v2 `qualified` 与 clean `9a20676…` 的 P2-06 acceptance/capacity 结果都只证明各自固定 Mock 配置下的单机本地控制面，不是真实 Provider、生产 SLO/SLA、HA 或灾难恢复证明。仍无 SBOM 和生产部署支持。
 
 ## 贡献
 

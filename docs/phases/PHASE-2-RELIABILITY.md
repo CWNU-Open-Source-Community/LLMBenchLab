@@ -20,7 +20,7 @@
 
 ## 当前功能范围
 
-- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容、双方言 Alembic 链在当前 P2-06 工作树扩展至 `20260828_0005`。
+- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容、双方言 Alembic 链已在 P2-06 implementation SHA `9a20676…` 扩展至 `20260828_0005`。
 - Redis at-least-once 通知；Run、取消、重试、租约、Response、终态、治理、attempt ledger 和 audit 全由数据库裁决。
 - 原子 claim、数据库时间 lease/heartbeat、fencing、有限 retry/backoff、取消、过期接管、duplicate no-op 和 dead-letter。
 - 停写只读 SQLite→空 PostgreSQL 的单向 importer；`0005` 按依赖顺序复制 13 张应用表并做 count/PK/content fingerprint，源有 live Worker generation 时拒绝，stopped/stale progress 可精确复制。keyring 仍在数据库之外。
@@ -28,7 +28,7 @@
 - 每个 Provider HTTP attempt 的 reserve→send-started→actual/conservative settlement 或 confirmed pre-send release never-delete ledger；materialized scope/bucket counter 仅作投影，任何高/低漂移 fail closed。
 - 有限 backlog、typed `429`、database not-before、question quantum、dispatch/failure 分离和跨 Model due ordering。
 - typed audit、分页 Run audit、task history counters、基于 Run 数据库时间戳的 queue/execution/end-to-end latency、严格规范化 Provider metadata 和非秘密 credential audit。
-- 固定低基数 Prometheus text exporter、八条仓库内告警规则/Runbook、DB-time Worker generation/progress 聚合、canonical audit archive/离线 verify/reconcile/restore/delete 和全日志源治理；这些 P2-06 功能已实现，仓库级全门禁与远程门禁仍待收尾。
+- 固定低基数 Prometheus text exporter、八条仓库内告警规则/Runbook、DB-time Worker generation/progress 聚合、canonical audit archive/离线 verify/reconcile/restore/delete 和全日志源治理；这些 P2-06 功能已进入 clean implementation SHA 并通过 clean Compose 与远程实现门禁，仓库级收尾只待证据文档提交自身的精确 SHA CI。
 - Run Detail 展示 managed/delayed/exhausted、治理原因和明确 UTC not-before；旧 Run 与可信本地 CLI 明确为 `legacy_unmanaged`。
 - 真实 PostgreSQL 竞争测试及 Mock-only enhanced capacity/acceptance；精确实现 SHA 的完整 capacity、9/9 acceptance、`P2-local-control-plane-v2` 多轮单机资格与远程 4/4 CI 已通过。
 
@@ -61,12 +61,12 @@
 | ID | 状态 | 已交付与剩余范围 |
 | --- | --- | --- |
 | P2-01 一致性与容量设计 | `completed` | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已交付；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；证据文档 commit `875f13a…` 已 push，精确 SHA CI 4/4 成功 |
-| P2-02 PostgreSQL 迁移 | `slice_delivered` | 历史 `0002`～`0004` 与 12 表 importer 已通过精确 SHA 远程门禁；当前工作树增加 `0005` / 13 表 importer、live Worker preflight 和 populated downgrade guard，待 P2-06 最终门禁 |
-| P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；当前工作树实现 generation 级 DB-time scan/claim/lease-heartbeat/progress 与 stale 聚合，dependency probe 仍只表示 capability |
+| P2-02 PostgreSQL 迁移 | `slice_delivered` | 历史 `0002`～`0004` 与 12 表 importer 已通过精确 SHA 远程门禁；`9a20676…` 增加 `0005` / 13 表 importer、live Worker preflight 和 populated downgrade guard，clean Compose 与远程实现门禁已通过 |
+| P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；`9a20676…` 增加 generation 级 DB-time scan/claim/lease-heartbeat/progress 与 stale 聚合，dependency probe 仍只表示 capability |
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
 | P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
-| P2-06 可观测性 | `in_progress` | 固定 exporter/八规则、canonical retention CLI、Worker DB-time progress、`0005` / 13 表 importer、公共 retained-row 校验与全日志源治理已实现；lint/test/smoke/integration/migration/build/config/rules、dirty capacity/9/9 acceptance 与修复后 staged 技术/安全终审已通过，commit/clean-SHA Compose/push 与精确 SHA CI 仍未完成 |
-| P2-07 验证与运维 | `slice_delivered` | enhanced capacity/PG tests、正式 v2 单机资格、Operations/Performance/Deployment 与精确 evidence 已交付；backup/restore、完整失败矩阵与告警响应仍未完成 |
+| P2-06 可观测性 | `pending_on_docs_ci` | 固定 exporter/八规则、canonical retention CLI、Worker DB-time progress、`0005` / 13 表 importer、公共 retained-row 校验与全日志源治理已进入 clean commit `9a20676…`；clean capacity/9/9 acceptance 与该实现 SHA 的 CI 4/4 已通过，只待证据文档提交自身的精确 SHA CI |
+| P2-07 验证与运维 | `not_started` | 既有 enhanced capacity/PG tests、正式 v2 单机资格与运维文档是共享前置证据，不代表本切片已启动；PostgreSQL+keyring backup/restore、Redis 重建、完整失败矩阵与告警响应尚未实施 |
 
 `slice_delivered` 表示该垂直切片及其候选门禁已交付，不表示整个阶段完成。Phase 2 必须保持 `in_progress`。
 
@@ -80,7 +80,7 @@
 - [x] **crash seam 验收**：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复三条 deterministic DB seam injection 在完整 Compose acceptance 通过；它们不冒充精确时刻 `SIGKILL`。
 - [x] **远程实现门禁**：GitHub Actions run [`33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 对精确实现 SHA 4/4 成功。
 - [x] **P2-01 完成**：clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 与 `qualified` 容量模型；aggregate SHA-256 `a76d167b…d0d9`。证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 已普通 push，[GitHub Actions run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 对该精确 SHA 4/4 成功。结论只适用于固定 Mock 单机 profile。
-- [ ] **P2-06 仓库级闭环未通过**：范围内功能与 lint/test/smoke、真实 PostgreSQL/Redis、双方言 migration、frontend build、Compose config、八规则 promtool、dirty capacity/9/9 acceptance 和修复后 staged 技术/安全终审已通过；仍须形成独立 commit、在 clean SHA 重跑 Compose、push 并等待该精确 SHA CI 全绿。
+- [ ] **P2-06 仓库级闭环待证据文档 CI**：clean implementation commit `9a20676dcf545040782f04c166205d0043345753` 已 push，clean capacity/9/9 acceptance 与 [GitHub Actions run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 已通过；只待本次证据文档提交、push 与该文档精确 SHA CI 全绿。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
 ## 已实际运行的中间证据
@@ -88,8 +88,8 @@
 | 验证 | 实际结果 | 限制 |
 | --- | --- | --- |
 | `make lint` | 最新本地冻结树通过 | 同一实现 SHA 远程 lint/test 通过 |
-| 最新本地 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现冻结树通过 |
-| 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 本地通过；同一实现 SHA 远程 integration 通过 |
+| P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见下方独立行 |
+| P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见下方独立行 |
 | `make smoke` | `1 passed, 7 deselected`，仅 Mock | 最新本地冻结树通过；未调用真实 Provider |
 | 定向治理/API/Worker | 目标套件零失败；独立审计记录 `218 passed`；完整性边界集合 `18 passed` | 已由最终全量、真实 integration 与候选 evidence 补充 |
 | SQLite/PostgreSQL Alembic | 隔离 SQLite 与临时 PostgreSQL 16 的 prepare/upgrade/downgrade/upgrade/check 通过 | 本地通过；精确实现 SHA 的远程 integration 亦通过 |
@@ -97,16 +97,19 @@
 | enhanced capacity | `665244e…` 上通过；evidence SHA-256 `40deadeb…0588` | 有限 policy、4×202/2×429、yield/fairness/fault/reconciliation；Mock-only 非 SLA |
 | full Compose acceptance | `665244e…` 上 9/9；evidence SHA-256 `ab311665…ddec` | 三条 deterministic seam 与 cleanup 均通过 |
 | 正式 v2 单机资格 | `b6a35fe…` 上 1+5、23/23；aggregate SHA-256 `a76d167b…d0d9` | 每轮 22/330/330/331、hard invariant 与 exact-project cleanup 通过；Mock-only 非生产 SLA |
-| 远程 CI | run `33146681285` 4/4 | 精确 v2 实现 SHA 全绿；PR #2 未合并 |
+| P2-01 远程 CI | run `33146681285` 4/4 | 精确 v2 实现 SHA 全绿；PR #2 已于 2026-08-28 合并 |
 | 设计/计时修复远程 CI | SHA `1cd19c51ed309316047a18ed3b2a308647af495d`，run `33081854406`，4/4 | 不包含当前治理实现 |
-| P2-06 lint/test | `make lint` 全绿（Ruff 152 files、ESLint、TS）；`make test` 后端 `916 passed, 33 skipped`、前端 `38 passed` | 当前未提交工作树通过；只用 Mock/Stub |
-| P2-06 smoke/integration/migration/build/config | smoke `1 passed, 7 deselected`；临时 PG16/Redis7 migration/check 后 integration `33 passed, 0 skipped`；临时 SQLite head→`0001`→head/check、frontend build（2192 modules，保留 662.39 kB warning）、Compose config 全绿 | 默认用户 SQLite 未到 head且未擅自迁移；首次 integration cleanup 被安全策略拒绝且未启动容器，修正明确目标后通过；当前结果尚未绑定远程 SHA |
+| P2-06 lint/test | `make lint` 全绿（Ruff 152 files、ESLint、TS）；`make test` 后端 `916 passed, 33 skipped`、前端 `38 passed` | clean implementation commit 前冻结树通过；只用 Mock/Stub |
+| P2-06 smoke/integration/migration/build/config | smoke `1 passed, 7 deselected`；临时 PG16/Redis7 migration/check 后 integration `33 passed, 0 skipped`；临时 SQLite head→`0001`→head/check、frontend build（2192 modules，保留 662.39 kB warning）、Compose config 全绿 | 默认用户 SQLite 未到 head且未擅自迁移；首次 integration cleanup 被安全策略拒绝且未启动容器，修正明确目标后通过；实现 SHA 的远程同类门禁已通过 |
 | P2-06 规则门禁 | 临时 `prom/prometheus:v3.5.0` 容器中 `promtool check rules` 成功 | 八条规则全部通过；不表示仓库部署 Prometheus/Alertmanager |
 | P2-06 dirty acceptance | 9/9；artifact `llmbenchlab-p2-11554c25ec2d/evidence.json`，SHA-256 `d5f058457dbc29875cbac4bc38345b810b5ed556ea538862d309116ceb629fde`，`dirty=true` | Worker `2/2/2/0/0`；`0005` populated 与 isolated `0004` refusal、两层空库往返、cleanup C/V/N empty 均通过 |
 | P2-06 dirty capacity | 最新 artifact `llmbenchlab-p2-c6de062ab77e/evidence.json`，SHA-256 `4aeb8271dd81e8671fc287942839f8d06862140ea9a6bf1d7ee5660265aa8453` 通过 | 18 Runs/270 Responses/270 question executions/271 reservations/1229 audit；0 error/drift/duplicate/PEL/lag，expected Worker 2、cleanup C/V/N/image 0；offline Mock、非 SLO |
+| P2-06 clean acceptance | `9a20676…` 上 9/9；artifact `llmbenchlab-p2-92e173eeee28/evidence.json`，SHA-256 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`，`dirty=false` | Worker `2/2/2/0/0`；两级 populated refusal、两层空库往返、cleanup C/V/N empty |
+| P2-06 clean capacity | `9a20676…` 上通过；artifact `llmbenchlab-p2-ca5673061b0f/evidence.json`，SHA-256 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`，`dirty=false` | 1W/2W/burst `7.267474/12.962228/9.333604 q/s`；18/270/270/271/1230，0 question error/drift/duplicate/PEL/lag，expected Worker 2、cleanup C/V/N/image 0；offline Mock、非 SLO |
+| P2-06 implementation remote gate | PR [#3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，[run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) | 精确 `9a20676dcf545040782f04c166205d0043345753`，四个必需 job 全 success |
 | P2-06 补充 Ruff | 过宽 scripts 命令报告 93 条既有 modernization 告警；`--select E,F,I` 通过 | 保留首次结果，不扩大本切片清理范围 |
-| P2-06 staged 技术/安全终审 | structured-extra High 与 Worker `__main__` logger Medium 已修复；最新 76-file index 为 0 Blocker/High/Medium；hydration/import integrity 目标集 `67 passed` | 当前 dirty 工作树终审通过 |
-| P2-06 剩余门禁 | commit、clean-SHA Compose、push/精确 SHA CI 待完成 | 不得借用上述历史绿色结果；保持 `in_progress` |
+| P2-06 staged 技术/安全终审 | structured-extra High 与 Worker `__main__` logger Medium 已修复；76-file implementation index 为 0 Blocker/High/Medium；hydration/import integrity 目标集 `67 passed` | 已进入 clean implementation commit `9a20676…` |
+| P2-06 剩余门禁 | 本次证据文档 commit、push 与该文档精确 SHA CI | 实现/clean-SHA Compose/implementation CI 已完成；完成文档门禁前状态为 `pending_on_docs_ci` |
 
 所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
 
@@ -125,15 +128,15 @@
 | 限额并发突破 | canonical scope、固定锁序、DB transaction、ledger 重算、真实 PG integration 与 v2 多轮资格 | 超出固定单机 profile 时重新测量并持续回归 |
 | Provider 调用/费用重复 | send-start marker、保守结算、本地幂等及三条 crash seam acceptance | 外部 exactly-once 不可承诺 |
 | 长 Run 饥饿 | finite quantum、due ordering、dispatch/failure 分离及 v2 每轮公平性硬门禁 | 更大规模或不同 Worker 拓扑需重新建模 |
-| Worker 停滞不可见 | DB-time progress/liveness 聚合、exporter 与 `WorkerStalled` rule；dependency probe 保持 capability-only | 完成 P2-06 门禁，并在 P2-07 演练告警处置/扩缩 |
-| 审计增长/泄密 | 固定 allowlist、无正文/URL/Key、pagination、canonical archive/verify/精确 delete/restore | 完成 P2-06 门禁；P2-07 验证异地存储与整库恢复边界 |
+| Worker 停滞不可见 | DB-time progress/liveness 聚合、exporter 与 `WorkerStalled` rule；dependency probe 保持 capability-only | 完成 P2-06 文档门禁，并在 P2-07 演练告警处置/扩缩 |
+| 审计增长/泄密 | 固定 allowlist、无正文/URL/Key、pagination、canonical archive/verify/精确 delete/restore | 完成 P2-06 文档门禁；P2-07 验证异地存储与整库恢复边界 |
 | 容量结论过度外推 | Mock-only、环境/config/evidence 指纹、1+5 多轮和明确支持 profile | 不冒充 Provider/生产 SLA；环境或 profile 变化必须重新资格 |
 | 灾难恢复失败 | 13 表 importer、迁移 guard、audit archive 自身 restore、独立 keyring 边界 | PostgreSQL backup/restore、keyring 配对、Redis 重建与完整恢复演练 |
 
 ## 交付物与下一任务
 
-已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 P2-01 v2 多轮资格。治理 SHA `665244e…` 已通过真实 integration/capacity/acceptance；SLO SHA `b6a35fe…` 已通过 23/23 本地资格与远程 4/4 CI。当前 P2-06 工作树另已实现 `0005` / 13 表 importer、Worker DB-time progress、exporter/八规则、audit retention CLI 与日志治理，dirty capacity/9/9 acceptance 和最终 review 已通过；下一步按 [NEXT_TASK.md](../NEXT_TASK.md) 先完成 commit/clean-SHA Compose/精确 SHA CI，再推进 P2-07 backup/restore 和剩余运维演练。
+已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 P2-01 v2 多轮资格。治理 SHA `665244e…` 已通过真实 integration/capacity/acceptance；SLO SHA `b6a35fe…` 已通过 23/23 本地资格与远程 4/4 CI。P2-06 implementation SHA `9a20676…` 已包含 `0005` / 13 表 importer、Worker DB-time progress、exporter/八规则、audit retention CLI 与日志治理，并通过 clean capacity/9/9 acceptance 和远程 4/4 CI；下一步按 [NEXT_TASK.md](../NEXT_TASK.md) 完成本次证据文档提交自身的精确 SHA CI，再独立启动 P2-07 backup/restore 和剩余运维演练。
 
 ## 状态
 
-`in_progress`。P2-01 已完成，P2-05 已交付；P2-06 功能已实现但仓库级门禁未闭环，P2-07 backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+`in_progress`。P2-01 已完成，P2-05 已交付；P2-06 实现与 clean-SHA 远程门禁已通过、仓库级状态为 `pending_on_docs_ci`，P2-07 尚未启动。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
