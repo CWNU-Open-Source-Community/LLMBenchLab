@@ -266,8 +266,14 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_COMPOSE_WORKER_LEASE_SECONDS` | `30` | 映射到容器 Worker lease |
 | `LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS` | `10` | 映射到 heartbeat |
 | `LLMBENCHLAB_COMPOSE_WORKER_POLL_SECONDS` | `1` | 映射到 reconciliation |
+| `LLMBENCHLAB_COMPOSE_WORKER_MAX_ATTEMPTS` | `3` | 映射到新 Run 的最大 Worker attempt |
+| `LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_BASE_SECONDS` | `1` | 映射到 Worker retry backoff base |
+| `LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_CAP_SECONDS` | `30` | 映射到 Worker retry backoff cap |
 | `LLMBENCHLAB_COMPOSE_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | 应用 grace；容器另有 45 秒 stop grace |
+| `LLMBENCHLAB_COMPOSE_REDIS_BLOCK_MILLISECONDS` | `1000` | 映射到 Worker Redis blocking read 上限 |
 | `LLMBENCHLAB_COMPOSE_REDIS_OPERATION_TIMEOUT_SECONDS` | `1` | 容器 Redis 操作 timeout |
+| `LLMBENCHLAB_COMPOSE_DATABASE_POOL_SIZE` | `5` | 映射到 API/Worker 数据库 pool size |
+| `LLMBENCHLAB_COMPOSE_DATABASE_MAX_OVERFLOW` | `5` | 映射到 API/Worker 数据库 pool overflow |
 | `LLMBENCHLAB_COMPOSE_DATABASE_POOL_TIMEOUT_SECONDS` | `2` | 容器连接池 timeout |
 | `LLMBENCHLAB_COMPOSE_READINESS_DATABASE_TIMEOUT_SECONDS` | `2` | 容器 readiness 等待上限 |
 | `LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS` | `0` | 可靠性测试专用 Mock delay |
@@ -398,6 +404,24 @@ Redis 不可用时：
 - Worker 保持 DB reconciliation，可完成到期 Run；Redis 恢复后重新初始化 consumer group/消费。
 
 因此不能用 `/ready=503` 推断所有 Run 创建都应被拒绝，也不能把 Redis 当作结果数据库。
+
+### 6.5 `P2-local-control-plane-v2` 资格拓扑
+
+正式单机资格入口是：
+
+```bash
+make phase2-slo
+```
+
+它只允许精确 clean commit，并为每个 trial 创建唯一 Compose project、隔离 PostgreSQL/Redis volume 和随机 loopback 端口。默认串行执行 1 次 warm-up 与恰好 5 次 measured trial；每轮使用一个 API、PostgreSQL 16、Redis 7、两个 Worker、Demo 15 题 Mock，并固定 `lease/heartbeat/poll=30/10/1s`、Worker `max_attempts=3`、retry `base/cap=1/30s`、pool/overflow `5/5`、Run concurrency 1、backlog 4、question quantum 5、Mock delay 80 ms、input reservation 256 与 output limit 64。脚本从容器内 Settings 回读这些值，要求 PostgreSQL `max_connections >= 100`，并把只过滤 Compose project/service labels 后的 image content SHA、Host/Docker 资源、配置与数据指纹跨轮锁定；raw image ID 仅保留在 child evidence。
+
+每个 v2 child 固定四个 measurement：seed-balanced 的 `single_worker_reference`/`configured_multi_worker_baseline`，随后固定 `warmed_pause_burst_and_drain`、`cold_start_burst_and_drain`。warmed 与 cold 的 queue/execution/E2E p95 门槛分别为 `3/5/8s` 与 `6/8/10s`；两者都要求吞吐 one-sided 95% LCB `>=6 q/s`、CV `<=20%`、drain 每轮 `<=10s`，并精确验证 `4×202 + 2×typed 429`、两个 distinct validated claim Worker 与分段 timing。每个 child 最终必须精确对账 22 completed Run、330 Response、330 QuestionExecution 和 331 reservation，并把容器、volume、network 以及本项目唯一 backend build image 清理到零；该镜像操作不允许扩展到共享 tag 或其他 Docker cache。
+
+该 profile 的最低 Host/Docker 资源分别是 8 logical CPU + 8,000,000,000 bytes RAM 和 8 CPU + 4,000,000,000 bytes memory。它描述的是一台主机、一个故障域的 Mock 控制面，不是生产部署模板；不要通过修改 profile、降低断言或在共享 GitHub-hosted runner 上追求绝对数值。Hosted CI 只验证 validator、统计和失败路径。
+
+raw child 与 aggregate evidence 都保留在 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`。v2 aggregate schema 是 `llmbenchlab-phase2-slo-evidence-v2`，只复制 commit/hash、稳定指纹、匿名参与计数、SLI/统计/判定、ledger projection 和 cleanup 摘要等 allowlist，不复制 raw identity、stdout/log、DSN/URL、环境变量、题目、Prompt/Response、keyring 或 Provider 数据。child 使用独立进程组；超时/中断后允许 scoped cleanup 最多 420 秒。运行结束仍须核对 evidence 中容器、volume、network 和项目镜像零残留，并把 artifact 当内部运维数据保护。公开记录可以给出 Git 忽略的外层 aggregate 相对路径和内容 SHA；raw child、aggregate 内嵌 trial child 路径、环境/配置明细不得原样发布，只能摘录人工复核后的 commit、匿名统计与支持边界。
+
+历史 `P2-local-control-plane-v1` 在 clean `dfa67abb1a9a0418a7e3337c179f816e3c69f121` 上只通过 15/18 项 SLO，保持 `unqualified`，不能用 v2 追认。当前 v2 在 clean `b6a35fef1dd069ebb54b69955058915c722aa34d` 上从全新 warm-up 开始完成恰好 5 个 measured trial，discarded trial 为 0，23/23 项 SLO、每轮 hard invariant 和 cleanup 均通过，容量模型为 `qualified`；每个 child 的项目镜像 cleanup 都精确为 candidate/removed/retained/remaining `1/1/0/0`，容器、volume 和 network 也为 0。aggregate 内容 SHA-256 为 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`。同一实现 SHA 的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 必需 job 成功。这只记录该精确单机 Mock profile 的资格，不是生产部署、真实 Provider 性能、HA/SLA 或 Phase 2 整体完成。
 
 ## 7. SQLite→PostgreSQL 单向导入 runbook
 
@@ -540,7 +564,7 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 4. 安装锁定依赖或构建镜像。
 5. 只由 `make migrate` 或 Compose `migrate` 服务执行 preflight/upgrade/check。
 6. 启动 API/Worker/frontend，检查 head、`live/health/ready`、Worker probe 和 task gauges。
-7. 运行 `make smoke`；涉及可靠性/Compose 变更时运行 `make phase2-acceptance`，涉及治理、Worker 数或性能时再运行 `make phase2-capacity` 并保留 evidence SHA。
+7. 运行 `make smoke`；涉及可靠性/Compose 变更时运行 `make phase2-acceptance`，涉及治理、Worker 数或快速性能回归时运行 `make phase2-capacity`。需要发布资格时，在最终 clean commit 上另运行固定的 `make phase2-slo`，保留 aggregate/child evidence SHA，并关联同一精确 SHA 的 required CI。
 
 ### 9.2 API、Worker 与 Redis 重启
 
@@ -574,6 +598,6 @@ LLMBenchLab 应用 logger 输出单行脱敏 JSON，包含 allowlist event、req
 | 可观测性 | 应用 JSON 日志、组件健康、DB gauges、typed audit、历史 counters/Run 延迟、逐题安全 Provider metadata | 统一运行时日志/traces、告警发送器、生产 SLO、数据库管理员级不可篡改审计 |
 | 数据保护 | 显式单向 importer 与 hash 对账 | 保留/删除策略、静态加密、备份/PITR、灾备演练、受控导出 |
 | 供应链 | lockfile、基础 CI、版本标签镜像 | Action SHA/镜像 digest、漏洞门禁、SBOM、签名与 provenance |
-| 性能/HA | 真实故障正确性验收和指定硬件/工作树的 PostgreSQL16/Redis7/双 Worker Mock 基线 | 精确发布 SHA、目标硬件与真实 Provider 基线，多主机故障、滚动升级和恢复时间验证 |
+| 性能/HA | 真实故障正确性验收、指定硬件/commit 的 PostgreSQL16/Redis7/双 Worker Mock 基线，以及 clean `b6a35fe…` 的固定单机 v2 1+5 资格 evidence | 另做真实 Provider 基线、多主机故障、滚动升级和恢复时间验证；现有结果不是生产 SLA/HA |
 
 Compose 可靠性验收只证明当前最小垂直切片在指定故障下保持数据库事实、逐题唯一性和协议 v1 评分；它不授权公网发布，也不把 Phase 2 标记为 completed。详细测试命令见 [TESTING.md](TESTING.md)，安全边界见 [SECURITY.md](SECURITY.md)，架构决定见 [ADR-0005](decisions/ADR-0005-durable-task-execution.md)。

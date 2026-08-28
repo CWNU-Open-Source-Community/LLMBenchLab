@@ -1172,7 +1172,15 @@ SELECT json_build_object(
   'response_ids', COALESCE((
     SELECT json_agg(e.id ORDER BY e.question_id, e.id)
     FROM evaluation_responses e WHERE e.run_id = r.id
-  ), '[]'::json)
+  ), '[]'::json),
+  'active_provider_attempts', (
+    SELECT count(*) FROM provider_call_reservations p
+    WHERE p.run_id = r.id AND p.state IN ('reserved', 'send_started')
+  ),
+  'send_started_provider_attempts', (
+    SELECT count(*) FROM provider_call_reservations p
+    WHERE p.run_id = r.id AND p.state = 'send_started'
+  )
 )::text
 FROM evaluation_runs r
 WHERE r.id = '{}';
@@ -1485,7 +1493,9 @@ WHERE r.id = '{}';
         return {
             "benchmark": {
                 "id": benchmark["id"],
+                "slug": benchmark["slug"],
                 "version": benchmark["version"],
+                "schema_version": benchmark["schema_version"],
                 "dataset_hash": benchmark["dataset_hash"],
                 "question_count": benchmark["question_count"],
             },

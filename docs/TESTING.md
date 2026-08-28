@@ -20,12 +20,13 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 | Mock 端到端 Smoke | API 提交 pending Run → 独立 WorkerService → Responses → Leaderboard/Metrics | `backend/tests/test_smoke.py`，marker 为 `smoke` | 禁止 |
 | Compose 故障验收 | 六服务拓扑、双 Worker、进程/Redis/lease 故障、治理/ledger、取消、重复消息与 0004 安全回滚 | `scripts/phase2_acceptance.py` / `make phase2-acceptance` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | Mock 容量基线 | 真实 PostgreSQL 16/Redis 7、全有限 policy、1/2 Worker、精确 `202/429` backlog、cooperative quantum、跨 Model 公平性、lease/Redis/重复通知故障及 DB/queue/ledger/audit 对账 | `scripts/phase2_capacity.py` / `make phase2-capacity` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
+| 固定单机资格 | clean SHA 上的 v2 四-cell、1 warm-up + 5 measured、统计/恢复/公平/ledger/cleanup 硬门禁 | `scripts/phase2_slo.py` / `make phase2-slo` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | 前端单元/组件测试 | 格式化、状态/指标、错误/空态、主要页面交互 | `frontend/src/**/*.test.ts(x)`、`frontend/tests/` | API 必须 stub/mock |
 | 静态检查 | Python lint/format、ESLint、TypeScript | Ruff、ESLint、`tsc` | 不需要 |
 | 构建检查 | 确认生产前端可编译打包 | `npm run build` | 安装完成后不需要 |
 | 配置检查 | 校验 Compose 插值和服务定义 | `docker compose config` | 不启动 Provider |
 
-单元测试定位纯逻辑错误；真实 PostgreSQL/Redis 集成测试验证方言和队列语义；Smoke 证明最小离线链路；Compose 验收覆盖真实独立进程故障；capacity harness 记录指定环境的有界 Mock 吞吐与延迟。五者不能互相替代。四层治理、逐 attempt ledger、背压/公平调度、typed audit/history 和 Provider metadata 已有自动化覆盖；增强 capacity、9/9 acceptance 和精确 SHA `665244e…` 的远程 4/4 门禁也已通过。Phase 2 仍为 `in_progress`，因为这些 Mock/基础设施证据不能替代正式 SLO、Worker progress/liveness、告警/归档、backup/restore 和剩余恢复矩阵。
+单元测试定位纯逻辑错误；真实 PostgreSQL/Redis 集成测试验证方言和队列语义；Smoke 证明最小离线链路；Compose 验收覆盖真实独立进程故障；capacity harness 记录单轮基线；SLO wrapper 在固定 clean SHA 上完成多轮资格。这些层级不能互相替代。四层治理、逐 attempt ledger、背压/公平调度、typed audit/history 和 Provider metadata 已有自动化覆盖；增强 capacity、9/9 acceptance 已通过，`P2-local-control-plane-v2` 也已在 clean SHA `b6a35fe…` 完成 1+5、23/23 和远程 4/4 门禁。Phase 2 仍为 `in_progress`，因为这项 Mock-only 单机资格不能替代 Worker progress/liveness、告警/归档、backup/restore、剩余恢复矩阵、生产 SLA 或 HA 证明。
 
 ## 3. 环境准备
 
@@ -62,6 +63,7 @@ make lint       # Ruff + ESLint + TypeScript 类型检查
 make smoke      # 只跑完全离线的后端垂直切片
 make phase2-acceptance  # 隔离的真实 Compose 九场景可靠性验收
 make phase2-capacity    # PostgreSQL 16/Redis 7/1→2 Worker 的 Mock 容量基线
+make phase2-slo         # clean commit 上固定 v2 四-cell、1 warm-up + 5 measured 的单机资格
 make format     # 运行项目约定的格式化器
 ```
 
@@ -113,6 +115,7 @@ uv run pytest -q \
   tests/test_response_metadata_api.py \
   tests/test_credential_audit.py \
   tests/test_phase2_capacity_script.py \
+  tests/test_phase2_slo_script.py \
   tests/test_adapters.py
 uv run pytest -k 'multiple_choice or numeric'
 ```
@@ -375,7 +378,7 @@ GitHub Actions 对 `main` push 和 Pull Request 触发四类 job：
 | `full-stack-reliability` | `python3 scripts/phase2_acceptance.py` 的隔离 Compose 九场景 | 唯一项目/卷、随机 loopback 端口、Mock-only；总是上传已脱敏 evidence，脚本总是精确清理 |
 | `frontend` | ESLint、Vitest 组件测试、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
 
-CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
+CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。`P2-local-control-plane-v2` 的 validator、统计、四-cell 编排失败路径、ledger projection 和 exact-project cleanup 合同可以进入普通自动化，但 GitHub-hosted runner 不运行 `make phase2-slo` 的绝对吞吐/延迟门禁：共享 runner 的 CPU、内存和 Docker 调度不是稳定性能实验室。正式实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功；它是同一 SHA 的正确性门禁，不替代本机 1+5。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
 
 下表是 2026-08-25 Phase 2 可靠性切片的历史基线，不是本次标准数据/真实评测 CLI 提交的通过声明。本次实际数量必须在当前工作日志和精确 commit 的 CI 中重新记录，不能沿用这些数字：
 
@@ -402,12 +405,17 @@ CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/
 
 keyring bootstrap 的 `24` 个定向测试覆盖所有相关本地入口强制 CPython，以及原子创建、既有文件校验、权限、symlink/路径置换、清理确认后瞬时重试、open 身份不确定与 unlink/close 清理失败停止、仅符号 errno 的错误输出。部署入口还在 `PATH` 将 macOS PyPy 放在首位时对全新临时路径执行创建/二次校验，确认 `uv` 仍选择 CPython；该手工探针不改变上表测试总数。
 
-### 10.1 精确候选与历史 evidence
+### 10.1 正式资格、精确候选与历史 evidence
 
-下表先记录 clean commit `665244e095905083b606b8e98e946ed1a02dc0fc` 的最终候选证据，再保留增强前 dirty snapshot 作为历史对照。所有脚本都移除了真实 Provider credential 环境变量，模型执行只用 Demo Mock；PostgreSQL/Redis 是被测基础设施，不是模型 Provider。旧 artifact 不得覆盖或替代精确候选结果。
+下表先记录 clean SHA 的正式 v2 资格，再保留 v1 `unqualified`、增强 capacity 候选和 dirty snapshot 作为历史对照。所有脚本都移除了真实 Provider credential 环境变量，模型执行只用 Demo Mock；PostgreSQL/Redis 是被测基础设施，不是模型 Provider。不同 schema/profile 的 artifact 不得覆盖、拼接或替代彼此。
 
 | 验证 | 实际结果 |
 | --- | --- |
+| 正式 v2 实现 / 远程 CI | clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d`；[GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 的 4/4 必需 job 成功 |
+| 正式 v2 aggregate | `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T060722Z-87d7a8af7f91/evidence.json`；SHA-256 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`；从零完成 1 warm-up + 恰好 5 measured，四个 cell、23/23 SLO 与逐轮硬门禁通过，容量模型 `qualified` |
+| 正式 v2 匿名对账 / cleanup | 六轮各自精确 22 Runs、330 Responses、330 QuestionExecutions、331 reservations；零题错误、重复 key、active/reserved 残留和 Redis PEL/lag。每轮本项目唯一 build image 已清理，suite 后 exact-project 容器、volume、network、image 现场复核均为 0 |
+| 正式 v2 容量模型 | 双 Worker one-sided 95% LCB 11.603003 q/s × 0.70 = 8.122102 q/s；按 15 题/Run 为 0.541473 Run/s；估计无新流量 backlog drain 5.171075 秒。详细匿名 SLI 见 [PERFORMANCE.md](PERFORMANCE.md) |
+| v1 永久历史 | clean commit `dfa67abb1a9a0418a7e3337c179f816e3c69f121`；[run 33141140969](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33141140969) 4/4；aggregate `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T041254Z-5fde74882caf/evidence.json`，SHA-256 `f993c11ff1a9f55921b5d7ea14974b0e3ca280f75427095c771ef3f5964ae3b2`。完整 1+5 只有 15/18 SLO，永久 `failed/not_qualified`；不得删轮、追认通过或复用样本，当时六个 build image 留作 Docker cache，不能写成全资源零残留 |
 | 精确候选 SHA / 远程 CI | clean commit `665244e095905083b606b8e98e946ed1a02dc0fc`；[GitHub Actions run 33099260233](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 的 backend、backend-integration、full-stack reliability、frontend 共 4/4 必需 job 成功 |
 | 候选全量本地回归 | `make test`：后端 `604 passed, 29 skipped`，前端 Vitest `38 passed` |
 | 增强 capacity | `make phase2-capacity`：1 Worker / 2 Worker / bounded burst 分别为 7.306981 / 13.396740 / 8.585309 题/秒；burst 精确 4×`202`+2×`429`，所有测量 Run 均多次 dispatch/yield，低流量 Model 在三个高流量 Run 终态前获得 claim/slice。最终 18 Run、270 Response、271 ledger（270 actual、1 conservative）、1,229 audit，无 active/reserved/overdrawn/重复 key/题错误/PEL/lag；cleanup 零残留。evidence `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-51cfadee04f5/evidence.json`，SHA-256 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588` |
@@ -420,7 +428,7 @@ keyring bootstrap 的 `24` 个定向测试覆盖所有相关本地入口强制 C
 | 增强前的历史 backlog/fault/reconciliation | bounded burst 4 Run/60 题：6.423057 s、9.341347 题/s，峰值 pending 4；lease-owner SIGKILL/expiry、Redis stop/start DB reconciliation、terminal duplicate delivery 均收敛。最终 14 completed Run/210 Response/211 ledger（210 actual、1 conservative）、900 audit event、无重复 key/operation、无 active/reserved/overdrawn 漂移，PEL/lag 0；该运行没有触达拒绝阈值，也不证明当前精确 `202/429`、yield 或公平性场景 |
 | 历史 capacity artifact/cleanup | `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-bb49c6069785/evidence.json`，SHA-256 `f78886422eeb1d6b54c3fe1da401fd411042a6b4421aeae3f4f5e7ef43444340`；cleanup 容器/卷/网络为空 |
 
-候选与历史吞吐都只描述各自 evidence 中记录的机器、commit/dirty 状态、Mock 配置和小样本，不是 Provider 兼容/费用结果、生产 SLO/SLA 或无限扩展结论。旧 artifact 不能替代 clean 候选；clean 候选也不能外推到其他硬件或真实模型。完整字段解释与复现实验见 [PERFORMANCE.md](PERFORMANCE.md)，backlog/dead-letter、budget、settlement unknown、Worker 扩缩和 DB/Redis/lease 恢复见 [OPERATIONS.md](OPERATIONS.md)。
+正式资格、候选与历史吞吐都只描述各自 evidence 中记录的 commit、Mock 配置、单机拓扑和小样本，不是 Provider 兼容/费用结果、生产 SLO/SLA、HA 或无限扩展结论。公开文档只引用 aggregate 路径/hash 与匿名结果；raw child 路径、内部对象标识、宿主指纹和原始日志不发布。完整字段解释与复现实验见 [PERFORMANCE.md](PERFORMANCE.md)，backlog/dead-letter、budget、settlement unknown、Worker 扩缩和 DB/Redis/lease 恢复见 [OPERATIONS.md](OPERATIONS.md)。
 
 ## 11. Mock 手工验收
 
@@ -552,6 +560,24 @@ make phase2-capacity
 除 steady-state 外，默认先停止 Worker，以 6 路并发提交 6 个 Run，必须精确得到 4 个 `202` 和 2 个带 `run_backlog_full`/`limit=4` 的 `429`，再排空已接纳 Run；每个测量 Run 必须有至少两次 dispatch 和 cooperative yield。跨 Model 公平性场景在单 Worker 下先压入高流量 Model 的 3 个 Run，再用最后一个 slot 接纳低流量 Run，并以 durable audit 顺序断言低流量 Run 在高流量 backlog 全部终态前获得 claim/slice。脚本还必测 lease owner SIGKILL/自然过期接管、Redis stop/start 下 DB reconciliation，以及终态重复投递 no-op；最后从 DB ledger 重算 active/reserved/consumed，检查 audit/operation key 唯一、Response/QuestionExecution 对齐、overdrawn/漂移、queue lag/PEL 和项目 cleanup。证据写入 `.pytest_cache/artifacts/phase2-capacity/<project>/evidence.json`，schema 为 `llmbenchlab-phase2-capacity-evidence-v1`，包含被测 commit/dirty 状态、脚本/Compose hash、主机/容器资源、数据 Hash、配置、测量、故障、公平性、reconciliation、secret self-review 与 cleanup。
 
 失败、字段缺失、非 Mock Model、真实 Provider credential、非有限 policy/read-back 漂移、错误的 `202/429` 分布、缺少 cooperative yield/公平顺序、少于两个 Worker、DB/queue/ledger/audit 漂移或残留资源都会使脚本失败。`--self-check-only` 只验证工具、guard、配置和清理，不能替代基线。精确 SHA `665244e…` 的完整真实 Compose capacity 已通过：evidence `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-51cfadee04f5/evidence.json`，SHA-256 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`，cleanup 零残留；历史 dirty artifact 仍不能替代它。结果只对证据中的硬件、commit 与配置成立；小样本 Mock 吞吐不是 Provider 性能、费用、生产 SLO/SLA 或水平扩展上限。
+
+### 12.2 `P2-local-control-plane-v2` 正式单机资格
+
+从仓库根目录、在没有其他修改的目标 commit 上运行：
+
+```bash
+make phase2-slo
+```
+
+入口只接受 exact clean commit；开始前、每个 child 前和最终统计前都会复核 commit/工作树，且会复核 `phase2_slo.py`、`phase2_capacity.py`、`phase2_acceptance.py` 与 `compose.yaml` 的 SHA-256。默认 suite 串行执行 1 次 warm-up 和恰好 5 次 measured trial，固定 seed `20260828`，以平衡顺序交替单/双 Worker measurement，随后固定执行 warmed pause 和 cold start 两个 burst；warm-up 不计入统计，所有 measured trial 都保留，任一 child 命令失败、超时、字段漂移或 cleanup 失败都会使整个 suite 失败。
+
+每个 trial 固定 PostgreSQL 16、Redis 7、一个 API、两个 Worker，以及 `single_worker_reference`、`configured_multi_worker_baseline`、`warmed_pause_burst_and_drain`、`cold_start_burst_and_drain` 四个 measurement cell；每 cell 完成 4 个 15 题 Mock Run，两个 burst 都是 AND 门禁并必须由 durable audit 证明恰好两个已验证 Worker 参与。配置固定 `lease/heartbeat/poll=30/10/1s`、Worker `max_attempts=3`、retry `base/cap=1/30s`、database pool/overflow `5/5`、backlog 4、burst submissions 6、Run concurrency 1、question quantum 5、Mock delay 80 ms、input reservation 256 和 `max_tokens=64`。容器内 Settings read-back、PostgreSQL `max_connections >= 100`、最低资源、image content SHA 与配置/环境指纹都必须跨轮稳定。
+
+wrapper 不信任 child 的题吞吐汇总，而是以 `completed_questions / wall_duration_seconds` 重算；双/单 Worker scale 使用同一 measured trial 的配对 ratio。Student-t LCB、CV、四个 cell 的每轮 p95、两个 burst drain 和 lease/Redis 恢复阈值按 [PERFORMANCE.md](PERFORMANCE.md) 的预登记合同形成 22 项性能/统计/恢复判定；第 23 项是 `hard_correctness_and_cleanup`。每轮还必须独立从 ledger 重算 scope/minute consumed/reserved projection，要求缺失、多余和字段 drift 全为 0，并验证精确 22 Runs/330 Responses/330 QuestionExecutions/331 reservations、Response/operation/audit 唯一、有限 policy、公平性、故障收敛、Redis PEL/lag 和 scoped cleanup。
+
+aggregate 与 raw child evidence 都写入 Git 忽略的 `.pytest_cache/artifacts/phase2-slo/`。aggregate 是严格 allowlist，不含 child stdout/log、DSN/URL、环境变量、题目、Prompt/Response、keyring 或 Provider 数据；中断/超时会先向独立 child 进程组发送终止，并留 420 秒给 scoped Compose cleanup。公开材料只引用 aggregate 相对路径/hash 和匿名结果，不发布 raw child 路径、内部对象标识或宿主指纹。`python3 scripts/phase2_slo.py --self-check-only` 只做纯合同检查，不要求 clean Git 或 Docker，也不能替代 1+5 full-stack suite。
+
+正式 v2 已在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 完成上述 1+5，23/23 SLO、逐轮硬门禁和本项目容器/volume/network/image cleanup 全部通过；aggregate 为 `.pytest_cache/artifacts/phase2-slo/llmbenchlab-p2-slo-20260828T060722Z-87d7a8af7f91/evidence.json`，SHA-256 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`，同 SHA 的 [CI run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功。历史 v1 在 `dfa67ab…` 完成 1+5 后只有 15/18，永久为 `failed/not_qualified`；不得删除失败轮、追认通过或复用样本。两代都只验证 Mock-only 单机控制面，不是生产 SLO/SLA、真实 Provider 性能、HA 或灾难恢复证明。
 
 ## 13. 失败排查与完成证据
 
