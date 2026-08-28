@@ -14,11 +14,13 @@ from sqlalchemy.exc import SQLAlchemyError
 
 import app.api.v1.health as health_module
 from app.core.config import get_settings
+from app.core.constants import MAX_GENERATION_TOKENS, MAX_READ_TIMEOUT_SECONDS
 from app.db.session import SessionLocal
 from app.models import (
     Benchmark,
     EvaluationResponse,
     EvaluationRun,
+    GovernanceRunStatus,
     Model,
     Question,
     RunStatus,
@@ -51,7 +53,8 @@ def test_liveness_readiness_and_request_id_are_componentized(client, monkeypatch
     liveness = client.get("/api/v1/live", headers={"X-Request-ID": "request-safe-1"})
     assert liveness.status_code == 200
     assert liveness.json()["status"] == "live"
-    assert liveness.headers["X-Request-ID"] == "request-safe-1"
+    assert liveness.headers["X-Request-ID"]
+    assert liveness.headers["X-Request-ID"] != "request-safe-1"
 
     ready = client.get("/api/v1/ready")
     assert ready.status_code == 200
@@ -207,7 +210,8 @@ def test_unhandled_api_error_is_sanitized_and_keeps_request_id(
     )
 
     assert response.status_code == 500
-    assert response.headers["X-Request-ID"] == "request-safe-error-1"
+    assert response.headers["X-Request-ID"]
+    assert response.headers["X-Request-ID"] != "request-safe-error-1"
     assert response.json() == {
         "detail": {
             "code": "internal_server_error",
@@ -216,7 +220,7 @@ def test_unhandled_api_error_is_sanitized_and_keeps_request_id(
     }
     assert secret not in response.text
     failure = next(record for record in caplog.records if record.event == "api_request_failed")
-    assert failure.request_id == "request-safe-error-1"
+    assert failure.request_id == response.headers["X-Request-ID"]
     assert failure.request_path == "/live"
     assert failure.error_code == "api_error:RuntimeError"
     assert failure.result == "internal_server_error"
@@ -249,7 +253,14 @@ def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(
         "retry_scheduled": 0,
         "dead_lettered": 0,
         "runs_with_queue_notification_error": 0,
+        "managed_backlog": 0,
+        "governance_delayed": 0,
+        "governance_exhausted": 0,
+        "active_provider_attempts": 0,
+        "overdrawn_governance_scopes": 0,
         "total_attempts": 0,
+        "total_failed_attempts": 0,
+        "total_dispatches": 0,
     }
     model = client.post(
         "/api/v1/models",
@@ -264,8 +275,24 @@ def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(
 
     pending = client.get("/api/v1/tasks/metrics").json()
     assert pending["pending"] == pending["due_pending"] == 1
+    assert pending["managed_backlog"] == 1
     assert pending["running"] == pending["total_attempts"] == 0
     assert client.get("/api/v1/metrics/summary").status_code == 200
+
+    with SessionLocal() as session, session.begin():
+        delayed_run = session.get(EvaluationRun, run.json()["id"])
+        assert delayed_run is not None
+        delayed_run.governance_status = GovernanceRunStatus.DELAYED
+        delayed_run.governance_not_before = datetime.now(UTC) + timedelta(hours=1)
+    delayed = client.get("/api/v1/tasks/metrics").json()
+    assert delayed["pending"] == delayed["managed_backlog"] == 1
+    assert delayed["due_pending"] == 0
+    assert delayed["governance_delayed"] == 1
+    with SessionLocal() as session, session.begin():
+        delayed_run = session.get(EvaluationRun, run.json()["id"])
+        assert delayed_run is not None
+        delayed_run.governance_status = GovernanceRunStatus.MANAGED
+        delayed_run.governance_not_before = None
 
     settings = get_settings()
     repository = RunLeaseRepository(
@@ -279,6 +306,8 @@ def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(
     assert after_cancel["pending"] == after_cancel["due_pending"] == 0
     assert after_cancel["running"] == 1
     assert after_cancel["active_cancellation_requests"] == 1
+    assert after_cancel["total_dispatches"] == 1
+    assert after_cancel["total_failed_attempts"] == 0
 
 
 def test_model_crud_pagination_and_secret_value_not_returned(client) -> None:
@@ -406,7 +435,7 @@ def test_model_rejects_non_finite_default_parameters(client, number_literal: str
 
 
 def test_model_rejects_null_for_nonnullable_default_parameters(client) -> None:
-    for index, field in enumerate(("temperature", "top_p", "max_tokens")):
+    for index, field in enumerate(("temperature", "top_p")):
         response = client.post(
             "/api/v1/models",
             json={
@@ -417,6 +446,148 @@ def test_model_rejects_null_for_nonnullable_default_parameters(client) -> None:
         )
         assert response.status_code == 422
         assert f"default_parameters.{field} must not be null" in response.text
+
+
+def test_model_allows_provider_default_or_extended_max_tokens(client) -> None:
+    for index, max_tokens in enumerate((None, MAX_GENERATION_TOKENS)):
+        response = client.post(
+            "/api/v1/models",
+            json={
+                "name": f"Output Default {index}",
+                "provider_type": "mock",
+                "default_parameters": {"max_tokens": max_tokens},
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["default_parameters"]["max_tokens"] == max_tokens
+
+
+def test_run_snapshots_extended_output_budget_provider_default_and_read_timeout(client) -> None:
+    model = client.post(
+        "/api/v1/models",
+        json={"name": "Budget Mock", "provider_type": "mock", "enabled": True},
+    ).json()
+    benchmark = client.post("/api/v1/benchmarks/reload-demo").json()
+
+    extended = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": model["id"],
+            "benchmark_id": benchmark["id"],
+            "max_tokens": MAX_GENERATION_TOKENS,
+            "read_timeout_seconds": MAX_READ_TIMEOUT_SECONDS,
+        },
+    )
+    assert extended.status_code == 202, extended.text
+    extended_snapshot = extended.json()["model_parameters_snapshot"]
+    assert extended_snapshot["generation"]["max_tokens"] == MAX_GENERATION_TOKENS
+    assert extended_snapshot["execution"]["timeouts_seconds"]["read"] == (MAX_READ_TIMEOUT_SECONDS)
+
+    provider_default = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": model["id"],
+            "benchmark_id": benchmark["id"],
+            "max_tokens": None,
+            "read_timeout_seconds": 300,
+        },
+    )
+    assert provider_default.status_code == 202, provider_default.text
+    provider_snapshot = provider_default.json()["model_parameters_snapshot"]
+    assert provider_snapshot["generation"]["max_tokens"] is None
+    assert provider_snapshot["execution"]["timeouts_seconds"]["read"] == 300
+
+    inherited_model = client.post(
+        "/api/v1/models",
+        json={
+            "name": "Provider-managed Output Mock",
+            "provider_type": "mock",
+            "enabled": True,
+            "default_parameters": {"max_tokens": None},
+        },
+    ).json()
+    inherited = client.post(
+        "/api/v1/runs",
+        json={"model_id": inherited_model["id"], "benchmark_id": benchmark["id"]},
+    )
+    assert inherited.status_code == 202, inherited.text
+    inherited_snapshot = inherited.json()["model_parameters_snapshot"]
+    assert inherited_snapshot["generation"]["max_tokens"] is None
+    assert inherited_snapshot["execution"]["timeouts_seconds"]["read"] == 60
+
+
+def test_run_preserves_protocol_defaults_and_explicit_null_overrides_model_default(client) -> None:
+    benchmark = client.post("/api/v1/benchmarks/reload-demo").json()
+    protocol_default_model = client.post(
+        "/api/v1/models",
+        json={"name": "Protocol Default Mock", "provider_type": "mock", "enabled": True},
+    ).json()
+
+    protocol_default = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": protocol_default_model["id"],
+            "benchmark_id": benchmark["id"],
+        },
+    )
+    assert protocol_default.status_code == 202, protocol_default.text
+    protocol_snapshot = protocol_default.json()["model_parameters_snapshot"]
+    assert protocol_snapshot["generation"] == {
+        "temperature": 0,
+        "top_p": 1,
+        "max_tokens": 256,
+        "seed": 42,
+    }
+    assert protocol_snapshot["execution"]["timeouts_seconds"]["read"] == 60
+
+    numeric_default_model = client.post(
+        "/api/v1/models",
+        json={
+            "name": "Numeric Output Default Mock",
+            "provider_type": "mock",
+            "enabled": True,
+            "default_parameters": {"max_tokens": 4096},
+        },
+    ).json()
+    explicit_provider_default = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": numeric_default_model["id"],
+            "benchmark_id": benchmark["id"],
+            "max_tokens": None,
+        },
+    )
+    assert explicit_provider_default.status_code == 202, explicit_provider_default.text
+    explicit_snapshot = explicit_provider_default.json()["model_parameters_snapshot"]
+    assert explicit_snapshot["generation"]["max_tokens"] is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_tokens", MAX_GENERATION_TOKENS + 1),
+        ("read_timeout_seconds", MAX_READ_TIMEOUT_SECONDS + 1),
+        ("max_tokens", True),
+        ("max_tokens", "8192"),
+        ("read_timeout_seconds", True),
+        ("read_timeout_seconds", "300"),
+        ("input_token_reservation", True),
+        ("input_token_reservation", 128.0),
+        ("lifetime_request_budget", True),
+        ("lifetime_request_budget", 10.0),
+        ("lifetime_token_budget", True),
+        ("lifetime_token_budget", 1024.0),
+    ],
+)
+def test_run_rejects_invalid_output_budget_and_timeout_types_or_limits(
+    client, field: str, value: object
+) -> None:
+    response = client.post(
+        "/api/v1/runs",
+        json={"model_id": "model-id", "benchmark_id": "benchmark-id", field: value},
+    )
+    assert response.status_code == 422
+    assert field in response.text
 
 
 def test_run_concurrency_cannot_exceed_runner_limit(client) -> None:

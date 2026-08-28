@@ -4,7 +4,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import AdapterError, GenerationConfig, Message, ModelAdapter, ModelGenerationResult
+from app.provider_attempts import ProviderAttemptStateUnknown
+
+from .base import (
+    AdapterError,
+    GenerationConfig,
+    Message,
+    ModelAdapter,
+    ModelGenerationResult,
+    ProviderAttemptContext,
+    ProviderAttemptController,
+    ProviderAttemptDisposition,
+    ProviderAttemptOutcome,
+    ProviderAttemptPermit,
+)
 from .mock import MockModelAdapter
 from .openai_compatible import OpenAICompatibleAdapter, sanitize_error_message
 
@@ -14,7 +27,12 @@ def build_adapter(provider_type: str, **kwargs: Any) -> ModelAdapter:
 
     normalized = provider_type.strip().lower().replace("-", "_")
     if normalized == "mock":
-        return MockModelAdapter()
+        mock_options = {
+            key: kwargs[key]
+            for key in ("sleep", "attempt_controller")
+            if key in kwargs and kwargs[key] is not None
+        }
+        return MockModelAdapter(**mock_options)
     if normalized in {"openai", "openai_compatible"}:
         options = dict(kwargs)
         if "remote_model_name" not in options and "model_name" in options:
@@ -35,6 +53,7 @@ def build_adapter(provider_type: str, **kwargs: Any) -> ModelAdapter:
             "base_url",
             "remote_model_name",
             "api_key_env",
+            "api_key",
             "connect_timeout_seconds",
             "read_timeout_seconds",
             "write_timeout_seconds",
@@ -44,8 +63,9 @@ def build_adapter(provider_type: str, **kwargs: Any) -> ModelAdapter:
             "retry_backoff_cap_seconds",
             "client",
             "sleep",
+            "attempt_controller",
         }
-        required = {"base_url", "remote_model_name", "api_key_env"}
+        required = {"base_url", "remote_model_name"}
         adapter_options = {
             key: value
             for key, value in options.items()
@@ -67,6 +87,12 @@ __all__ = [
     "ModelGenerationResult",
     "OpenAICompatibleAdapter",
     "OpenAICompatibleModelAdapter",
+    "ProviderAttemptContext",
+    "ProviderAttemptController",
+    "ProviderAttemptDisposition",
+    "ProviderAttemptOutcome",
+    "ProviderAttemptPermit",
+    "ProviderAttemptStateUnknown",
     "build_adapter",
     "get_adapter",
     "sanitize_error_message",

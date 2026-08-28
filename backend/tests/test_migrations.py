@@ -12,6 +12,7 @@ import pytest
 
 from app.db.base import Base
 from app.db.prepare_migrations import (
+    CREDENTIAL_REVISION,
     LEGACY_REVISION,
     PHASE_1_REVISION,
     SchemaPreparationError,
@@ -23,7 +24,9 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260825_0002"
+HEAD_REVISION = "20260827_0004"
+WEB_CREDENTIAL_REVISION = CREDENTIAL_REVISION
+RELIABILITY_REVISION = "20260825_0002"
 
 
 def _database_url(database_path: Path) -> str:
@@ -328,6 +331,61 @@ def test_prepare_adopts_phase1_unversioned_schema(tmp_path: Path) -> None:
     _run_alembic(database_path, "check")
 
 
+def test_prepare_adopts_reliability_unversioned_schema(tmp_path: Path) -> None:
+    database_path = tmp_path / "reliability-unversioned.db"
+    _run_alembic(database_path, "upgrade", RELIABILITY_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DELETE FROM alembic_version")
+
+    result = prepare_database(_database_url(database_path))
+
+    assert result.action == "stamped_reliability"
+    assert result.stamped_revision == RELIABILITY_REVISION
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (RELIABILITY_REVISION,)
+
+    versioned_result = prepare_database(_database_url(database_path))
+    assert versioned_result.action == "versioned_reliability"
+    assert versioned_result.stamped_revision == RELIABILITY_REVISION
+    assert versioned_result.backup_path is not None and versioned_result.backup_path.is_file()
+
+    _run_alembic(database_path, "upgrade", "head")
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    _run_alembic(database_path, "check")
+
+
+@pytest.mark.parametrize("versioned", [False, True])
+def test_prepare_backs_up_and_adopts_web_credential_schema(
+    tmp_path: Path,
+    versioned: bool,
+) -> None:
+    database_path = tmp_path / f"web-credentials-{'versioned' if versioned else 'unversioned'}.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", CREDENTIAL_REVISION)
+    if not versioned:
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("DELETE FROM alembic_version")
+
+    result = prepare_database(_database_url(database_path))
+
+    assert result.action == ("versioned_credentials" if versioned else "stamped_credentials")
+    assert result.stamped_revision == CREDENTIAL_REVISION
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (CREDENTIAL_REVISION,)
+    with sqlite3.connect(result.backup_path) as backup:
+        assert backup.execute("SELECT COUNT(*) FROM evaluation_runs").fetchone()[0] == 1
+        tables = {
+            row[0] for row in backup.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "model_credentials" in tables
+        assert "governance_policies" not in tables
+
+    _run_alembic(database_path, "upgrade", "head")
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    _run_alembic(database_path, "check")
+
+
 @pytest.mark.parametrize(
     ("cancellation_requested", "expected_status", "expected_last_error"),
     [
@@ -404,6 +462,417 @@ def test_reliability_upgrade_settles_nonresumable_phase1_running_run(
     )
 
 
+def test_web_credential_migration_backfills_sources_and_refuses_lossy_downgrade(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "web-credentials.db"
+    _run_alembic(database_path, "upgrade", RELIABILITY_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO models (
+                id, name, provider_type, base_url, remote_model_name, api_key_env,
+                enabled, input_price_per_million, output_price_per_million,
+                default_parameters, created_at, updated_at
+            ) VALUES (
+                'model-environment', 'Environment Provider', 'openai_compatible',
+                'https://provider.example/v1', 'provider-model', 'PROVIDER_KEY',
+                1, NULL, NULL, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO models (
+                id, name, provider_type, base_url, remote_model_name, api_key_env,
+                enabled, input_price_per_million, output_price_per_million,
+                default_parameters, created_at, updated_at
+            ) VALUES (
+                'model-mock', 'Mock Provider', 'mock', NULL, NULL, NULL,
+                1, 0, 0, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id, credential_source FROM models ORDER BY id"
+        ).fetchall() == [
+            ("model-environment", "environment"),
+            ("model-mock", "none"),
+        ]
+        connection.execute(
+            "UPDATE models SET credential_source = 'stored', api_key_env = NULL "
+            "WHERE id = 'model-environment'"
+        )
+        connection.execute(
+            """
+            INSERT INTO model_credentials (
+                model_id, algorithm, key_id, nonce, ciphertext, created_at, updated_at
+            ) VALUES (
+                'model-environment', 'aes-256-gcm-v1', 'fixture-v1', ?, ?,
+                CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+            )
+            """,
+            (sqlite3.Binary(b"n" * 12), sqlite3.Binary(b"ciphertext-is-not-plaintext")),
+        )
+
+    failed = _invoke_alembic(database_path, "downgrade", RELIABILITY_REVISION)
+
+    assert failed.returncode != 0
+    assert "Cannot downgrade while encrypted Web credentials exist" in failed.stderr
+    assert _read_heads(database_path) == (WEB_CREDENTIAL_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT model_id, algorithm, key_id, nonce, ciphertext FROM model_credentials"
+        ).fetchone() == (
+            "model-environment",
+            "aes-256-gcm-v1",
+            "fixture-v1",
+            b"n" * 12,
+            b"ciphertext-is-not-plaintext",
+        )
+        assert connection.execute(
+            "SELECT credential_source, api_key_env FROM models WHERE id = 'model-environment'"
+        ).fetchone() == ("stored", None)
+
+
+def test_governance_schema_matches_orm_and_does_not_seed_policy(tmp_path: Path) -> None:
+    database_path = tmp_path / "governance-schema.db"
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    expected_tables = {
+        "governance_policies",
+        "governance_scopes",
+        "governance_minute_buckets",
+        "question_executions",
+        "provider_call_reservations",
+        "audit_events",
+    }
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert expected_tables <= tables
+        assert connection.execute("SELECT COUNT(*) FROM governance_policies").fetchone()[0] == 0
+        policy_indexes = {
+            row[1]: row for row in connection.execute("PRAGMA index_list(governance_policies)")
+        }
+        active_index = policy_indexes["uq_governance_policies_single_active"]
+        assert active_index[2] == 1
+        assert active_index[4] == 1
+        assert [
+            row[2]
+            for row in connection.execute("PRAGMA index_info(uq_governance_policies_single_active)")
+        ] == ["is_active"]
+
+        run_columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluation_runs)")}
+        assert {
+            "failed_attempt_count",
+            "dispatch_count",
+            "last_scheduled_at",
+            "governance_policy_id",
+            "governance_status",
+            "governance_reason",
+            "governance_not_before",
+            "input_token_reservation",
+            "lifetime_request_budget",
+            "lifetime_token_budget",
+            "lifetime_cost_budget_usd",
+        } <= run_columns
+        run_indexes = {row[1] for row in connection.execute("PRAGMA index_list(evaluation_runs)")}
+        for index_name, expected_columns in (
+            ("ix_evaluation_runs_started_at_id", ["started_at", "id"]),
+            ("ix_evaluation_runs_finished_at_id", ["finished_at", "id"]),
+        ):
+            assert index_name in run_indexes
+            assert [
+                row[2] for row in connection.execute(f'PRAGMA index_info("{index_name}")')
+            ] == expected_columns
+        response_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(evaluation_responses)")
+        }
+        assert {
+            "provider_request_id",
+            "returned_model",
+            "system_fingerprint",
+            "finish_reason",
+            "http_attempt_count",
+        } <= response_columns
+
+        reservation_parents = {
+            (row[2], row[6])
+            for row in connection.execute("PRAGMA foreign_key_list(provider_call_reservations)")
+        }
+        assert reservation_parents == {
+            ("governance_policies", "RESTRICT"),
+            ("question_executions", "RESTRICT"),
+            ("evaluation_runs", "RESTRICT"),
+            ("questions", "RESTRICT"),
+            ("models", "RESTRICT"),
+            ("governance_scopes", "RESTRICT"),
+        }
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    assert "No new upgrade operations detected" in _run_alembic(database_path, "check").stdout
+
+
+def test_governance_migration_rejects_two_active_policies(tmp_path: Path) -> None:
+    database_path = tmp_path / "governance-single-active.db"
+    _run_alembic(database_path, "upgrade", "head")
+    insert_policy = (
+        "INSERT INTO governance_policies ("
+        "id, version, policy_hash, is_active, backlog_limit, question_quantum, "
+        "activated_at, created_at"
+        ") VALUES (?, ?, ?, ?, 100, 25, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+    )
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(insert_policy, ("policy-active-a", 1, "a" * 64, 1))
+        connection.commit()
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(insert_policy, ("policy-active-b", 2, "b" * 64, 1))
+        connection.rollback()
+        connection.execute(insert_policy, ("policy-inactive-b", 2, "b" * 64, 0))
+        connection.execute(insert_policy, ("policy-inactive-c", 3, "c" * 64, 0))
+        connection.commit()
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM governance_policies WHERE is_active = 1"
+            ).fetchone()[0]
+            == 1
+        )
+        assert connection.execute("SELECT COUNT(*) FROM governance_policies").fetchone()[0] == 3
+
+
+@pytest.mark.parametrize(
+    ("status_value", "attempt_count", "expected_failed_count"),
+    [
+        ("pending", 3, 3),
+        ("running", 3, 2),
+        ("running", 1, 0),
+    ],
+)
+def test_governance_upgrade_backfills_failed_attempts_by_run_state(
+    tmp_path: Path,
+    status_value: str,
+    attempt_count: int,
+    expected_failed_count: int,
+) -> None:
+    database_path = tmp_path / f"governance-backfill-{status_value}-{attempt_count}.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", WEB_CREDENTIAL_REVISION)
+
+    with sqlite3.connect(database_path) as connection:
+        if status_value == "running":
+            connection.execute(
+                "UPDATE evaluation_runs SET status = 'running', attempt_count = ?, "
+                "max_attempts = 3, lease_owner = 'legacy-worker', lease_token = 7, "
+                "lease_expires_at = datetime('now', '+1 hour'), "
+                "heartbeat_at = CURRENT_TIMESTAMP WHERE id = 'run-1'",
+                (attempt_count,),
+            )
+        else:
+            connection.execute(
+                "UPDATE evaluation_runs SET status = 'pending', attempt_count = ?, "
+                "max_attempts = 3 WHERE id = 'run-1'",
+                (attempt_count,),
+            )
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT attempt_count, max_attempts, failed_attempt_count, dispatch_count, "
+            "governance_status, governance_policy_id FROM evaluation_runs WHERE id = 'run-1'"
+        ).fetchone() == (
+            attempt_count,
+            3,
+            expected_failed_count,
+            0,
+            "legacy_unmanaged",
+            None,
+        )
+        # Claim/slice count is intentionally no longer bounded by the failure budget.
+        connection.execute("UPDATE evaluation_runs SET attempt_count = 9 WHERE id = 'run-1'")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE evaluation_runs SET failed_attempt_count = 4 WHERE id = 'run-1'"
+            )
+
+
+def test_governance_downgrade_rejects_response_metadata_before_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "governance-metadata-downgrade.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE evaluation_responses SET provider_request_id = 'safe-request-id', "
+            "http_attempt_count = 1 WHERE id = 'response-1'"
+        )
+
+    failed = _invoke_alembic(database_path, "downgrade", WEB_CREDENTIAL_REVISION)
+
+    assert failed.returncode != 0
+    assert "Response Provider metadata exists" in failed.stderr
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+        assert "audit_events" in tables
+        assert "provider_call_reservations" in tables
+        assert "failed_attempt_count" in {
+            row[1] for row in connection.execute("PRAGMA table_info(evaluation_runs)")
+        }
+        assert "provider_request_id" in {
+            row[1] for row in connection.execute("PRAGMA table_info(evaluation_responses)")
+        }
+
+
+def test_governance_downgrade_rejects_failure_and_fairness_evidence_before_ddl(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "governance-run-evidence-downgrade.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "UPDATE evaluation_runs SET failed_attempt_count = 1, dispatch_count = 1, "
+            "last_scheduled_at = CURRENT_TIMESTAMP WHERE id = 'run-1'"
+        )
+
+    failed = _invoke_alembic(database_path, "downgrade", WEB_CREDENTIAL_REVISION)
+
+    assert failed.returncode != 0
+    assert "Run governance/failure evidence" in failed.stderr
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT failed_attempt_count, dispatch_count FROM evaluation_runs WHERE id = 'run-1'"
+        ).fetchone() == (1, 1)
+        assert "audit_events" in {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+
+
+def test_governance_downgrade_rejects_question_execution_before_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "governance-question-execution-downgrade.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO question_executions ("
+            "id, run_id, question_id, execution_generation, next_provider_attempt, "
+            "created_at, updated_at) VALUES ("
+            "'execution-1', 'run-1', 'question-1', 0, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+
+    failed = _invoke_alembic(database_path, "downgrade", WEB_CREDENTIAL_REVISION)
+
+    assert failed.returncode != 0
+    assert "question-execution evidence exists" in failed.stderr
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT run_id, question_id FROM question_executions WHERE id = 'execution-1'"
+        ).fetchone() == ("run-1", "question-1")
+
+
+def test_governance_ledger_foreign_keys_are_never_delete_restrict(tmp_path: Path) -> None:
+    database_path = tmp_path / "governance-ledger-restrict.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO governance_policies ("
+            "id, version, policy_hash, is_active, backlog_limit, question_quantum, "
+            "activated_at, created_at) VALUES ("
+            "'policy-1', 1, ?, 1, 10, 2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            ("a" * 64,),
+        )
+        for scope_id, scope_type, scope_key in (
+            ("scope-global", "global", "global"),
+            ("scope-provider", "provider", "b" * 64),
+            ("scope-model", "model", "model-1"),
+            ("scope-run", "run", "run-1"),
+        ):
+            connection.execute(
+                "INSERT INTO governance_scopes ("
+                "id, scope_type, scope_key, active_reservations, reserved_requests, "
+                "reserved_input_tokens, reserved_output_tokens, reserved_cost_usd, "
+                "consumed_requests, consumed_input_tokens, consumed_output_tokens, "
+                "consumed_cost_usd, overdrawn, created_at, updated_at) VALUES ("
+                "?, ?, ?, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (scope_id, scope_type, scope_key),
+            )
+        connection.execute(
+            "UPDATE evaluation_runs SET governance_policy_id = 'policy-1', "
+            "governance_status = 'managed' WHERE id = 'run-1'"
+        )
+        connection.execute(
+            "INSERT INTO question_executions ("
+            "id, run_id, question_id, execution_generation, next_provider_attempt, "
+            "created_at, updated_at) VALUES ("
+            "'execution-1', 'run-1', 'question-1', 0, 2, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO provider_call_reservations ("
+            "id, operation_key, policy_id, question_execution_id, run_id, question_id, "
+            "model_id, global_scope_id, provider_scope_id, model_scope_id, run_scope_id, "
+            "execution_generation, provider_attempt, lease_owner, lease_token, state, "
+            "window_start, reserved_input_tokens, reserved_output_tokens, reserved_cost_usd, "
+            "actual_input_tokens, actual_output_tokens, actual_cost_usd, outcome_code, "
+            "send_started_at, settled_at, created_at, updated_at) VALUES ("
+            "'reservation-1', 'run-1:question-1:0:1', 'policy-1', 'execution-1', "
+            "'run-1', 'question-1', 'model-1', 'scope-global', 'scope-provider', "
+            "'scope-model', 'scope-run', 0, 1, 'worker-1', 1, 'settled_actual', "
+            "CURRENT_TIMESTAMP, 10, 20, 0, 8, 2, 0, 'ok', CURRENT_TIMESTAMP, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO audit_events ("
+            "id, event_key, event_type, payload_hash, payload, retention_class, "
+            "occurred_at, expires_at, reservation_id) VALUES ("
+            "'audit-1', 'reservation-1:settled', 'provider_attempt_settled', ?, '{}', "
+            "'operational', CURRENT_TIMESTAMP, datetime('now', '+90 days'), 'reservation-1')",
+            ("c" * 64,),
+        )
+        connection.commit()
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE provider_call_reservations SET run_scope_id = NULL "
+                "WHERE id = 'reservation-1'"
+            )
+        for statement in (
+            "DELETE FROM governance_policies WHERE id = 'policy-1'",
+            "DELETE FROM governance_scopes WHERE id = 'scope-global'",
+            "DELETE FROM evaluation_runs WHERE id = 'run-1'",
+            "DELETE FROM provider_call_reservations WHERE id = 'reservation-1'",
+        ):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(statement)
+        assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    failed = _invoke_alembic(database_path, "downgrade", WEB_CREDENTIAL_REVISION)
+
+    assert failed.returncode != 0
+    assert "ledger, audit, policy, scope" in failed.stderr
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+
+
 def test_reliability_downgrade_rejects_active_runs_before_ddl(tmp_path: Path) -> None:
     database_path = tmp_path / "active-downgrade.db"
     _run_alembic(database_path, "upgrade", LEGACY_REVISION)
@@ -416,7 +885,7 @@ def test_reliability_downgrade_rejects_active_runs_before_ddl(tmp_path: Path) ->
 
     assert failed.returncode != 0
     assert "drain, cancel, or fail active runs first" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (RELIABILITY_REVISION,)
     with sqlite3.connect(database_path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(evaluation_runs)")}
         assert "lease_token" in columns
@@ -693,6 +1162,29 @@ def test_prepare_rejects_partial_index_without_stamping(tmp_path: Path) -> None:
         engine.dispose()
 
     with pytest.raises(SchemaPreparationError, match="DDL modifiers"):
+        prepare_database(_database_url(database_path))
+
+    assert _read_heads(database_path) == ()
+    assert list(tmp_path.glob("*.bak")) == []
+
+
+def test_prepare_rejects_active_policy_partial_index_predicate_drift(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "active-policy-index-drift.db"
+    engine = create_database_engine(_database_url(database_path))
+    try:
+        Base.metadata.create_all(bind=engine)
+        with engine.begin() as connection:
+            connection.exec_driver_sql("DROP INDEX uq_governance_policies_single_active")
+            connection.exec_driver_sql(
+                "CREATE UNIQUE INDEX uq_governance_policies_single_active "
+                "ON governance_policies (is_active) WHERE is_active = 0"
+            )
+    finally:
+        engine.dispose()
+
+    with pytest.raises(SchemaPreparationError, match="Keys or indexes"):
         prepare_database(_database_url(database_path))
 
     assert _read_heads(database_path) == ()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy import select
@@ -106,6 +107,26 @@ def test_multiple_choice_prompt_uses_stable_key_order() -> None:
     assert messages[1]["content"] == "Choose one.\nA. first\nB. second\nC. third"
 
 
+def test_blank_system_prompt_is_omitted_for_provider_compatibility() -> None:
+    question = _QuestionSnapshot(
+        id="question-id",
+        external_id="blank-system",
+        question_type="multiple_choice",
+        prompt="Choose one.",
+        choices={"A": "first", "B": "second"},
+        reference_answer="A",
+        evaluator_config={},
+        metadata={},
+    )
+
+    messages = EvaluationRunner._render_messages(
+        question,
+        {"system": "  ", "user": "{prompt}\n{choices}"},
+    )
+
+    assert messages == [{"role": "user", "content": "Choose one.\nA. first\nB. second"}]
+
+
 def test_validated_model_defaults_apply_when_run_fields_are_omitted(client) -> None:
     defaults = {"temperature": 0.4, "top_p": 0.8, "max_tokens": 32, "seed": 7}
     model = _register_mock(client, "Defaulted Mock", defaults)
@@ -120,6 +141,42 @@ def test_validated_model_defaults_apply_when_run_fields_are_omitted(client) -> N
 
     assert run["status"] == "completed"
     assert run["model_parameters_snapshot"]["generation"] == defaults
+
+
+def test_run_lifecycle_timestamps_ignore_worker_host_clock_skew(client, monkeypatch) -> None:
+    monkeypatch.setattr(
+        evaluation_runner_module,
+        "utc_now",
+        lambda: datetime(2099, 1, 1, tzinfo=UTC),
+        raising=False,
+    )
+    model = _register_mock(client, "Database Clock Mock")
+    benchmark = _reload_demo(client)
+
+    run = _run_to_terminal(client, model["id"], benchmark["id"])
+
+    created_at = datetime.fromisoformat(run["created_at"])
+    started_at = datetime.fromisoformat(run["started_at"])
+    finished_at = datetime.fromisoformat(run["finished_at"])
+    assert created_at <= started_at <= finished_at
+    assert finished_at.year != 2099
+
+
+def test_parse_error_evidence_identifies_nonempty_truncated_output() -> None:
+    assert EvaluationRunner._parse_error_evidence(
+        "choice_not_found", {"finish_reason": "length"}
+    ) == (
+        "output_truncated",
+        "Provider stopped at the output token limit before a valid final answer was parsed "
+        "(choice_not_found).",
+    )
+    assert EvaluationRunner._parse_error_evidence(
+        "choice_not_found", {"finish_reason": "stop"}
+    ) == ("parse_error", "choice_not_found")
+    assert EvaluationRunner._parse_error_evidence(None, {"finish_reason": "length"}) == (
+        None,
+        None,
+    )
 
 
 @pytest.mark.smoke
@@ -151,6 +208,11 @@ def test_offline_mock_vertical_slice(client, db_session) -> None:
     assert snapshot["benchmark"]["dataset_hash"] == benchmark["dataset_hash"]
     assert snapshot["benchmark"]["question_count"] == 15
     assert snapshot["benchmark"]["is_demo"] is True
+    assert snapshot["benchmark"]["schema_version"] == benchmark["schema_version"]
+    assert snapshot["benchmark"]["source"] == benchmark["source"]
+    assert snapshot["benchmark"]["license"] == benchmark["license"]
+    assert snapshot["benchmark"]["dimension"] == benchmark["dimension"]
+    assert snapshot["benchmark"]["language"] == benchmark["language"]
     assert snapshot["execution"]["concurrency"] == 2
     assert snapshot["execution"]["timeouts_seconds"] == {
         "connect": 5.0,

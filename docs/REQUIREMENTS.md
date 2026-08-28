@@ -1,7 +1,7 @@
 # LLMBenchLab MVP 需求规格
 
 - 文档状态：Baseline
-- 适用范围：Phase 0 与 Phase 1
+- 适用范围：Phase 0–2（含 Web Provider 凭据扩展）
 - 协议基线：`llmbenchlab-protocol-v1`
 - 关键词：**必须**表示 MVP 验收必需，**应该**表示高优先级但可记录理由后延，**可以**表示兼容性扩展。
 
@@ -9,7 +9,7 @@
 
 MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark，创建 Run，在后台逐题调用、解析和评分，持久化结果，并在前端查看进度、逐题结果及排行榜。OpenAI-compatible 接入属于 MVP 配置能力，但自动化验收不得访问真实服务。
 
-- **Model**：一个可调用的模型配置，不包含真实密钥值。
+- **Model**：一个可调用的模型配置；公开表示不包含真实密钥值，Provider 凭据由独立的加密记录或兼容环境变量提供。
 - **Benchmark**：有版本、题目集合、评分器和稳定 Hash 的数据集。
 - **Run**：某 Model 在某 Benchmark 与固定协议配置下的一次评测。
 - **Response**：Run 中单题生成、解析、评分、用量及错误的持久记录。
@@ -22,9 +22,9 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 
 - **FR-MOD-01** 系统必须支持创建、读取、更新、删除和分页列出 Model。
 - **FR-MOD-02** `provider_type` 首期只允许 `mock` 与 `openai_compatible`。
-- **FR-MOD-03** Model 必须包含：`id`、`name`、`provider_type`、`base_url`、`remote_model_name`、`api_key_env`、`enabled`、每百万输入/输出 Token 价格、默认参数、`created_at`、`updated_at`。
-- **FR-MOD-04** `openai_compatible` 必须校验并要求 `base_url`、`remote_model_name` 和 `api_key_env`；`mock` 的这三个远端连接字段必须为空。
-- **FR-MOD-05** 系统只能保存环境变量名称 `api_key_env`，不得保存或返回该变量对应的值、Authorization header 或内部请求头。
+- **FR-MOD-03** Model 必须包含：`id`、`name`、`provider_type`、`base_url`、`remote_model_name`、`credential_source`、兼容字段 `api_key_env`、`enabled`、每百万输入/输出 Token 价格、默认参数、`created_at`、`updated_at`。
+- **FR-MOD-04** `openai_compatible` 必须校验并要求 `base_url`、`remote_model_name`，并选择 `stored` 或 `environment` 凭据来源；`mock` 的远端连接字段必须为空且凭据来源必须为 `none`。
+- **FR-MOD-05** Web/REST 必须支持只写的 `api_key` 输入：明文只用于当前请求，服务端使用独立 keyring 的 AES-256-GCM 加密后保存到 `model_credentials`，不得把凭据数据流中的明文/Authorization 或 Provider 对 Key 的回显复制到 Model、Run-model snapshot、Response、Leaderboard、报告、日志或错误，也不得公开 nonce、ciphertext、key id 或 keyring material。该控制不要求扫描无关 Benchmark/Question 数据的独立字面巧合；`api_key_env` 仅作为 CLI 与既有部署的兼容路径。
 - **FR-MOD-06** 必须定义 `ModelAdapter.generate(messages, generation_config)`，返回文本、Token、延迟、provider request id、原始 usage 和元数据。
 - **FR-MOD-07** Mock Adapter 必须完全离线、输出可预测，可完成 Demo 中预定义的部分或全部问题，并可用于单元测试、CI 和 Smoke Test。
 - **FR-MOD-08** OpenAI-compatible Adapter 必须使用 Chat Completions 风格请求，支持 system prompt、temperature、top_p、max_tokens、seed、可配置 base URL/模型名及连接/读取超时。
@@ -89,7 +89,7 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 ### FR-UI：用户界面
 
 - **FR-UI-01** 中文 Dashboard 必须展示模型、Benchmark、Run、成功 Run 数，最近运行及得分、延迟、Token 概览。
-- **FR-UI-02** Models 页面必须支持列表、添加、编辑、删除和表单校验；只输入 API Key 环境变量名称并提示不保存真实密钥。
+- **FR-UI-02** Models 页面必须支持列表、添加、编辑、删除和表单校验；OpenAI-compatible 模型由用户直接在密码输入框粘贴 API Key，提交后立即清空，后续只显示“已安全保存”等状态，绝不回显密钥。环境变量名称不得作为 Web 主流程输入项。
 - **FR-UI-03** Benchmarks 页面必须展示名称、版本、维度、语言、题数、Hash、详情、格式说明、Demo 标识及重新载入操作。
 - **FR-UI-04** New Run 必须允许选择 Model/Benchmark，设置 temperature、top_p、max_tokens、seed，创建后跳转详情。
 - **FR-UI-05** Run Detail 必须轮询状态并展示进度、三类得分/比率、正确/错误数、延迟、Token、成本、配置快照及逐题原始/解析/标准答案、得分与错误。
@@ -102,13 +102,14 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 
 | 实体 | 必须字段 |
 |---|---|
-| Model | id, name, provider_type, base_url, remote_model_name, api_key_env, enabled, input/output price per million, default_parameters, created_at, updated_at |
+| Model | id, name, provider_type, base_url, remote_model_name, credential_source, api_key_env（兼容）, enabled, input/output price per million, default_parameters, created_at, updated_at |
+| ModelCredential | model_id, key_id, nonce, ciphertext, algorithm, created_at, updated_at |
 | Benchmark | id, slug, name, version, description, dimension, language, license, source, evaluator_type, dataset_hash, question_count, created_at |
 | Question | id, benchmark_id, external_id, question_type, prompt, choices, reference_answer, evaluator_config, metadata |
 | EvaluationRun | id, model_id, benchmark_id, status, protocol_version, model_parameters_snapshot, benchmark_hash_snapshot, prompt_template_snapshot, code_commit_sha, totals/counts, score, completion_rate, average_latency_ms, Token/cost, timestamps, error_message |
 | EvaluationResponse | id, run_id, question_id, raw_response, parsed_answer, reference_answer_snapshot, score, evaluator_name, latency, Token/cost, error_type/message, created_at |
 
-- **DR-01** 主外键、唯一约束和索引必须保护 Model/Benchmark/Question/Run/Response 的关联完整性。
+- **DR-01** 主外键、唯一约束和索引必须保护 Model/ModelCredential/Benchmark/Question/Run/Response 的关联完整性；每个 Model 最多一条凭据记录，删除 Model 时级联删除该记录。
 - **DR-02** Benchmark 内 `external_id` 唯一；版本和 Hash 能区分数据修订。
 - **DR-03** JSON 配置必须以结构化数据存储和验证，不能依赖不受控字符串解析。
 - **DR-04** 所有持久化时间使用 UTC；金额计算和舍入规则必须一致且有测试。
@@ -118,7 +119,7 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 ## 4. 用户故事
 
 - **US-01** 作为首次使用者，我可以不配置 Key 注册 Mock 模型、载入 Demo 并完成一次 Run，以验证系统可用。
-- **US-02** 作为开发者，我可以只填写环境变量名称配置 OpenAI-compatible 模型，而不把密钥写入平台数据库。
+- **US-02** 作为本地用户，我可以在 Web 中直接粘贴 OpenAI-compatible API Key；保存后界面和 API 不再返回明文，后台 Worker 可以直接用于真实模型评测。
 - **US-03** 作为研究人员，我可以导入经过校验的版本化小型 Benchmark，并看到题数与稳定 Hash。
 - **US-04** 作为评测者，我创建 Run 后立即获得 ID，离开创建页面也能查看进度和终态。
 - **US-05** 作为分析者，我能检查每题原始输出、解析答案、标准答案、评分、耗时、Token 和错误。
@@ -144,11 +145,11 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 
 ### 安全与隐私
 
-- **NFR-SEC-01** 不保存真实 Key，不记录 Authorization，错误信息和日志必须脱敏。
+- **NFR-SEC-01** 不得明文保存或返回真实 Key，不得记录 Authorization；Web 提交的 Key 只能以 AES-256-GCM 密文保存，错误信息、请求标识和日志必须经过 canary 测试证明不会反射密钥。
 - **NFR-SEC-02** 导入限制大小、拒绝路径穿越和任意文件引用，不执行数据集代码；数值解析禁止 `eval`。
 - **NFR-SEC-03** CORS 来源显式配置，API 校验输入；恶意 `base_url`/SSRF 是已记录风险。
 - **NFR-SEC-04** `.env` 被 Git 忽略，CI secret 非必需；依赖应固定或有 lockfile 并接受自动化审计。
-- **NFR-SEC-05** MVP 仅面向可信本地用户，不应直接暴露公网；生产前需鉴权、请求限制、SSRF 防护和更严格上传隔离。
+- **NFR-SEC-05** 当前系统仅面向可信 loopback 用户，不应直接暴露局域网或公网；生产前需鉴权、请求限制、KMS/Secret Manager、租户隔离、SSRF 防护和更严格上传隔离。
 
 ### 可维护性与可访问性
 

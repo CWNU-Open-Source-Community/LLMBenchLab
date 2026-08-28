@@ -3,117 +3,123 @@
 - 状态：`in_progress`
 - 前置阶段：[Phase 1 — MVP](PHASE-1-MVP.md)（`completed`）
 - 后续阶段：[Phase 3 — Benchmarks](PHASE-3-BENCHMARKS.md)
-- 核心决定：[ADR-0005 — Durable task execution](../decisions/ADR-0005-durable-task-execution.md)
+- 核心决定：[ADR-0005](../decisions/ADR-0005-durable-task-execution.md)
+- 凭据安全：[ADR-0007](../decisions/ADR-0007-web-provider-credentials.md)
+- Provider transport：[ADR-0008](../decisions/ADR-0008-openai-compatible-sse-transport.md)
+- 治理与审计：[ADR-0009](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)
+- 交付边界修正：[ADR-0010](../decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)
+- pre-send retry 修正：[ADR-0011](../decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)
 
 ## 阶段目标
 
-把单进程 SQLite 执行方式升级为以 PostgreSQL 为共享任务事实来源、Redis Streams 为可丢失/可重复的通知层、独立 Worker 为唯一执行入口的可靠任务系统。系统在受限并发下通过数据库租约、心跳、fencing、逐题幂等和对账恢复保护 `llmbenchlab-protocol-v1` 证据，但不承诺 Provider exactly-once、生产高可用、无限横向扩展或未经测量的容量。
+把单进程 SQLite MVP 升级为以 PostgreSQL 为共享事实来源、Redis Streams 为可丢失/可重复通知层、独立 Worker 为唯一常规执行入口的可靠任务系统。在数据库时间、租约/fencing、逐题幂等、可恢复治理和 typed audit 保护下维持 `llmbenchlab-protocol-v1` 证据。本阶段不承诺 Provider exactly-once、生产 HA、无限横向扩展或未经正式测量的 SLA。
 
-## 功能范围
+## 当前功能范围
 
-- PostgreSQL 共享部署数据库、双方言 Alembic migration 和 SQLite 单 Worker 本地兼容路径。
-- Redis Streams at-least-once 通知；数据库保存 Run、取消、attempt、租约、Response、聚合、错误和 dead-letter 的全部权威事实。
-- 独立 Worker、原子领取、数据库时间租约、心跳、单调 fencing token、有限重试/退避、取消、租约过期接管、重复投递 no-op 和 dead-letter。
-- 显式、单向 SQLite→PostgreSQL 导入：只读且停止写入的源、空目标、单目标事务、并发互斥及五表 count/PK/content digest 对账。
-- Run 内既有 1–4 题并发，以及 Phase 2 尚待完成的 Provider 限流、预算硬上限、完整背压和公平调度。
-- LLMBenchLab 应用 JSON 日志、请求/Run/Question correlation、存活/健康/就绪端点和数据库派生任务 gauges，以及尚待完成的历史 counters、延迟、完整审计与主循环 liveness。
-- 真实 PostgreSQL/Redis、故障注入、竞争条件、进程恢复、迁移/导入演练，以及尚待完成的性能/容量基线、告警和完整 Runbook。
+- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容、双方言 Alembic 链至 `20260827_0004`。
+- Redis at-least-once 通知；Run、取消、重试、租约、Response、终态、治理、attempt ledger 和 audit 全由数据库裁决。
+- 原子 claim、数据库时间 lease/heartbeat、fencing、有限 retry/backoff、取消、过期接管、duplicate no-op 和 dead-letter。
+- 停写只读 SQLite→空 PostgreSQL 的单向 importer；`0004` 后按依赖顺序复制 12 张应用表，并做 count/PK/content fingerprint。keyring 仍在数据库之外。
+- managed API Run 的 active policy ID/hash 与显式 input/Token/cost override 冻结；global/provider/model/run 四层 concurrency、固定分钟 RPM/TPM、global/run lifetime request/Token/USD budget。
+- 每个 Provider HTTP attempt 的 reserve→send-started→actual/conservative settlement 或 confirmed pre-send release never-delete ledger；materialized scope/bucket counter 仅作投影，任何高/低漂移 fail closed。
+- 有限 backlog、typed `429`、database not-before、question quantum、dispatch/failure 分离和跨 Model due ordering。
+- typed audit、分页 Run audit、task history counters、基于 Run 数据库时间戳的 queue/execution/end-to-end latency、严格规范化 Provider metadata 和非秘密 credential audit。
+- Run Detail 展示 managed/delayed/exhausted、治理原因和明确 UTC not-before；旧 Run 与可信本地 CLI 明确为 `legacy_unmanaged`。
+- 真实 PostgreSQL 竞争测试及 Mock-only enhanced capacity/acceptance 工具；精确实现 SHA 的完整 capacity、9/9 acceptance 与远程 4/4 CI 已通过。
 
 ## 非目标
 
-- 不新增标准大型 Benchmark、代码沙箱、Judge、Arena 或 Agent。
-- 不实现 Kubernetes、多区域容灾、生产 HA 或无限水平扩展。
-- 不改变 Phase 1 的题目、评分分母、聚合、排行榜或协议含义；不兼容变化必须升级协议或 API 版本。
-- 不以本地 Response 幂等推断 Provider 请求/计费恰好一次，不在自动化测试中调用真实模型。
+- 不新增标准 Benchmark、代码沙箱、Judge、Arena、Agent、认证、多租户或公共部署。
+- 不把本地 ledger/Response 幂等描述为 Provider 请求或账单 exactly-once。
+- 不把 fixed-minute limiter 描述为平滑 token bucket，不把 Mock 容量描述为真实 Provider 或生产 SLA。
+- 本治理切片不直接交付正式 SLO、Prometheus/OTel Exporter、告警规则、audit retention archive、备份恢复认证或 Worker 主循环进展探针。
+- 不改变题目、评分分母、聚合、排行榜隔离或 protocol-v1 语义。
 
 ## 支持边界与不变量
 
-- PostgreSQL 是多 Worker 验证过的部署目标和任务事实来源；SQLite 只支持个人本地单 Worker，不宣称多进程写协调。
-- API 先提交 `pending` Run，再 best-effort `XADD`，自身不加载 Adapter 或执行题目；Redis 故障不能撤销数据库提交。
-- Worker 通过数据库扫描覆盖 commit/XADD 裂缝、消息丢失和 Redis 暂停；重复/延迟通知只能触发数据库条件检查。
-- 同一 Run 同时最多一个有效 owner/token。Response、进度、重试、取消和终态写入都必须验证未过期 lease 和 fencing token。
-- `(run_id, question_id)` 最多一条 Response，`completed_questions` 来自持久化 Response 数，终态聚合从 Response 事实重算。
-- Provider 调用不是 exactly-once：若 Worker 在上游响应后、本地提交前崩溃，接管者可能重复外部调用或计费。
-- 六服务 Compose 是本地可靠性/故障验收拓扑：`postgres`、`redis`、一次性 `migrate`、`api`、`worker`、`frontend`。它不是生产编排或 HA 证明。
+- PostgreSQL 是受支持的多 Worker 事实来源；SQLite 只支持个人本地单 Worker。Redis、进程内计数和 materialized counters 都不是第二事实来源。
+- API 先提交数据库 Run，再 best-effort `XADD`；通知失败不撤销已接受 Run。Worker 用数据库扫描覆盖 commit/XADD 裂缝、Redis 暂停和重复消息。
+- 同一 Run 同时最多一个有效 owner/token；Response、进度、治理 settlement、取消和终态写入必须验证未过期 lease 与 fencing token。
+- `(run_id, question_id)` 最多一条 Response；终态前从持久化 Response 重算 protocol-v1 聚合。
+- managed Run 创建时冻结 policy/hash 与 override；运行中 policy 切换不能改变历史 Run。policy、Run override、scope/bucket projection 与 ledger 任一不一致都 fail closed，并只尝试写固定非秘密完整性事件。
+- 只有已成功提交 `send_started` 或无法确认 send-start 结果的 attempt 消耗 HTTP retry。按 ADR-0011，confirmed pre-send release 保留终态旧 ledger row，并以新 generation 从当前未发送 ordinal 恢复。
+- `send_started` 后 usage/commit 不确定按完整预留 conservative settlement；不能按零释放。Provider 响应后本地 commit 前崩溃仍可能造成重复外部调用/费用。
+- cooperative yield 不增加 `failed_attempt_count`；dispatch/claim 与失败预算分离。
+- API/Worker managed Run 受治理；按 ADR-0010，可信本地 `llmbenchlab-evaluate` CLI 继续 `legacy_unmanaged`、必须独占数据库，且没有全局 RPM/TPM/USD 硬保证。
+- write-only `api_key`、AES-256-GCM `model_credentials`、数据库外共享 keyring、legacy `api_key_env`、origin/active-Run 门禁继续有效。Key、Authorization、ciphertext、nonce、keyring、Provider URL、题目/prompt/response正文不得进入 audit。
+- Provider request ID/returned model/system fingerprint/finish reason 仅在固定字符、长度和凭据形态检查后保存；不安全值为 `null`，不生成含 Provider 控制文本的 redaction event。
+- audit 是应用 append-only、event-key 幂等并有 hash/schema read validation，不是数据库管理员不可篡改的 WORM。
+- OpenAI-compatible SSE、严格 `[DONE]`、JSON fallback、wire/event/content 上限和聚合后 Key 脱敏保持不变。
 
 ## 任务状态
 
 | ID | 状态 | 已交付与剩余范围 |
 | --- | --- | --- |
-| P2-01 一致性与容量设计 | `partial` | ADR-0005 已固定事实来源、交付、租约、恢复与回滚语义及默认容量边界；正式 SLO、容量模型/基线未完成 |
-| P2-02 PostgreSQL 迁移 | `foundation_delivered` | `0002` migration、双方言往返、真实 PG check、SQLite 单向导入及对账/回滚/并发证据已交付；无自动反向回迁 |
-| P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、独立 Worker、数据库扫描、租约/心跳/fencing、幂等键与 ACK/no-op 语义已交付 |
-| P2-04 生命周期可靠性 | `foundation_delivered` | 恢复、取消、有限重试/退避、租约超时、dead-letter 和终态聚合已交付；Provider 外部副作用仍为 at-least-once 边界 |
-| P2-05 并发治理 | `pending` | Provider 限流、预算、完整背压、公平调度和全局并发治理未完成 |
-| P2-06 可观测性 | `partial` | 应用 JSON 日志/correlation、健康/就绪和 DB gauges 已交付；历史 counters、延迟、完整审计、全 Uvicorn/第三方日志覆盖与 Worker 主循环 liveness 未完成 |
-| P2-07 验证与运维 | `partial` | 真实故障、竞争、迁移/导入和 Compose 8/8 已交付；性能/容量基线、告警与完整 Runbook 未完成 |
+| P2-01 一致性与容量设计 | `partial` | DB truth、lease/fencing、四层治理、容量脚本结构已交付；正式 SLO、容量模型、多轮统计与参数校准未完成 |
+| P2-02 PostgreSQL 迁移 | `slice_delivered` | `0002`/`0003` 可靠性与凭据基础、`0004` 治理/审计 schema、12 表 importer 与双方言测试已实现；本地及精确 SHA 远程真实 PG migration/check/integration 已通过，无自动反向回迁 |
+| P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；Worker 主循环 progress/liveness 事实仍未交付 |
+| P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
+| P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
+| P2-06 可观测性 | `slice_delivered` | DB gauges、typed audit/history、Run latency、Provider metadata、credential audit 和 UI 状态已实现；Exporter/告警、retention archive、Worker progress/liveness、全日志源治理仍未完成 |
+| P2-07 验证与运维 | `slice_delivered` | enhanced capacity/PG tests、Operations/Performance/Deployment 与精确候选 evidence 已交付；正式 SLO、backup/restore、完整失败矩阵与告警响应仍未完成 |
 
-表中的 `foundation_delivered` 只表示本轮最小可靠垂直切片已交付，不是 Roadmap 阶段状态；Phase 2 仍为 `in_progress`。
+`slice_delivered` 表示该垂直切片及其候选门禁已交付，不表示整个阶段完成。Phase 2 必须保持 `in_progress`。
 
-## 验收标准与当前证据
+## 验收标准与当前结论
 
-- [x] API/Worker 任一进程重启后，未完成 Run 可安全恢复。Compose 在部分 Response 已落库时重启 API，并对真实 lease owner 执行 `SIGKILL`；peer 在租约自然过期后接管，已有 Response ID 保持、最终 15 题唯一。
-- [x] 重复投递不会生成重复本地 Response、进度、分数或费用记录。显式重复 `XADD` 最终 ACK/PEL=0 且终态快照不变；这不保证 Provider 调用或外部计费 exactly-once。
-- [x] 同一 Run 只有一个有效执行者；SQLite barrier、真实 PostgreSQL 双连接和双 Worker Compose 均证明并发领取只有一个 owner/token，过期接管令 token 递增并 fencing 旧 owner。
-- [ ] **部分通过**：pending/running 取消已做真实 Compose 端到端验证；有限重试、超时、dead-letter 和取消/完成竞态有自动化仓储/Runner 测试，但尚未把每一种失败组合都纳入完整生产式故障演练。
-- [x] SQLite 数据可校验迁移到 PostgreSQL，migration 与回滚有演练证据。真实 PostgreSQL 16 验证五表导入、提交前整体回滚、双源竞争、提交确认丢失和提交后验证失败；Compose 的 `head -> 0001 -> head` 对同一个 15 题 baseline Run 的协议 v1 核心字段及其 15 条 Response 做三时点 canonical hash。该 hash 不是全库快照；不提供 PG→SQLite 自动回迁。
-- [ ] **未通过（P2-05）**：Provider 速率、预算、完整背压、公平调度和全局并发治理尚不可配置，不得扩展为成本可控或过载安全声明。
-- [ ] **部分通过（P2-06）**：应用日志可关联请求、Run、Question、Worker、attempt/token；`/tasks/metrics` 提供数据库当前 gauges。仍无历史 counters、延迟、完整任务审计和全日志源覆盖，不能从聚合 gauge 追踪完整单题生命周期。
-- [x] Phase 1 API/协议兼容测试与离线 Smoke 继续通过；故障 Run 保持 `llmbenchlab-protocol-v1`、15 个唯一 Response、严格总分/完成率/已回答准确率语义，所有自动化模型调用均为 Mock。
-- [ ] **部分通过（P2-07）**：真实并发、API/Worker restart、Redis stop/start、两类取消、重复消息、租约过期和迁移/导入演练有可复核证据；性能/容量基线、完整告警与操作 Runbook 尚未完成。
+- [x] 可靠执行基础：API/Worker restart、真实 lease-owner `SIGKILL`、Redis stop/start、duplicate delivery、pending/running cancel 和 lease takeover 有历史真实 PostgreSQL/Redis/Compose 证据。
+- [x] 本地幂等：重复通知不生成重复 Response/终态聚合；Provider 外部调用/费用明确不保证 exactly-once。
+- [x] 治理实现：`0004`、四层 policy/ledger、managed Run freeze、typed backpressure、quantum/fair ordering、typed audit/history、Provider/credential evidence 已提交并 push。
+- [x] 完整性实现：counter 低报/高报、policy hash/column 与 Run override 漂移在 repository/API/Worker/importer 边界 fail closed；confirmed pre-send release 不消耗零 HTTP retry。
+- [x] **治理候选门禁**：精确 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 的真实 PostgreSQL integration、增强 capacity、9/9 acceptance、全量 lint/test/smoke/migration/Compose 与远程 CI 均通过。
+- [x] **crash seam 验收**：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复三条 deterministic DB seam injection 在完整 Compose acceptance 通过；它们不冒充精确时刻 `SIGKILL`。
+- [x] **远程实现门禁**：GitHub Actions run [`33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 对精确实现 SHA 4/4 成功。
+- [ ] **P2-01 正式闭环未通过**：没有正式 SLO/容量模型、多轮统计或生产参数校准。
+- [ ] **P2-06 正式闭环未通过**：没有 exporter/告警、audit retention archive 或 Worker progress/liveness；现有 dependency probe 不能证明主循环正在推进。
+- [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
-## 已验证证据
+## 已实际运行的中间证据
 
-| 验证 | 结果 |
-| --- | --- |
-| 后端非集成 | `205 passed, 5 deselected` |
-| 真实 PostgreSQL/Redis 集成 | `5 passed, 205 deselected` |
-| 前端 | `4 files, 13 passed`；lint/typecheck/build 通过 |
-| 离线垂直 Smoke | `1 passed`；API 提交后由独立 WorkerService 使用 Mock 完成 |
-| Compose 故障验收 | 默认 build、隔离项目，`8/8 passed`；最终 Redis consumer group `pending=0, lag=0`，清理后无项目容器/卷/网络残留 |
-| 迁移/导入 | SQLite/真实 PG upgrade/check/往返；PG16 导入成功、pre-commit rollback、并发互斥、commit unknown、committed verification failure 均通过 |
-
-Compose 八场景覆盖拓扑/健康、protocol-v1 基线、执行中 API restart、实际租约 owner `SIGKILL` 后自然接管、Redis stop/start 与数据库对账、pending cancel、running cancel 加重复投递，以及 PostgreSQL `head -> 0001 -> head` 往返。详细命令、Run ID、哈希与清理记录见 [Phase 2 工作日志](../worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)。没有调用真实 Provider。
-
-## 可观测性边界
-
-- `/live` 不访问外部依赖；`/health` 只检查数据库；`/ready` 检查数据库、Alembic head 和 Redis。Redis 不可用时返回 `503/degraded`，但数据库可用时仍接受 Run，Worker 可继续数据库对账。
-- `/tasks/metrics` 只从数据库事实计算 pending/due/running/expired/cancel/retry/dead-letter/queue-error/attempt gauges。它不是 Prometheus 历史 counter、延迟分布、审计事件或容量报告。
-- JSON/allowlist/correlation 只覆盖 LLMBenchLab 应用 logger，不覆盖全部 Uvicorn access、SQLAlchemy、Redis client 或其他第三方日志；秘密仍不得进入 URL。
-- Worker probe 只证明数据库/head/Redis 依赖能力。Redis 故障时它以 degraded 成功退出以保留 DB reconciliation；它不证明 Worker 主循环仍在领取、心跳或推进任务。
-- readiness 的同步数据库检查通过 `asyncio.to_thread` 执行；HTTP 等待超时不会取消已进入线程的驱动调用，实际资源上界仍由驱动、连接和池 timeout 决定。
-
-## SQLite→PostgreSQL 导入边界
-
-- 导入器复制五张核心表，包括题目、参考答案、Prompt/模型快照、原始回答、错误和 `api_key_env` 名称；必须在受信环境保护源、目标和备份。
-- 含凭据目标 DSN 通过 `--target-env`（默认 `LLMBENCHLAB_DATABASE_URL`）读取；`--target` 拒绝含密码 URL，CLI 不输出 URL 或行内容。
-- exit `2`：提交前失败，目标事务已回滚。exit `4`：PostgreSQL 未确认 COMMIT，目标只能是空或完整但客户端未知。exit `3`：COMMIT 已确认，提交后验证/报告失败，数据已经提交。exit 3/4 都禁止盲目重试，必须先只读核验目标与对账证据。
-
-## 风险
-
-| 风险 | 已有控制 | 剩余工作/限制 |
+| 验证 | 实际结果 | 限制 |
 | --- | --- | --- |
-| at-least-once 重复写 | 幂等键、数据库唯一约束、条件状态转换、fencing | Provider 外部调用/费用仍可能重复 |
-| Redis 与数据库分裂 | 数据库唯一事实来源、commit 后通知、周期对账 | Redis 故障增加延迟；没有生产 Redis HA/ACL/TLS |
-| 租约不当造成停滞/接管 | 数据库时间、可配置 lease/heartbeat、自然过期故障证据 | 需用性能/容量测试校准生产参数 |
-| 并发导致限流/费用失控 | Run 内 1–4、Worker 单 Run、有限 attempts | P2-05 限流、预算、完整背压、公平调度未完成 |
-| 数据迁移丢失/泄漏 | 只读源、空目标、事务、锁、三阶段摘要、明确退出语义 | 完整数据仍为敏感内容；无自动反向迁移 |
+| `make lint` | 最新本地冻结树通过 | 同一实现 SHA 远程 lint/test 通过 |
+| 最新本地 `make test` | 后端 `604 passed, 29 skipped`；前端 `38 passed` | 文档收尾前重跑通过 |
+| 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 本地通过；同一实现 SHA 远程 integration 通过 |
+| `make smoke` | `1 passed, 7 deselected`，仅 Mock | 最新本地冻结树通过；未调用真实 Provider |
+| 定向治理/API/Worker | 目标套件零失败；独立审计记录 `218 passed`；完整性边界集合 `18 passed` | 已由最终全量、真实 integration 与候选 evidence 补充 |
+| SQLite/PostgreSQL Alembic | 隔离 SQLite 与临时 PostgreSQL 16 的 prepare/upgrade/downgrade/upgrade/check 通过 | 本地通过；精确实现 SHA 的远程 integration 亦通过 |
+| Compose config | `docker compose config --quiet` exit 0 | 不等于服务/容量 acceptance |
+| enhanced capacity | `665244e…` 上通过；evidence SHA-256 `40deadeb…0588` | 有限 policy、4×202/2×429、yield/fairness/fault/reconciliation；Mock-only 非 SLA |
+| full Compose acceptance | `665244e…` 上 9/9；evidence SHA-256 `ab311665…ddec` | 三条 deterministic seam 与 cleanup 均通过 |
+| 远程 CI | run `33099260233` 4/4 | 精确实现 SHA 全绿；PR #1 未合并 |
+| 设计/计时修复远程 CI | SHA `1cd19c51ed309316047a18ed3b2a308647af495d`，run `33081854406`，4/4 | 不包含当前治理实现 |
 
-## 交付物
+所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
 
-已交付可靠基础：
+## 迁移与回滚边界
 
-- PostgreSQL/SQLite revision `0002`、SQLite→PostgreSQL 导入/核验工具和迁移往返证据。
-- Redis Streams 通知、独立 Worker、租约/心跳/fencing、幂等恢复、取消、有限重试与 dead-letter。
-- PostgreSQL/Redis/API/Worker/frontend/一次性 migrate 的六服务 Compose、真实集成和八场景故障验收。
-- ADR-0005、应用 JSON 日志/correlation、健康/就绪端点、DB gauges，以及更新后的架构/API/测试/部署/安全文档。
+- importer 的 12 表依赖顺序包含原六张业务/凭据表和六张 governance/audit 表；源必须停写且可读，目标必须空，copy/对账在单一目标事务内完成。
+- active policy/reservation、materialized/ledger 漂移和 schema fingerprint 不满足 preflight 时 fail closed。summary 只含 row count、PK/content digest，不输出业务内容或凭据材料。
+- keyring 不随数据库复制；恢复目标必须另行安全取得匹配 keyring。数据库与 keyring 同时泄漏可恢复 Provider Key，丢失 keyring 则 stored credential 不可恢复。
+- exit `2` 为提交前回滚；exit `4` 为 COMMIT 结果未知；exit `3` 为提交已确认但后验证/输出失败。exit 3/4 禁止盲目重试。
+- downgrade `0004` 前必须停止 API/Worker、关闭 admission、对账 active reservation，并确保六类新表和 managed active Run 满足 guard；不得为代码回滚删除已结算 ledger/audit。
 
-阶段剩余交付物：
+## 风险与剩余控制
 
-- P2-05 Provider 限流、预算硬上限、完整背压、公平调度与全局并发治理。
-- P2-06 历史 counters/延迟、完整审计、全日志源治理、Worker 主循环 liveness 和告警。
-- P2-07 性能/容量基线、完整 Runbook 及更完整的备份/恢复演练。
+| 风险 | 已有控制 | 剩余工作 |
+| --- | --- | --- |
+| 限额并发突破 | canonical scope、固定锁序、DB transaction、ledger 重算及精确候选真实 PG integration | 正式规模参数校准与持续回归 |
+| Provider 调用/费用重复 | send-start marker、保守结算、本地幂等及三条 crash seam acceptance | 外部 exactly-once 不可承诺 |
+| 长 Run 饥饿 | finite quantum、due ordering、dispatch/failure 分离及精确候选跨 Model capacity evidence | 多轮/更大规模正式容量模型 |
+| Worker 停滞不可见 | dependency probe、typed current gauges | DB-time progress/liveness、exporter 与 alert |
+| 审计增长/泄密 | 固定 allowlist、无正文/URL/Key、pagination | retention archive/restore 和 cardinality 运行边界 |
+| 容量结论过度外推 | Mock-only、环境/config/evidence 记录 | 正式 SLO/容量模型、多轮测量，不冒充 Provider/生产 SLA |
+| 灾难恢复失败 | 12 表 importer、迁移 guard、独立 keyring 边界 | PostgreSQL backup/restore、keyring 配对和 audit archive 演练 |
+
+## 交付物与下一任务
+
+已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 API/Architecture/Security/Testing/Deployment/Operations/Performance 与状态文档。实现 SHA `665244e…` 已通过真实 integration/capacity/acceptance、三条 crash seam 与远程 4/4 CI。下一步按 [NEXT_TASK.md](../NEXT_TASK.md) 继续正式 SLO、Exporter/告警、retention archive、Worker progress/liveness 和 backup/restore。
 
 ## 状态
 
-`in_progress`。可靠任务执行基础和指定真实故障证据已经交付，但 P2-05 未完成，P2-06/P2-07 仅部分完成；未满足的复选项禁止把 Phase 2 标记为 `completed`，也禁止宣称生产 HA、无限横向扩展、完整可观测性或 Provider exactly-once。
+`in_progress`。P2-05/P2-06/P2-07 的治理/审计/容量切片及候选级真实证据、远程门禁已经交付，但正式 SLO/Exporter/告警/retention/backup/Worker-progress 等阶段验收仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。

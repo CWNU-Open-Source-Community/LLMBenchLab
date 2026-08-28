@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import subprocess
+import math
 from datetime import timedelta
-from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import func, select
@@ -14,42 +12,43 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.deps import PaginationDep, SessionDep, SettingsDep
 from app.core.config import Settings
-from app.core.constants import (
-    DEFAULT_CONNECT_TIMEOUT_SECONDS,
-    DEFAULT_MAX_RETRIES,
-    DEFAULT_POOL_TIMEOUT_SECONDS,
-    DEFAULT_READ_TIMEOUT_SECONDS,
-    DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
-    DEFAULT_RETRY_BACKOFF_CAP_SECONDS,
-    DEFAULT_WRITE_TIMEOUT_SECONDS,
-    PROTOCOL_VERSION,
-    RETRYABLE_PROVIDER_STATUS_CODES,
+from app.db.model_lock import lock_model_for_update
+from app.governance import (
+    AuditIntegrityError,
+    GovernanceBacklogFull,
+    GovernanceIntegrityError,
+    GovernanceRepository,
+    record_governance_integrity_event,
+    validate_audit_identity_for_read,
+    validate_audit_payload_for_read,
 )
-from app.models import Benchmark, EvaluationResponse, EvaluationRun, Model, Question, RunStatus
+from app.models import (
+    AuditEvent,
+    AuditRetentionClass,
+    Benchmark,
+    EvaluationResponse,
+    EvaluationRun,
+    Question,
+    RunStatus,
+)
 from app.runners.run_leases import CancelDisposition, RunLeaseRepository
+from app.schemas.audit import AuditEventList
 from app.schemas.evaluation_response import EvaluationResponseList
 from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, EvaluationRunRead
+from app.services.run_service import build_evaluation_run
 from app.task_queue import QueueUnavailable
 
 router = APIRouter(prefix="/runs", tags=["runs"])
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
 logger = logging.getLogger(__name__)
 
 
-def _git_commit_sha() -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = completed.stdout.strip()
-    return value if completed.returncode == 0 and len(value) == 40 else None
+def _session_factory(session: Session) -> sessionmaker[Session]:
+    return sessionmaker(
+        bind=session.get_bind(),
+        class_=Session,
+        autoflush=False,
+        expire_on_commit=False,
+    )
 
 
 def _get_run_or_404(session: SessionDep, run_id: str) -> EvaluationRun:
@@ -64,16 +63,107 @@ def _get_run_or_404(session: SessionDep, run_id: str) -> EvaluationRun:
 
 def _lease_repository(session: Session, settings: Settings) -> RunLeaseRepository:
     return RunLeaseRepository(
-        sessionmaker(
-            bind=session.get_bind(),
-            class_=Session,
-            autoflush=False,
-            expire_on_commit=False,
-        ),
+        _session_factory(session),
         lease_for=timedelta(seconds=settings.worker_lease_seconds),
         retry_backoff_base=timedelta(seconds=settings.worker_retry_backoff_base_seconds),
         retry_backoff_cap=timedelta(seconds=settings.worker_retry_backoff_cap_seconds),
     )
+
+
+def _record_governance_integrity(
+    session: Session,
+    *,
+    run_id: str | None = None,
+    model_id: str | None = None,
+) -> None:
+    session.rollback()
+    try:
+        record_governance_integrity_event(
+            _session_factory(session),
+            run_id=run_id,
+            model_id=model_id,
+        )
+    except Exception:
+        logger.error(
+            "Governance integrity evidence could not be recorded",
+            extra={
+                "event": "governance_integrity_audit_failed",
+                "run_id": run_id,
+                "model_id": model_id,
+                "result": "not_recorded",
+            },
+        )
+
+
+def _audit_event_read_item(event: AuditEvent) -> dict[str, object]:
+    minimum_retention = timedelta(
+        days=365 if event.retention_class == AuditRetentionClass.SECURITY else 90
+    )
+    if (
+        (
+            event.attempt is not None
+            and (
+                isinstance(event.attempt, bool)
+                or not isinstance(event.attempt, int)
+                or not 0 <= event.attempt <= 2**31 - 1
+            )
+        )
+        or (
+            event.provider_attempt is not None
+            and (
+                isinstance(event.provider_attempt, bool)
+                or not isinstance(event.provider_attempt, int)
+                or not 1 <= event.provider_attempt <= 2**31 - 1
+            )
+        )
+        or (
+            event.lease_token is not None
+            and (
+                isinstance(event.lease_token, bool)
+                or not isinstance(event.lease_token, int)
+                or not 0 <= event.lease_token <= 2**63 - 1
+            )
+        )
+        or (
+            event.duration_ms is not None
+            and (
+                isinstance(event.duration_ms, bool)
+                or not isinstance(event.duration_ms, (int, float))
+                or not math.isfinite(event.duration_ms)
+                or event.duration_ms < 0
+            )
+        )
+        or event.expires_at - event.occurred_at < minimum_retention
+    ):
+        raise AuditIntegrityError("retained audit event failed integrity validation")
+    return {
+        "id": validate_audit_identity_for_read("id", event.id, maximum=36),
+        "event_type": event.event_type,
+        "payload": validate_audit_payload_for_read(
+            event.event_type,
+            event.payload,
+            event.payload_hash,
+        ),
+        "retention_class": event.retention_class,
+        "occurred_at": event.occurred_at,
+        "expires_at": event.expires_at,
+        "correlation_id": validate_audit_identity_for_read(
+            "correlation_id", event.correlation_id, maximum=128
+        ),
+        "run_id": validate_audit_identity_for_read("run_id", event.run_id, maximum=36),
+        "model_id": validate_audit_identity_for_read("model_id", event.model_id, maximum=36),
+        "question_id": validate_audit_identity_for_read(
+            "question_id", event.question_id, maximum=36
+        ),
+        "worker_id": validate_audit_identity_for_read("worker_id", event.worker_id, maximum=128),
+        "reservation_id": validate_audit_identity_for_read(
+            "reservation_id", event.reservation_id, maximum=36
+        ),
+        "attempt": event.attempt,
+        "provider_attempt": event.provider_attempt,
+        "lease_token": event.lease_token,
+        "duration_ms": event.duration_ms,
+    }
 
 
 @router.get("", response_model=EvaluationRunList, summary="分页列出 Run")
@@ -121,101 +211,75 @@ async def create_run(
     session: SessionDep,
     settings: SettingsDep,
 ) -> EvaluationRun:
-    model = session.get(Model, payload.model_id)
+    repository = GovernanceRepository(
+        sessionmaker(
+            bind=session.get_bind(),
+            class_=Session,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+    )
+    # PostgreSQL Provider reservations lock governance scopes before their
+    # ledger insert implicitly key-locks Model. Mirror that order before the
+    # explicit Model lock used by Run admission; SQLite remains serialized by
+    # lock_model_for_update's database-wide BEGIN IMMEDIATE.
+    repository.lock_run_admission_scope(session)
+    # Serialize Run creation with endpoint/credential mutation on every
+    # supported database so a pending Run cannot race its Provider guard.
+    model = lock_model_for_update(session, payload.model_id)
     if model is None:
+        session.rollback()
         raise HTTPException(
             status_code=404, detail={"code": "model_not_found", "message": "Model was not found"}
         )
     if not model.enabled:
+        session.rollback()
         raise HTTPException(
             status_code=409, detail={"code": "model_disabled", "message": "Model is disabled"}
         )
     benchmark = session.get(Benchmark, payload.benchmark_id)
     if benchmark is None:
+        session.rollback()
         raise HTTPException(
             status_code=404,
             detail={"code": "benchmark_not_found", "message": "Benchmark was not found"},
         )
 
-    prompt_snapshot = dict(benchmark.prompt_template)
-    if payload.system_prompt is not None:
-        prompt_snapshot["system"] = payload.system_prompt
-    model_defaults = dict(model.default_parameters or {})
-    requested_fields = payload.model_fields_set
-    generation = {
-        field: (
-            getattr(payload, field)
-            if field in requested_fields or field not in model_defaults
-            else model_defaults[field]
+    run = build_evaluation_run(model, benchmark, payload, settings)
+    try:
+        repository.admit_run(
+            session,
+            run,
+            provider_type=model.provider_type.value,
+            base_url=model.base_url,
         )
-        for field in ("temperature", "top_p", "max_tokens", "seed")
-    }
-    snapshot: dict[str, Any] = {
-        "generation": generation,
-        "model": {
-            "id": model.id,
-            "name": model.name,
-            "remote_model_name": model.remote_model_name,
-            "adapter_type": model.provider_type.value,
-            "base_url": model.base_url,
-            "api_key_env": model.api_key_env,
-            "input_price_per_million": (
-                str(model.input_price_per_million)
-                if model.input_price_per_million is not None
-                else None
-            ),
-            "output_price_per_million": (
-                str(model.output_price_per_million)
-                if model.output_price_per_million is not None
-                else None
-            ),
-            "currency_assumption": "USD",
-            "default_parameters": dict(model.default_parameters or {}),
-        },
-        "benchmark": {
-            "id": benchmark.id,
-            "slug": benchmark.slug,
-            "name": benchmark.name,
-            "version": benchmark.version,
-            "dataset_hash": benchmark.dataset_hash,
-            "question_count": benchmark.question_count,
-            "is_demo": benchmark.is_demo,
-        },
-        "evaluator": dict(benchmark.evaluator_config),
-        "execution": {
-            "concurrency": payload.concurrency,
-            "timeouts_seconds": {
-                "connect": DEFAULT_CONNECT_TIMEOUT_SECONDS,
-                "read": DEFAULT_READ_TIMEOUT_SECONDS,
-                "write": DEFAULT_WRITE_TIMEOUT_SECONDS,
-                "pool": DEFAULT_POOL_TIMEOUT_SECONDS,
+    except GovernanceBacklogFull as exc:
+        # This async endpoint uses a synchronous SQLAlchemy session. Release
+        # the Model/global-scope row locks before handing control back to the
+        # event loop, otherwise a concurrent rejected request can block the
+        # loop while FastAPI is still finalizing this request dependency.
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "code": exc.code,
+                "message": "The managed Run backlog is at its configured limit.",
+                "limit": exc.limit,
             },
-            "retry_policy": {
-                "name": "bounded_exponential_backoff",
-                "max_retries": DEFAULT_MAX_RETRIES,
-                "max_attempts": DEFAULT_MAX_RETRIES + 1,
-                "backoff_base_seconds": DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
-                "backoff_cap_seconds": DEFAULT_RETRY_BACKOFF_CAP_SECONDS,
-                "retryable_status_codes": list(RETRYABLE_PROVIDER_STATUS_CODES),
+        ) from None
+    except GovernanceIntegrityError:
+        _record_governance_integrity(
+            session,
+            run_id=run.id,
+            model_id=model.id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "governance_integrity_error",
+                "message": "Governance state failed integrity validation.",
             },
-            "task_delivery": "at_least_once",
-            "task_max_attempts": settings.worker_max_attempts,
-            "restart_recovery": "database_lease_resume_missing_responses",
-        },
-    }
-    run = EvaluationRun(
-        model_id=model.id,
-        benchmark_id=benchmark.id,
-        status=RunStatus.PENDING,
-        protocol_version=PROTOCOL_VERSION,
-        model_parameters_snapshot=snapshot,
-        benchmark_hash_snapshot=benchmark.dataset_hash,
-        prompt_template_snapshot=prompt_snapshot,
-        code_commit_sha=_git_commit_sha(),
-        total_questions=benchmark.question_count,
-        max_attempts=settings.worker_max_attempts,
-    )
-    session.add(run)
+        ) from None
     session.commit()
     correlation_id = run.id
     logger.info(
@@ -287,6 +351,56 @@ def get_run(run_id: str, session: SessionDep) -> EvaluationRun:
     return _get_run_or_404(session, run_id)
 
 
+@router.get(
+    "/{run_id}/audit",
+    response_model=AuditEventList,
+    summary="分页查看 Run 审计事件",
+)
+def list_run_audit_events(
+    run_id: str,
+    session: SessionDep,
+    pagination: PaginationDep,
+) -> AuditEventList:
+    """Return retained, typed events in stable chronological order."""
+
+    _get_run_or_404(session, run_id)
+    filters = (AuditEvent.run_id == run_id,)
+    total = session.scalar(select(func.count()).select_from(AuditEvent).where(*filters)) or 0
+    events = list(
+        session.scalars(
+            select(AuditEvent)
+            .where(*filters)
+            .order_by(AuditEvent.occurred_at, AuditEvent.id)
+            .offset(pagination.offset)
+            .limit(pagination.limit)
+        )
+    )
+    try:
+        items = [_audit_event_read_item(event) for event in events]
+    except AuditIntegrityError as exc:
+        logger.error(
+            "Retained Run audit event failed read validation",
+            extra={
+                "event": "run_audit_integrity_error",
+                "run_id": run_id,
+                "result": "rejected",
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "code": "audit_event_integrity_error",
+                "message": "A retained audit event failed integrity validation",
+            },
+        ) from exc
+    return AuditEventList(
+        items=items,
+        total=total,
+        offset=pagination.offset,
+        limit=pagination.limit,
+    )
+
+
 @router.post("/{run_id}/cancel", response_model=EvaluationRunRead, summary="协作式取消 Run")
 def cancel_run(run_id: str, session: SessionDep, settings: SettingsDep) -> EvaluationRun:
     repository = _lease_repository(session, settings)
@@ -345,6 +459,11 @@ def list_responses(
             "estimated_cost": float(response.estimated_cost)
             if response.estimated_cost is not None
             else None,
+            "provider_request_id": response.provider_request_id,
+            "returned_model": response.returned_model,
+            "system_fingerprint": response.system_fingerprint,
+            "finish_reason": response.finish_reason,
+            "http_attempt_count": response.http_attempt_count,
             "error_type": response.error_type,
             "error_message": response.error_message,
             "created_at": response.created_at,

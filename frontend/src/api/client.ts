@@ -8,6 +8,7 @@ import type {
   ModelConfig,
   ModelPayload,
   RunPayload,
+  RunStatus,
 } from "./types";
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL || "http://localhost:8000/api/v1").replace(/\/$/, "");
@@ -80,9 +81,14 @@ export const api = {
   summary: () => request<DashboardSummary>("/metrics/summary"),
   models: (params: { limit?: number; enabled?: boolean } = {}) =>
     request<ListResponse<ModelConfig>>(`/models${query({ limit: params.limit ?? 100, enabled: params.enabled })}`),
-  createModel: (payload: ModelPayload) => request<ModelConfig>("/models", { method: "POST", body: JSON.stringify(payload) }),
-  updateModel: (id: string, payload: Partial<ModelPayload>) =>
-    request<ModelConfig>(`/models/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  createModel: (payload: ModelPayload, signal?: AbortSignal) =>
+    request<ModelConfig>("/models", { method: "POST", body: JSON.stringify(payload), signal }),
+  updateModel: (id: string, payload: Partial<ModelPayload>, signal?: AbortSignal) =>
+    request<ModelConfig>(`/models/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      signal,
+    }),
   deleteModel: (id: string) => request<void>(`/models/${id}`, { method: "DELETE" }),
   benchmarks: () => request<ListResponse<Benchmark>>("/benchmarks?limit=100"),
   benchmark: (id: string) => request<Benchmark>(`/benchmarks/${id}`),
@@ -92,11 +98,21 @@ export const api = {
     data.set("archive", archive);
     return request<Benchmark>("/benchmarks/import", { method: "POST", body: data });
   },
-  runs: (limit = 20) => request<ListResponse<EvaluationRun>>(`/runs?limit=${limit}`),
+  runs: (params: {
+    offset?: number;
+    limit?: number;
+    run_status?: RunStatus;
+    model_id?: string;
+    benchmark_id?: string;
+    protocol_version?: string;
+  } = {}) => request<ListResponse<EvaluationRun>>(`/runs${query({ ...params, limit: params.limit ?? 20 })}`),
   run: (id: string) => request<EvaluationRun>(`/runs/${id}`),
   createRun: (payload: RunPayload) => request<EvaluationRun>("/runs", { method: "POST", body: JSON.stringify(payload) }),
   cancelRun: (id: string) => request<EvaluationRun>(`/runs/${id}/cancel`, { method: "POST" }),
-  responses: (runId: string) => request<ListResponse<EvaluationResponse>>(`/runs/${runId}/responses?limit=100`),
+  responses: (runId: string, params: { offset?: number; limit?: number } = {}) =>
+    request<ListResponse<EvaluationResponse>>(
+      `/runs/${runId}/responses${query({ offset: params.offset, limit: params.limit ?? 100 })}`,
+    ),
   leaderboard: (params: { model_id?: string; benchmark_id?: string; order?: string } = {}) =>
     request<ListResponse<LeaderboardEntry>>(`/leaderboard${query({ ...params, limit: 100 })}`),
 };

@@ -1,92 +1,91 @@
 # 项目状态
 
-> 更新时间：2026-08-25（Asia/Shanghai）
+> 更新时间：2026-08-28（Asia/Shanghai）
 
 ## 当前阶段
 
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
-- Phase 2 — 可靠性与任务执行：`in_progress`（2026-08-25 开始）
-- 后续阶段：Phase 3–6：`planned`
+- Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础与治理/审计候选门禁已交付；正式 SLO/运维闭环仍有缺口）
+- Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（仅可信本地 MMLU-Pro/GPQA-Diamond 客观题提前切片）
+- Phase 4–6：`planned`
 
-## 当前版本
+## 当前版本与远程边界
 
-`0.1.0` development baseline（尚未发布正式 Release），REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`。
+`0.1.0` development baseline，REST API 为 `/api/v1`，评测协议为 `llmbenchlab-protocol-v1`；尚未发布正式 Release。
 
-公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)。`main` 跟踪 `origin/main`；阶段性任务必须独立 commit、push，并由该精确 SHA 的四个 GitHub Actions 必需 job 全部通过后才可声明完成。
+公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`，PR [#1](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/1)。治理实现候选 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 已普通 push；GitHub Actions [run `33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 的 Backend lint/test、PostgreSQL/Redis integration、Frontend lint/test/build 与 Real Compose acceptance 四个必需 job 均成功。后续文档收尾提交仍必须等待其自身精确 SHA 全绿。
 
-## 已完成功能
+## 已交付基线
 
-- 完整的 Charter、Requirements、Architecture、Benchmark Protocol、Dataset Format、Roadmap、Phase 0–6、ADR、治理规则和开源协作文件。
-- FastAPI、SQLAlchemy 2.x 与 Alembic 后端；PostgreSQL 是 Compose/共享部署目标和任务事实来源，SQLite 保留单 Worker 本地兼容；五个核心实体、UTC 时间、约束、索引，以及 `0000 -> 0001 -> 0002` 线性迁移链。
-- Alembic 是唯一 schema owner；Compose 只允许一次性 `migrate` 服务执行迁移，API/Worker 只检查 head。setup/migrate 仍可安全收养已知未版本化 SQLite，未知漂移在 stamp 前被拒绝。
-- Model CRUD 与 Mock/OpenAI-compatible Adapter；Key 只通过 `api_key_env` 在运行时读取，错误有限重试并脱敏。
-- 受限 ZIP/目录 Dataset Loader、严格 Schema/JSONL 校验、路径与压缩炸弹防护、稳定 SHA-256，以及 15 道原创 `demo-general`。
-- Exact Match、Multiple Choice、Numeric Evaluator；原始输出、解析结果、评分和错误证据分离持久化。
-- Phase 2 可靠执行基础：API 只提交数据库事实并 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库扫描/领取、租约、心跳、单调 fencing token、逐题幂等和有限 attempt 执行 Run。
-- 数据库裁决取消、重试/退避、租约过期接管、终态聚合和 dead-letter；Redis 是 at-least-once 通知层，不是状态数据库，通知丢失时可由数据库对账恢复。
-- 22 个版本化 `/api/v1` 操作：liveness、health、readiness、任务 gauges、服务信息、模型、Benchmark、Run、逐题 Response、Leaderboard 与 Dashboard Metrics；OpenAPI 可用。
-- React 中文界面：Dashboard、Models、Benchmarks、New Run、Run Detail、Leaderboard，含轮询、筛选、Demo 标识和响应式错误/空/加载状态。
-- LLMBenchLab 应用 JSON 日志、请求/Run/Question correlation ID、`/live`、`/health`、`/ready`、数据库派生任务 gauges，以及数据库/队列依赖能力 Worker probe。
-- PostgreSQL/SQLite `0002` migration 往返；显式 SQLite→PostgreSQL 单向导入器以只读源、空目标、单目标事务和五表 count/PK/content digest 做对账，并区分提交前回滚、COMMIT 结果未知与提交后验证失败。
-- 统一 Make 命令、setup/dev/smoke/故障验收脚本、锁文件和 GitHub Actions；六服务本地 Compose 由 `postgres`、`redis`、一次性 `migrate`、`api`、`worker`、`frontend` 组成，API/frontend 只绑定 loopback，PostgreSQL/Redis 不发布宿主端口。
-- 项目已发布到 CWNU Open Source Community 组织；初始 `main` commit `d2b9bc8` 的远程 CI 四个 job 全部成功，包括真实 PostgreSQL/Redis integration 与 Compose 8/8 故障验收。
+- Phase 0/1 的治理、架构、协议、数据格式、ADR、FastAPI/SQLAlchemy/Alembic、React/TypeScript、Mock 垂直链路、三类 Evaluator、Demo 数据、API/UI、离线测试和开源流程。
+- PostgreSQL/Redis 可靠执行基础：数据库事实来源、Redis at-least-once 通知、独立 Worker、DB scan、租约/heartbeat/fencing、逐题幂等、有限 retry/backoff、取消、租约接管、dead-letter 和终态 Response 重算。
+- OpenAI-compatible SSE、严格 `[DONE]`、JSON fallback、identity-only、wire/event/content/error 上限、idle read timeout、bounded error 与精确当前-Key 脱敏。
+- Web write-only `api_key`、AES-256-GCM `model_credentials`、数据库外 API/Worker 共享 keyring、legacy `api_key_env`、origin/active-Run 门禁和 fail-closed repair/remove 路径。
+- MMLU-Pro test 与 GPQA-Diamond 固定 revision/SHA 转换、可信本地 `llmbenchlab-evaluate prepare/run/resume/report`、请求上界确认和原子终态报告。该 CLI 仍要求独占数据库，未受 Phase 2 managed budget 保护。
+- React 中文界面覆盖 Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail、Leaderboard；Run 列表全状态筛选/分页/活动轮询，详情逐题分页，关键桌面/平板/移动布局已修复。
 
-## 进行中功能
+## 已通过候选门禁的 Phase 2 切片
 
-- Phase 1 已固定为基线 commit `3db1e29`。
-- Phase 2 可靠任务执行基础已按 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 交付并经过真实 PostgreSQL/Redis 与进程故障验证；实现、验证和阶段边界记录在 [当前工作日志](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)。
-- Phase 2 总状态仍为 `in_progress`：P2-05 尚未实施；P2-06 和 P2-07 只有部分交付，不能称为完整可观测、生产 HA 或容量已验证。
+- Alembic 链已扩展到 `20260827_0004`。新增六类治理/审计表：`governance_policies`、`governance_scopes`、`governance_minute_buckets`、`question_executions`、`provider_call_reservations`、`audit_events`；加上既有业务/凭据表，SQLite→PostgreSQL importer 现按依赖顺序复制和对账全部 12 表。
+- active policy 在 SQLite/PostgreSQL 都由 partial unique index 保证唯一；policy 有 canonical hash。managed API Run 创建时冻结 policy ID/hash 与 input reservation、lifetime request/Token/USD overrides，旧 Run 和可信本地 CLI 保持 `legacy_unmanaged`。
+- global/provider/model/run 四层数据库权威治理已实现：concurrency、固定 UTC 分钟 RPM/TPM、global/run lifetime request/Token/cost；Redis 和进程内存不参与裁决。
+- Adapter 的每个实际 HTTP retry attempt 都进入 reserve→send-started→actual/conservative settlement 或 confirmed pre-send release ledger。未知 usage、失租或 commit 不确定不按零释放。
+- materialized scope/minute counter 只是 ledger 投影；高报/低报、policy/hash 或 Run override 漂移在 admission/mutation/reconcile/import 边界 fail closed，并只尝试记录固定非秘密完整性事件。
+- [ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md) 已修复零 HTTP 的 pre-send release 消耗 retry：旧 ledger row 保持终态，下一 generation 从未发送 ordinal 恢复，包括 `max_retries=0`。
+- backlog local admission、typed `429`、database not-before、有限 question quantum、dispatch/failure 分离和跨 Model due ordering已接入；Run 不因 Redis 故障丢失。
+- typed append-only 应用 audit、分页 Run audit、task history counters、数据库 Run 时间戳 queue/execution/end-to-end latency、严格规范化 Provider request/model/fingerprint/finish metadata 和固定非秘密 credential audit 已实现。
+- 前端 Run Detail 已显示 managed/delayed/exhausted、治理原因和明确 UTC not-before；它不把治理延迟冒充 Worker 正在执行。
+- enhanced capacity 脚本已加入有限 policy、显式 Token/费用边界、sub-15 question quantum、并发 backlog `202/429`、跨 Model 公平、双 Worker、Worker/Redis fault 与 ledger/audit 对账；真实 PostgreSQL 测试代码已加入四层 RPM/TPM/lifetime budget、backlog、settlement/reconcile race 和 audit replay。
+- acceptance harness 已加入三条确定性数据库 seam injection：`reserved`→send-start、`send_started`→settlement、Response commit→最终恢复。它们明确不是“精确时刻 SIGKILL”声明；精确候选 SHA 的完整 Compose acceptance 已 9/9 通过。
+- 精确 SHA `665244e…` 的增强 capacity 使用有限 policy、PostgreSQL 16、Redis 7 与两个 Worker 完成：并发 backlog 精确为 4 个 `202` + 2 个 typed `429`，cooperative yield 与跨 Model 公平顺序均有 durable audit 证据，最终 18 Runs/270 Responses/271 ledger/1229 audit 对账且无 active/reserved/overdrawn 漂移。
 
-## 尚未完成的功能
+## 仍未完成
 
-- Phase 2 / P2-01：正式 SLO、容量模型和容量基线。
-- Phase 2 / P2-05：Provider 速率限制、预算硬上限、完整背压、公平调度和全局并发治理。
-- Phase 2 / P2-06：历史 counters、延迟/恢复时长、完整任务审计、全日志源脱敏治理、Worker 主事件循环 liveness 和告警；当前 `/tasks/metrics` 只是数据库 gauges，应用 JSON logger 不覆盖全部 Uvicorn/第三方日志。
-- Phase 2 / P2-07：性能/容量测试、完整操作 Runbook、告警响应和更完整的备份/恢复演练。现有故障证据证明可靠基础行为，不证明生产高可用或无限横向扩展。
-- Phase 3：MMLU-Pro、GPQA、IFEval、数据集插件和隔离代码评测。
-- Phase 4：LLM/Pairwise Judge、个人 Arena 与长上下文评测。
-- Phase 5：Agent/Tool Use、私有 Benchmark 与 Live Benchmark。
-- Phase 6：多用户、鉴权、公共部署安全和正式版本发布。
+- P2-01：正式 SLO、容量模型、多轮统计、置信/变异和 lease/heartbeat/scan/backlog 参数校准。
+- P2-06：受控 metrics exporter、告警规则/响应、audit retention archive/restore、Worker DB-time progress/liveness、全日志源治理；现有 dependency probe 不能证明主循环正在推进。
+- P2-07：PostgreSQL backup/restore、数据库与 keyring 配对恢复、audit archive/Redis 重建、剩余故障矩阵和完整运维演练。
+- Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
-## 已知问题
+## 已知边界与风险
 
-- SQLite 只面向个人本地、单 Worker 路径；多 Worker 竞争证据仅针对 PostgreSQL。当前 Compose 是可靠性开发/验收拓扑，不是生产 HA。
-- 每个 Run 内并发上限为 4、每个 Worker 同时执行一个 Run，但不同 Run/Provider 之间没有完整全局限流、预算、背压或公平调度。
-- 任务投递为 at-least-once，本地 Response 和聚合幂等，但 Provider 调用不是 exactly-once；Worker 在上游响应后、本地提交前崩溃可能造成重复请求或费用。
-- 取消和失租会阻止后续题目与陈旧 Worker 写入，但已经发出的 Provider 请求可能继续至响应或超时。
-- Redis 故障会让 API readiness 降级并增加调度延迟；数据库可继续提交/对账，但这不是 Redis 高可用保证。当前本地 Redis 无 ACL/TLS，只能位于隔离网络。
-- Worker probe 只检查数据库/head/队列能力，不证明 Worker 主循环仍在领取、心跳或推进任务。API readiness 的 `asyncio.to_thread` 超时也不会取消底层同步数据库调用，最终上界取决于驱动/连接池 timeout。
-- SQLite→PostgreSQL importer 会复制完整敏感评测内容且只支持空目标的单向导入；退出码 3/4 禁止盲目重试，工具不提供 PostgreSQL→SQLite 自动回迁。
-- OpenAI-compatible `base_url` 只做基本 URL 校验，仍有 SSRF、DNS 重绑定与题目外发风险；MVP 不得直接暴露公网。
-- 没有认证、授权、TLS、限流、预算上限或生产级秘密管理；Compose 仅用于本地验证。
-- 只提供 15 道原创 Demo 与三个确定性 Evaluator；没有正式公共 Benchmark、代码沙箱、Judge、Arena 或 Agent 能力。
-- 当前本地 `uv` 环境选择 Python 3.14，测试出现 `pytest-asyncio` 与 FastAPI TestClient 的上游弃用警告，但无失败；CI 固定 Python 3.12。
-- 前端 production build 成功，但 Recharts 主包触发大于 500 kB 的 Vite chunk 警告；不影响 MVP 功能，后续可按页面懒加载。
+- SQLite 只用于个人本地单 Worker；多 Worker 证据必须来自 PostgreSQL。Compose 是本地开发/验收拓扑，不是生产 HA。
+- Provider 调用不是 exactly-once。Worker 在 Provider response 后本地 commit 前崩溃可能重复上游计算或费用；本地 ledger/Response 幂等只能保证数据库事实不 double-count。
+- fixed UTC minute window 允许边界 burst，不等同平滑 token bucket。Mock capacity 不能推断真实 Provider、生产 SLA 或无限横向扩展。
+- trusted-local CLI 按 [ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md) 继续 `legacy_unmanaged`，没有全局 RPM/TPM/USD 硬保证；操作者必须停止常规 API/Worker 并独占数据库。
+- audit 是应用 append-only、event-key 幂等且 read 时校验 schema/hash，但数据库管理员仍可修改，不能宣称 WORM。
+- Provider metadata 不安全时归一化为 `null`；credential audit 不保存 origin。Key、Authorization、ciphertext、nonce、keyring、Provider URL、题目/prompt/response正文均不得进入 audit。
+- Worker probe 只检查数据库/head/Redis 能力，不证明主循环仍在 scan/claim/heartbeat/progress；这是正式 Phase 2 closure 缺口。
+- importer 会复制完整敏感评测内容和 credential ciphertext；只支持停写源→空目标单向导入。keyring 不随数据库复制，exit 3/4 禁止盲目重试。
+- 远程 Provider 只允许 HTTPS（HTTP 仅 loopback），但仍无 destination allowlist、DNS rebinding 防护、出站隔离、认证、TLS 终止、生产 KMS 或多租户安全；不得直接暴露公网。
+- 当前 Python 3.14 本地测试仍可能显示上游弃用 warning；CI 固定 Python 3.12。Vite build 仍有既有 Recharts 大 chunk warning。
 
 ## 测试状态
 
-| 验证 | 结果 | 证据 |
+| 验证 | 实际结果 | 当前结论 |
 | --- | --- | --- |
-| 后端非集成测试 | 通过 | `205 passed, 5 deselected, 0 failed` |
-| 真实基础设施集成 | 通过 | `5 passed, 205 deselected, 0 failed`；PostgreSQL 并发/取消、Redis PEL/ACK/重复投递、SQLite→PostgreSQL 导入 |
-| 前端组件/格式测试 | 通过 | `4 files, 13 passed, 0 failed` |
-| 离线 Smoke | 通过 | `1 passed, 0 failed`；临时 SQLite + 独立 WorkerService + Mock |
-| 后端 Ruff lint/format | 通过 | `ruff check` 与 `ruff format --check` |
-| 前端 ESLint/typecheck | 通过 | `npm run lint` 与 `npm run typecheck` |
-| 前端 production build | 通过 | Vite build 完成，存在非阻断 chunk-size 警告 |
-| Alembic / 数据导入 | 通过 | SQLite/真实 PostgreSQL upgrade/check/downgrade/upgrade；真实 PostgreSQL 16 导入成功、提交前回滚、双源竞争、COMMIT 结果未知和提交后验证失败路径通过 |
-| Compose 故障验收 | 通过 | 默认 build 的隔离六服务拓扑完成 `8/8`：健康/协议基线、API restart、租约 owner `SIGKILL`/自然接管、Redis stop/start、两类取消/重复投递、PG migration 往返；清理后无项目容器/卷/网络残留 |
-| 配置静态检查 | 通过 | Compose、YAML、Shell、Action workflow 与 diff 检查 |
+| 治理候选远程 CI | `665244e…` run `33099260233` 4/4 | 精确实现 SHA 全绿；PR #1 仍 open，未合并 |
+| 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
+| 最新本地 `make test` | 后端 `604 passed, 29 skipped`；前端 `38 passed` | 文档收尾前重跑通过 |
+| 最新真实 PostgreSQL/Redis integration | `29/29 passed` | 本地通过；同一实现 SHA 的远程 integration 亦成功 |
+| 最新本地 `make smoke` | `1 passed, 7 deselected`，仅 Mock | 本地冻结树通过；没有调用真实 Provider |
+| 定向治理/API/Worker | 目标套件零失败；早期独立审计 `218 passed`；完整性边界集合 `18 passed` | 已被最终全量、真实 integration 与精确候选 evidence 补充 |
+| SQLite/PostgreSQL migration | 隔离 SQLite 与真实 PostgreSQL prepare/upgrade/downgrade guard/upgrade/check 通过 | 候选与远程 integration 覆盖 |
+| 增强 capacity | 精确 `665244e…`，evidence SHA-256 `40deadeb…0588` | passed；Mock-only，cleanup 容器/卷/网络为空，不是生产 SLA |
+| 完整 acceptance | 精确 `665244e…`，9/9，evidence SHA-256 `ab311665…ddec` | passed；含三条 deterministic DB seam，cleanup 为空 |
+| 真实 Provider | 未运行（有意） | 所有自动化只使用 Mock/Stub/MockTransport |
 
-所有模型相关自动化路径均使用 Mock、MockTransport 或 stub fetch；基础设施用例只连接隔离的 PostgreSQL/Redis，没有调用真实 Provider，也不要求 Provider API Key。详细命令和结果见工作日志与 [TESTING.md](TESTING.md)。
+详细命令与限制见 [当前工作日志](worklogs/2026-08-27-phase-2-governance-audit-performance.md) 和 [TESTING.md](TESTING.md)。
 
 ## 最近工作日志
 
-[2026-08-25-github-publication-and-ci-policy.md](worklogs/2026-08-25-github-publication-and-ci-policy.md)（公开组织仓库、首次远程 CI 与阶段 commit/push/CI 门禁）
-
-[2026-08-25-phase-2-reliable-execution-foundation.md](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)（可靠执行基础实现、真实故障验证与剩余阶段边界）
+- [Phase 2 可靠执行基础](worklogs/2026-08-25-phase-2-reliable-execution-foundation.md)
+- [完整客观评测流程](worklogs/2026-08-27-complete-evaluation-workflow.md)
+- [Web Provider 凭据](worklogs/2026-08-27-web-provider-credentials.md)
+- [Web Run UX 与生成预算](worklogs/2026-08-27-web-run-ux-and-generation-budgets.md)
+- [OpenAI-compatible SSE](worklogs/2026-08-27-openai-compatible-sse-streaming.md)
+- [Phase 2 治理、审计与性能](worklogs/2026-08-27-phase-2-governance-audit-performance.md)
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 作为后续任务的唯一入口；在 Phase 2 保持 `in_progress` 的前提下，下一切片应优先收敛 P2-05，并为 P2-06/P2-07 的剩余验收留下可复核证据。
+[NEXT_TASK.md](NEXT_TASK.md) 是当前合同：治理/审计候选的真实 PostgreSQL integration、enhanced capacity/acceptance、三条 crash seam、实现 commit/push 与精确 SHA CI 已完成；下一步继续正式 SLO/容量模型、Exporter/告警、retention archive、backup/restore 与 Worker progress/liveness。Phase 2 在这些阶段级验收完成前保持 `in_progress`。

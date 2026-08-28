@@ -26,15 +26,27 @@ from sqlalchemy.schema import Table
 
 from app import models as _models  # noqa: F401 -- registers all mapped tables
 from app.db.base import Base
-from app.db.prepare_migrations import database_heads, expected_database_heads
+from app.db.prepare_migrations import (
+    SchemaPreparationError,
+    database_heads,
+    expected_database_heads,
+    validate_sqlite_schema_fingerprint,
+)
 from app.db.session import create_database_engine
 
 CORE_TABLE_NAMES = (
+    "governance_policies",
     "models",
+    "model_credentials",
     "benchmarks",
     "questions",
+    "governance_scopes",
     "evaluation_runs",
     "evaluation_responses",
+    "governance_minute_buckets",
+    "question_executions",
+    "provider_call_reservations",
+    "audit_events",
 )
 DEFAULT_TARGET_ENV = "LLMBENCHLAB_DATABASE_URL"
 
@@ -75,6 +87,65 @@ class ImportReport:
     source: Mapping[str, TableSummary]
     precommit_target: Mapping[str, TableSummary]
     postcommit_target: Mapping[str, TableSummary]
+
+
+@dataclass
+class _ScopeLedgerCounters:
+    active_reservations: int = 0
+    reserved_requests: int = 0
+    reserved_input_tokens: int = 0
+    reserved_output_tokens: int = 0
+    reserved_cost_usd: Decimal = Decimal(0)
+    consumed_requests: int = 0
+    consumed_input_tokens: int = 0
+    consumed_output_tokens: int = 0
+    consumed_cost_usd: Decimal = Decimal(0)
+    overdrawn: bool = False
+
+    def values(self) -> tuple[int | Decimal | bool, ...]:
+        return (
+            self.active_reservations,
+            self.reserved_requests,
+            self.reserved_input_tokens,
+            self.reserved_output_tokens,
+            self.reserved_cost_usd,
+            self.consumed_requests,
+            self.consumed_input_tokens,
+            self.consumed_output_tokens,
+            self.consumed_cost_usd,
+            self.overdrawn,
+        )
+
+
+@dataclass
+class _BucketLedgerCounters:
+    reserved_requests: int = 0
+    reserved_input_tokens: int = 0
+    reserved_output_tokens: int = 0
+    consumed_requests: int = 0
+    consumed_input_tokens: int = 0
+    consumed_output_tokens: int = 0
+
+    def values(self) -> tuple[int, ...]:
+        return (
+            self.reserved_requests,
+            self.reserved_input_tokens,
+            self.reserved_output_tokens,
+            self.consumed_requests,
+            self.consumed_input_tokens,
+            self.consumed_output_tokens,
+        )
+
+
+_ACTIVE_RESERVATION_STATES = frozenset({"reserved", "send_started"})
+_SETTLED_RESERVATION_STATES = frozenset({"settled_actual", "settled_conservative"})
+_CONSUMED_REQUEST_STATES = frozenset({"send_started", "settled_actual", "settled_conservative"})
+_SCOPE_REFERENCE_TYPES = (
+    ("global_scope_id", "global"),
+    ("provider_scope_id", "provider"),
+    ("model_scope_id", "model"),
+    ("run_scope_id", "run"),
+)
 
 
 def _canonical_value(value: Any) -> Any:
@@ -208,6 +279,187 @@ def _require_database_head(connection: Connection, *, role: str) -> None:
     )
 
 
+def _enum_text(value: Any) -> str:
+    return str(value.value) if isinstance(value, Enum) else str(value)
+
+
+def _ledger_money(value: Any) -> Decimal:
+    return Decimal(0) if value is None else Decimal(str(value))
+
+
+def _ledger_timestamp(value: Any) -> datetime:
+    if not isinstance(value, datetime):
+        raise SQLiteImportError(
+            "Source SQLite governance minute-bucket materialized counter drift; "
+            "rebuild minute counters from the Provider reservation ledger before importing"
+        )
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _reservation_is_overdrawn(reservation: Mapping[str, Any], state: str) -> bool:
+    if state not in _SETTLED_RESERVATION_STATES:
+        return False
+    for reserved_name, actual_name in (
+        ("reserved_input_tokens", "actual_input_tokens"),
+        ("reserved_output_tokens", "actual_output_tokens"),
+        ("reserved_cost_usd", "actual_cost_usd"),
+    ):
+        reserved = reservation[reserved_name]
+        actual = reservation[actual_name]
+        if (
+            reserved is not None
+            and actual is not None
+            and _ledger_money(actual) > _ledger_money(reserved)
+        ):
+            return True
+    return False
+
+
+def _accumulate_scope_ledger(
+    counters: _ScopeLedgerCounters,
+    reservation: Mapping[str, Any],
+    *,
+    state: str,
+) -> None:
+    if state in _ACTIVE_RESERVATION_STATES:
+        counters.active_reservations += 1
+        counters.reserved_input_tokens += int(reservation["reserved_input_tokens"] or 0)
+        counters.reserved_output_tokens += int(reservation["reserved_output_tokens"] or 0)
+        counters.reserved_cost_usd += _ledger_money(reservation["reserved_cost_usd"])
+    if state == "reserved":
+        counters.reserved_requests += 1
+    if state in _CONSUMED_REQUEST_STATES:
+        counters.consumed_requests += 1
+    if state in _SETTLED_RESERVATION_STATES:
+        counters.consumed_input_tokens += int(reservation["actual_input_tokens"] or 0)
+        counters.consumed_output_tokens += int(reservation["actual_output_tokens"] or 0)
+        counters.consumed_cost_usd += _ledger_money(reservation["actual_cost_usd"])
+        counters.overdrawn = counters.overdrawn or _reservation_is_overdrawn(
+            reservation,
+            state,
+        )
+
+
+def _accumulate_bucket_ledger(
+    counters: _BucketLedgerCounters,
+    reservation: Mapping[str, Any],
+    *,
+    state: str,
+) -> None:
+    if state in _ACTIVE_RESERVATION_STATES:
+        counters.reserved_input_tokens += int(reservation["reserved_input_tokens"] or 0)
+        counters.reserved_output_tokens += int(reservation["reserved_output_tokens"] or 0)
+    if state == "reserved":
+        counters.reserved_requests += 1
+    if state in _CONSUMED_REQUEST_STATES:
+        counters.consumed_requests += 1
+    if state in _SETTLED_RESERVATION_STATES:
+        counters.consumed_input_tokens += int(reservation["actual_input_tokens"] or 0)
+        counters.consumed_output_tokens += int(reservation["actual_output_tokens"] or 0)
+
+
+def _validate_governance_materializations(connection: Connection) -> None:
+    """Rebuild every scope and minute counter from the immutable source ledger."""
+
+    scopes = Base.metadata.tables["governance_scopes"]
+    buckets = Base.metadata.tables["governance_minute_buckets"]
+    reservations = Base.metadata.tables["provider_call_reservations"]
+    scope_rows = tuple(connection.execute(sa.select(scopes).order_by(scopes.c.id)).mappings())
+    bucket_rows = tuple(connection.execute(sa.select(buckets).order_by(buckets.c.id)).mappings())
+    reservation_rows = tuple(
+        connection.execute(sa.select(reservations).order_by(reservations.c.id)).mappings()
+    )
+
+    scopes_by_id = {str(row["id"]): row for row in scope_rows}
+    expected_scopes = {scope_id: _ScopeLedgerCounters() for scope_id in scopes_by_id}
+    buckets_by_key = {
+        (
+            str(row["scope_id"]),
+            str(row["policy_id"]),
+            _ledger_timestamp(row["window_start"]),
+        ): row
+        for row in bucket_rows
+    }
+    expected_buckets = {key: _BucketLedgerCounters() for key in buckets_by_key}
+    missing_bucket = False
+
+    for reservation in reservation_rows:
+        state = _enum_text(reservation["state"])
+        for reference_name, expected_scope_type in _SCOPE_REFERENCE_TYPES:
+            raw_scope_id = reservation[reference_name]
+            if raw_scope_id is None and reference_name == "run_scope_id":
+                continue
+            scope_id = str(raw_scope_id)
+            scope = scopes_by_id.get(scope_id)
+            if scope is None or _enum_text(scope["scope_type"]) != expected_scope_type:
+                raise SQLiteImportError(
+                    "Source SQLite governance scope materialized counter drift; "
+                    "rebuild all scope counters from the Provider reservation ledger "
+                    "before importing"
+                )
+            _accumulate_scope_ledger(
+                expected_scopes[scope_id],
+                reservation,
+                state=state,
+            )
+            bucket_key = (
+                scope_id,
+                str(reservation["policy_id"]),
+                _ledger_timestamp(reservation["window_start"]),
+            )
+            bucket_counters = expected_buckets.get(bucket_key)
+            if bucket_counters is None:
+                missing_bucket = True
+            else:
+                _accumulate_bucket_ledger(
+                    bucket_counters,
+                    reservation,
+                    state=state,
+                )
+
+    for scope_id, scope in scopes_by_id.items():
+        materialized = (
+            int(scope["active_reservations"]),
+            int(scope["reserved_requests"]),
+            int(scope["reserved_input_tokens"]),
+            int(scope["reserved_output_tokens"]),
+            _ledger_money(scope["reserved_cost_usd"]),
+            int(scope["consumed_requests"]),
+            int(scope["consumed_input_tokens"]),
+            int(scope["consumed_output_tokens"]),
+            _ledger_money(scope["consumed_cost_usd"]),
+            bool(scope["overdrawn"]),
+        )
+        if materialized != expected_scopes[scope_id].values():
+            raise SQLiteImportError(
+                "Source SQLite governance scope materialized counter drift; "
+                "rebuild all scope counters from the Provider reservation ledger "
+                "before importing"
+            )
+
+    if missing_bucket:
+        raise SQLiteImportError(
+            "Source SQLite governance minute-bucket materialized counter drift; "
+            "rebuild minute counters from the Provider reservation ledger before importing"
+        )
+    for key, bucket in buckets_by_key.items():
+        materialized = (
+            int(bucket["reserved_requests"]),
+            int(bucket["reserved_input_tokens"]),
+            int(bucket["reserved_output_tokens"]),
+            int(bucket["consumed_requests"]),
+            int(bucket["consumed_input_tokens"]),
+            int(bucket["consumed_output_tokens"]),
+        )
+        if materialized != expected_buckets[key].values():
+            raise SQLiteImportError(
+                "Source SQLite governance minute-bucket materialized counter drift; "
+                "rebuild minute counters from the Provider reservation ledger before importing"
+            )
+
+
 def preflight_sqlite_source(connection: Connection) -> None:
     """Validate a read-only, stopped SQLite source before reading application data."""
 
@@ -230,6 +482,28 @@ def preflight_sqlite_source(connection: Connection) -> None:
         )
 
     _require_database_head(connection, role="Source SQLite")
+    policies = Base.metadata.tables["governance_policies"]
+    policy_count = connection.scalar(sa.select(sa.func.count()).select_from(policies))
+    active_policy_count = connection.scalar(
+        sa.select(sa.func.count()).select_from(policies).where(policies.c.is_active.is_(True))
+    )
+    if policy_count and active_policy_count != 1:
+        raise SQLiteImportError(
+            "Source SQLite policy history must contain exactly one active governance policy; "
+            "repair the policy history before importing"
+        )
+    expected_heads = expected_database_heads()
+    if len(expected_heads) != 1:
+        raise SQLiteImportError("Source SQLite import requires a single supported schema head")
+    try:
+        validate_sqlite_schema_fingerprint(
+            connection,
+            schema_revision=expected_heads[0],
+        )
+    except SchemaPreparationError:
+        raise SQLiteImportError(
+            "Source SQLite schema fingerprint does not match the supported Alembic head"
+        ) from None
     active_runs = connection.execute(
         sa.select(sa.func.count())
         .select_from(Base.metadata.tables["evaluation_runs"])
@@ -240,6 +514,20 @@ def preflight_sqlite_source(connection: Connection) -> None:
             "Source SQLite contains pending or running evaluation runs; stop creation and "
             "drain, cancel, or fail active runs before importing"
         )
+
+    reservations = Base.metadata.tables["provider_call_reservations"]
+    active_reservations = connection.scalar(
+        sa.select(sa.func.count())
+        .select_from(reservations)
+        .where(reservations.c.state.in_(("reserved", "send_started")))
+    )
+    if active_reservations:
+        raise SQLiteImportError(
+            "Source SQLite contains active Provider call reservations; reconcile every "
+            "reserved or send_started ledger row before importing"
+        )
+
+    _validate_governance_materializations(connection)
 
 
 def _require_empty_target(connection: Connection) -> None:

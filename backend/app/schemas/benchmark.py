@@ -6,6 +6,7 @@ from typing import Any
 from pydantic import Field
 
 from app.schemas.base import APIModel, ORMModel
+from app.services.dataset_loader import MAX_QUESTIONS
 
 
 class BenchmarkCreate(APIModel):
@@ -22,7 +23,7 @@ class BenchmarkCreate(APIModel):
     prompt_template: dict[str, Any] = Field(default_factory=dict)
     schema_version: str = Field(default="llmbenchlab-dataset-v1", max_length=64)
     dataset_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    question_count: int = Field(ge=1, le=10_000)
+    question_count: int = Field(ge=1, le=MAX_QUESTIONS)
     is_demo: bool = False
 
 

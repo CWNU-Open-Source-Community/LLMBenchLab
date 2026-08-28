@@ -6,7 +6,7 @@
 
 ## Status
 
-Accepted
+Superseded for Web/REST by [ADR-0007](ADR-0007-web-provider-credentials.md). The environment-variable path remains accepted for CLI and existing deployments.
 
 ## Context
 

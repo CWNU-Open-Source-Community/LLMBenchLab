@@ -1,5 +1,7 @@
 export type ProviderType = "mock" | "openai_compatible";
+export type CredentialSource = "none" | "environment" | "stored";
 export type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+export type GovernanceRunStatus = "legacy_unmanaged" | "managed" | "delayed" | "exhausted";
 export type QuestionType = "exact_match" | "multiple_choice" | "numeric";
 
 export interface ListResponse<T> {
@@ -15,6 +17,9 @@ export interface ModelConfig {
   provider_type: ProviderType;
   base_url: string | null;
   remote_model_name: string | null;
+  credential_source: CredentialSource;
+  has_api_key: boolean;
+  /** @deprecated Legacy environment-variable reference; never render it as a secret input. */
   api_key_env: string | null;
   enabled: boolean;
   input_price_per_million: number | null;
@@ -24,7 +29,18 @@ export interface ModelConfig {
   updated_at: string;
 }
 
-export type ModelPayload = Omit<ModelConfig, "id" | "created_at" | "updated_at">;
+export interface ModelPayload {
+  name: string;
+  provider_type: ProviderType;
+  base_url: string | null;
+  remote_model_name: string | null;
+  /** Write-only. Model reads expose only `has_api_key`. */
+  api_key?: string;
+  enabled: boolean;
+  input_price_per_million: number | null;
+  output_price_per_million: number | null;
+  default_parameters: Record<string, unknown>;
+}
 
 export interface Benchmark {
   id: string;
@@ -68,6 +84,27 @@ export interface EvaluationRun {
   output_tokens: number | null;
   estimated_cost: number | null;
   cancellation_requested: boolean;
+  attempt_count: number;
+  max_attempts: number;
+  failed_attempt_count: number;
+  dispatch_count: number;
+  last_scheduled_at: string | null;
+  governance_policy_id: string | null;
+  governance_status: GovernanceRunStatus;
+  governance_reason: string | null;
+  governance_not_before: string | null;
+  input_token_reservation: number | null;
+  lifetime_request_budget: number | null;
+  lifetime_token_budget: number | null;
+  lifetime_cost_budget_usd: string | null;
+  lease_owner: string | null;
+  lease_token: number;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  next_attempt_at: string | null;
+  last_enqueued_at: string | null;
+  last_error: string | null;
+  dead_lettered_at: string | null;
   started_at: string | null;
   finished_at: string | null;
   created_at: string;
@@ -79,10 +116,15 @@ export interface RunPayload {
   benchmark_id: string;
   temperature: number;
   top_p: number;
-  max_tokens: number;
+  max_tokens: number | null;
   seed: number | null;
   system_prompt?: string | null;
   concurrency: number;
+  input_token_reservation?: number | null;
+  lifetime_request_budget?: number | null;
+  lifetime_token_budget?: number | null;
+  lifetime_cost_budget_usd?: number | string | null;
+  read_timeout_seconds: number;
 }
 
 export interface EvaluationResponse {

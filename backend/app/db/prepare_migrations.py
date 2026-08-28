@@ -28,6 +28,106 @@ BACKEND_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_CONFIG_PATH = BACKEND_ROOT / "alembic.ini"
 LEGACY_REVISION = "20260824_0000"
 PHASE_1_REVISION = "20260824_0001"
+RELIABILITY_REVISION = "20260825_0002"
+CREDENTIAL_REVISION = "20260827_0003"
+
+_WEB_CREDENTIAL_DIFFERENCES = {
+    "add_table:model_credentials",
+    "add_column:models.credential_source",
+    "add_constraint:models.ck_models_credential_source_values",
+}
+
+_GOVERNANCE_TABLES = {
+    "governance_policies",
+    "governance_scopes",
+    "governance_minute_buckets",
+    "question_executions",
+    "provider_call_reservations",
+    "audit_events",
+}
+_GOVERNANCE_COLUMNS = {
+    "add_column:evaluation_responses.finish_reason",
+    "add_column:evaluation_responses.http_attempt_count",
+    "add_column:evaluation_responses.provider_request_id",
+    "add_column:evaluation_responses.returned_model",
+    "add_column:evaluation_responses.system_fingerprint",
+    "add_column:evaluation_runs.dispatch_count",
+    "add_column:evaluation_runs.failed_attempt_count",
+    "add_column:evaluation_runs.governance_not_before",
+    "add_column:evaluation_runs.governance_policy_id",
+    "add_column:evaluation_runs.governance_reason",
+    "add_column:evaluation_runs.governance_status",
+    "add_column:evaluation_runs.input_token_reservation",
+    "add_column:evaluation_runs.last_scheduled_at",
+    "add_column:evaluation_runs.lifetime_cost_budget_usd",
+    "add_column:evaluation_runs.lifetime_request_budget",
+    "add_column:evaluation_runs.lifetime_token_budget",
+}
+_GOVERNANCE_NEW_CONSTRAINTS = {
+    "add_constraint:evaluation_responses.ck_evaluation_responses_http_attempt_count_positive",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_dispatch_count_nonnegative",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_failed_attempt_count_nonnegative",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_failed_attempt_count_within_limit",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_governance_delay_matches_pending",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_governance_exhausted_is_failed",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_governance_policy_matches_status",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_governance_status_values",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_input_token_reservation_nonnegative",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_lifetime_cost_budget_nonnegative",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_lifetime_request_budget_nonnegative",
+    "add_constraint:evaluation_runs.ck_evaluation_runs_lifetime_token_budget_nonnegative",
+}
+_GOVERNANCE_EXISTING_INDEXES = {
+    "add_index:evaluation_runs.ix_evaluation_runs_finished_at_id",
+    "add_index:evaluation_runs.ix_evaluation_runs_governance_dispatch",
+    "add_index:evaluation_runs.ix_evaluation_runs_governance_policy_id",
+    "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
+}
+_GOVERNANCE_INDEXES = _GOVERNANCE_EXISTING_INDEXES | {
+    "add_index:audit_events.ix_audit_events_expiry",
+    "add_index:audit_events.ix_audit_events_run_occurred",
+    "add_index:audit_events.ix_audit_events_type_occurred",
+    "add_index:governance_minute_buckets.ix_governance_minute_buckets_window",
+    "add_index:governance_policies.ix_governance_policies_created",
+    "add_index:governance_policies.uq_governance_policies_single_active",
+    "add_index:governance_scopes.ix_governance_scopes_overdrawn",
+    "add_index:governance_scopes.ix_governance_scopes_type_key",
+    "add_index:provider_call_reservations.ix_provider_call_reservations_model_id",
+    "add_index:provider_call_reservations.ix_provider_call_reservations_provider_scope",
+    "add_index:provider_call_reservations.ix_provider_call_reservations_question_id",
+    "add_index:provider_call_reservations.ix_provider_call_reservations_run_created",
+    "add_index:provider_call_reservations.ix_provider_call_reservations_run_id",
+    "add_index:provider_call_reservations.ix_provider_call_reservations_state_lease",
+    "add_index:question_executions.ix_question_executions_question_id",
+    "add_index:question_executions.ix_question_executions_retry_due",
+    "add_index:question_executions.ix_question_executions_run_id",
+}
+_GOVERNANCE_DIFFERENCE_SET = (
+    _GOVERNANCE_COLUMNS
+    | _GOVERNANCE_NEW_CONSTRAINTS
+    | _GOVERNANCE_INDEXES
+    | {f"add_table:{table_name}" for table_name in _GOVERNANCE_TABLES}
+    | {
+        "add_fk:evaluation_runs.fk_evaluation_runs_governance_policy_id_governance_policies",
+        "remove_constraint:evaluation_runs.ck_evaluation_runs_attempt_within_limit",
+    }
+)
+_GOVERNANCE_DIFFERENCES = tuple(sorted(_GOVERNANCE_DIFFERENCE_SET))
+_GOVERNANCE_CHECK_NAMES_BY_TABLE = {
+    table_name: {
+        fingerprint.rsplit(".", 1)[1]
+        for fingerprint in _GOVERNANCE_NEW_CONSTRAINTS
+        if fingerprint.startswith(f"add_constraint:{table_name}.")
+    }
+    for table_name in ("evaluation_runs", "evaluation_responses")
+}
+_GOVERNANCE_EXISTING_INDEX_NAMES = {
+    fingerprint.rsplit(".", 1)[1] for fingerprint in _GOVERNANCE_EXISTING_INDEXES
+}
+_SUPERSEDED_ATTEMPT_CHECK_DIFFERENCES = {
+    "add_constraint:evaluation_runs.ck_evaluation_runs_attempt_within_limit",
+    "remove_constraint:evaluation_runs.ck_evaluation_runs_attempt_within_limit",
+}
 
 _RELIABILITY_COLUMNS = {
     "add_column:evaluation_runs.attempt_count",
@@ -59,8 +159,21 @@ _RELIABILITY_CHECK_NAMES = {
 }
 _RELIABILITY_INDEX_NAMES = {fingerprint.rsplit(".", 1)[1] for fingerprint in _RELIABILITY_INDEXES}
 _PHASE_1_DIFFERENCES = tuple(
-    sorted(_RELIABILITY_COLUMNS | _RELIABILITY_CONSTRAINTS | _RELIABILITY_INDEXES)
+    sorted(
+        (
+            _WEB_CREDENTIAL_DIFFERENCES
+            | _RELIABILITY_COLUMNS
+            | _RELIABILITY_CONSTRAINTS
+            | _RELIABILITY_INDEXES
+            | _GOVERNANCE_DIFFERENCE_SET
+        )
+        - _SUPERSEDED_ATTEMPT_CHECK_DIFFERENCES
+    )
 )
+
+_RELIABILITY_DIFFERENCES = tuple(sorted(_WEB_CREDENTIAL_DIFFERENCES | _GOVERNANCE_DIFFERENCE_SET))
+
+_CREDENTIAL_DIFFERENCES = _GOVERNANCE_DIFFERENCES
 
 _LEGACY_DIFFERENCES = tuple(
     sorted(
@@ -169,9 +282,15 @@ def _difference_fingerprint(difference: tuple[Any, ...]) -> str:
     if operation == "add_constraint":
         constraint = difference[1]
         return f"add_constraint:{constraint.table.name}.{constraint.name}"
+    if operation in {"add_fk", "remove_constraint"}:
+        constraint = difference[1]
+        return f"{operation}:{constraint.table.name}.{constraint.name}"
     if operation == "add_index":
         index = difference[1]
         return f"add_index:{index.table.name}.{index.name}"
+    if operation == "add_table":
+        table = difference[1]
+        return f"add_table:{table.name}"
     return f"unsupported:{operation}"
 
 
@@ -194,6 +313,11 @@ def _schema_differences(connection: Connection) -> tuple[str, ...]:
 
 def _normalized_check_sql(sqltext: Any) -> str:
     return " ".join(str(sqltext).split())
+
+
+def _sqlite_index_where(index: sa.Index) -> str:
+    where = index.dialect_options["sqlite"].get("where")
+    return _normalized_check_sql(where) if where is not None else ""
 
 
 def _sqlite_sql_tokens(sql: str) -> tuple[str, ...]:
@@ -234,10 +358,21 @@ def _sqlite_sql_tokens(sql: str) -> tuple[str, ...]:
     return tuple(tokens)
 
 
-def _validate_sqlite_ddl_modifiers(connection: Connection) -> None:
+def _validate_sqlite_ddl_modifiers(
+    connection: Connection,
+    *,
+    schema_revision: str,
+) -> None:
     """Reject SQLite syntax whose semantics are omitted by reflection/autogenerate."""
 
-    domain_tables = set(Base.metadata.tables)
+    expected_tables = _schema_tables_for_revision(schema_revision)
+    domain_tables = set(expected_tables)
+    supported_partial_indexes = {
+        (table.name, str(index.name))
+        for table in expected_tables.values()
+        for index in table.indexes
+        if index.dialect_options["sqlite"].get("where") is not None
+    }
     schema_objects = connection.exec_driver_sql(
         "SELECT type, name, tbl_name, sql FROM sqlite_master "
         "WHERE type IN ('table', 'index') AND sql IS NOT NULL"
@@ -261,7 +396,11 @@ def _validate_sqlite_ddl_modifiers(connection: Connection) -> None:
             {("ON", "CONFLICT"), ("ON", "UPDATE")} & token_pairs
         )
         if schema_object["type"] == "index":
-            has_unsupported_modifier = has_unsupported_modifier or "WHERE" in tokens
+            has_unsupported_modifier = has_unsupported_modifier or (
+                "WHERE" in tokens
+                and (schema_object["tbl_name"], schema_object["name"])
+                not in supported_partial_indexes
+            )
         if has_unsupported_modifier:
             raise SchemaPreparationError(
                 "SQLite DDL modifiers on "
@@ -271,13 +410,29 @@ def _validate_sqlite_ddl_modifiers(connection: Connection) -> None:
             )
 
 
-def _validate_sqlite_table_options(connection: Connection) -> None:
+def _schema_tables_for_revision(schema_revision: str) -> dict[str, sa.Table]:
+    tables = dict(Base.metadata.tables)
+    if schema_revision in {LEGACY_REVISION, PHASE_1_REVISION, RELIABILITY_REVISION}:
+        tables.pop("model_credentials", None)
+    if schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+        CREDENTIAL_REVISION,
+    }:
+        for table_name in _GOVERNANCE_TABLES:
+            tables.pop(table_name, None)
+    return tables
+
+
+def _validate_sqlite_table_options(connection: Connection, *, schema_revision: str) -> None:
+    expected_tables = _schema_tables_for_revision(schema_revision)
     table_options = {
         row["name"]: row
         for row in connection.exec_driver_sql("PRAGMA table_list").mappings()
-        if row["schema"] == "main" and row["name"] in Base.metadata.tables
+        if row["schema"] == "main" and row["name"] in expected_tables
     }
-    for table_name in Base.metadata.tables:
+    for table_name in expected_tables:
         options = table_options.get(table_name)
         columns = connection.exec_driver_sql(f'PRAGMA table_xinfo("{table_name}")').mappings()
         has_hidden_columns = any(bool(column.get("hidden", 0)) for column in columns)
@@ -299,7 +454,13 @@ def _validate_relational_structure(connection: Connection, *, schema_revision: s
     inspector = sa.inspect(connection)
     legacy = schema_revision == LEGACY_REVISION
     pre_reliability = schema_revision in {LEGACY_REVISION, PHASE_1_REVISION}
-    for table_name, table in Base.metadata.tables.items():
+    pre_governance = schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+        CREDENTIAL_REVISION,
+    }
+    for table_name, table in _schema_tables_for_revision(schema_revision).items():
         table_sql = connection.exec_driver_sql(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
             (table_name,),
@@ -311,10 +472,13 @@ def _validate_relational_structure(connection: Connection, *, schema_revision: s
         )
         if legacy and table_name == "questions":
             expected_unique_count -= 1
+        expected_foreign_key_count = len(table.foreign_key_constraints)
+        if pre_governance and table_name == "evaluation_runs":
+            expected_foreign_key_count -= 1
         expected_declaration_counts = (
             int(bool(table.primary_key.columns)),
             expected_unique_count,
-            len(table.foreign_key_constraints),
+            expected_foreign_key_count,
         )
         actual_declaration_counts = (
             sum(pair == ("PRIMARY", "KEY") for pair in pairwise(table_tokens)),
@@ -361,6 +525,12 @@ def _validate_relational_structure(connection: Connection, *, schema_revision: s
                     (constraint.ondelete or "").upper(),
                 )
                 for constraint in table.foreign_key_constraints
+                if not (
+                    pre_governance
+                    and table_name == "evaluation_runs"
+                    and str(constraint.name)
+                    == "fk_evaluation_runs_governance_policy_id_governance_policies"
+                )
             )
         )
         actual_foreign_keys = tuple(
@@ -381,13 +551,18 @@ def _validate_relational_structure(connection: Connection, *, schema_revision: s
                 str(index.name),
                 bool(index.unique),
                 tuple(column.name for column in index.columns),
-                "",
+                _sqlite_index_where(index),
             )
             for index in table.indexes
             if not (
                 pre_reliability
                 and table_name == "evaluation_runs"
                 and str(index.name) in _RELIABILITY_INDEX_NAMES
+            )
+            and not (
+                pre_governance
+                and table_name == "evaluation_runs"
+                and str(index.name) in _GOVERNANCE_EXISTING_INDEX_NAMES
             )
         }
         actual_indexes = {
@@ -417,7 +592,18 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
     inspector = sa.inspect(connection)
     legacy = schema_revision == LEGACY_REVISION
     pre_reliability = schema_revision in {LEGACY_REVISION, PHASE_1_REVISION}
-    for table_name, table in Base.metadata.tables.items():
+    pre_credentials = schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+    }
+    pre_governance = schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+        CREDENTIAL_REVISION,
+    }
+    for table_name, table in _schema_tables_for_revision(schema_revision).items():
         expected_entries = [
             (str(constraint.name), _normalized_check_sql(constraint.sqltext))
             for constraint in table.constraints
@@ -429,10 +615,49 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
                 for entry in expected_entries
                 if entry[0]
                 not in {
+                    "ck_models_credential_source_values",
                     "ck_models_mock_configuration_empty",
                     "ck_models_openai_configuration_required",
                 }
             ]
+        elif pre_credentials and table_name == "models":
+            expected_entries = [
+                entry
+                for entry in expected_entries
+                if entry[0]
+                not in {
+                    "ck_models_credential_source_values",
+                    "ck_models_mock_configuration_empty",
+                    "ck_models_openai_configuration_required",
+                }
+            ]
+            expected_entries.extend(
+                [
+                    (
+                        "ck_models_mock_configuration_empty",
+                        "provider_type != 'mock' OR (base_url IS NULL AND "
+                        "remote_model_name IS NULL AND api_key_env IS NULL)",
+                    ),
+                    (
+                        "ck_models_openai_configuration_required",
+                        "provider_type != 'openai_compatible' OR (base_url IS NOT NULL "
+                        "AND remote_model_name IS NOT NULL AND api_key_env IS NOT NULL)",
+                    ),
+                ]
+            )
+        if pre_governance and table_name in _GOVERNANCE_CHECK_NAMES_BY_TABLE:
+            expected_entries = [
+                entry
+                for entry in expected_entries
+                if entry[0] not in _GOVERNANCE_CHECK_NAMES_BY_TABLE[table_name]
+            ]
+            if table_name == "evaluation_runs":
+                expected_entries.append(
+                    (
+                        "ck_evaluation_runs_attempt_within_limit",
+                        "attempt_count <= max_attempts",
+                    )
+                )
         if pre_reliability and table_name == "evaluation_runs":
             expected_entries = [
                 entry for entry in expected_entries if entry[0] not in _RELIABILITY_CHECK_NAMES
@@ -457,8 +682,8 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
 
 
 def _validate_sqlite_database(connection: Connection, *, schema_revision: str) -> None:
-    _validate_sqlite_ddl_modifiers(connection)
-    _validate_sqlite_table_options(connection)
+    _validate_sqlite_ddl_modifiers(connection, schema_revision=schema_revision)
+    _validate_sqlite_table_options(connection, schema_revision=schema_revision)
     _validate_relational_structure(connection, schema_revision=schema_revision)
     _validate_check_constraints(connection, schema_revision=schema_revision)
     triggers = connection.exec_driver_sql(
@@ -497,6 +722,16 @@ def _validate_sqlite_database(connection: Connection, *, schema_revision: str) -
             "Legacy model rows do not satisfy the current provider configuration rules; "
             "no migration marker was written."
         )
+
+
+def validate_sqlite_schema_fingerprint(
+    connection: Connection,
+    *,
+    schema_revision: str,
+) -> None:
+    """Validate a read-only SQLite schema against one supported revision."""
+
+    _validate_sqlite_database(connection, schema_revision=schema_revision)
 
 
 def _sqlite_database_path(database_url: str) -> Path:
@@ -546,9 +781,15 @@ def prepare_database(
 
         expected_heads = expected_database_heads(config_path)
         head_revision = expected_heads[0]
-        pre_reliability_heads = {(LEGACY_REVISION,), (PHASE_1_REVISION,)}
+        historical_revisions = (
+            LEGACY_REVISION,
+            PHASE_1_REVISION,
+            RELIABILITY_REVISION,
+            CREDENTIAL_REVISION,
+        )
+        historical_heads = {(revision,) for revision in historical_revisions}
 
-        if current_heads and current_heads not in pre_reliability_heads:
+        if current_heads and current_heads not in historical_heads:
             if set(current_heads) == set(expected_heads):
                 if present_domain_tables != domain_tables:
                     missing = ", ".join(sorted(domain_tables - present_domain_tables))
@@ -568,34 +809,55 @@ def prepare_database(
             return PreparationResult(action="versioned")
         if not present_domain_tables:
             return PreparationResult(action="empty")
-        if present_domain_tables != domain_tables:
-            missing = ", ".join(sorted(domain_tables - present_domain_tables))
-            raise SchemaPreparationError(
-                "Database contains only part of the LLMBenchLab schema "
-                f"(missing: {missing}); no migration marker was written."
-            )
+        if current_heads in historical_heads:
+            expected_present_tables = set(_schema_tables_for_revision(current_heads[0]))
+            if present_domain_tables != expected_present_tables:
+                missing = ", ".join(sorted(expected_present_tables - present_domain_tables))
+                raise SchemaPreparationError(
+                    "Database contains only part of the LLMBenchLab schema "
+                    f"(missing: {missing}); no migration marker was written."
+                )
+        elif not current_heads:
+            supported_table_sets = {
+                frozenset(_schema_tables_for_revision(revision))
+                for revision in (*historical_revisions, head_revision)
+            }
+            if frozenset(present_domain_tables) not in supported_table_sets:
+                missing = ", ".join(sorted(domain_tables - present_domain_tables))
+                raise SchemaPreparationError(
+                    "Database contains only part of the LLMBenchLab schema "
+                    f"(missing: {missing}); no migration marker was written."
+                )
 
         target_revision: str | None
         source_revision: str
-        if current_heads in pre_reliability_heads:
+        if current_heads in historical_heads:
             if not sqlite_locked:
                 return PreparationResult(action="versioned")
             source_revision = current_heads[0]
-            expected_differences = (
-                _LEGACY_DIFFERENCES if source_revision == LEGACY_REVISION else _PHASE_1_DIFFERENCES
-            )
+            if source_revision == LEGACY_REVISION:
+                expected_differences = _LEGACY_DIFFERENCES
+            elif source_revision == PHASE_1_REVISION:
+                expected_differences = _PHASE_1_DIFFERENCES
+            elif source_revision == RELIABILITY_REVISION:
+                expected_differences = _RELIABILITY_DIFFERENCES
+            else:
+                expected_differences = _CREDENTIAL_DIFFERENCES
             differences = _schema_differences(connection)
             if differences != expected_differences:
                 rendered_differences = ", ".join(sorted(differences)) or "unknown"
                 raise SchemaPreparationError(
-                    "The versioned pre-reliability database does not match its expected schema; "
+                    "The versioned historical database does not match its expected schema; "
                     f"upgrade was not started. Differences: {rendered_differences}"
                 )
             _validate_sqlite_database(connection, schema_revision=source_revision)
             target_revision = None
-            action = (
-                "versioned_legacy" if source_revision == LEGACY_REVISION else "versioned_phase1"
-            )
+            action = {
+                LEGACY_REVISION: "versioned_legacy",
+                PHASE_1_REVISION: "versioned_phase1",
+                RELIABILITY_REVISION: "versioned_reliability",
+                CREDENTIAL_REVISION: "versioned_credentials",
+            }[source_revision]
         else:
             if not sqlite_locked:
                 raise SchemaPreparationError(
@@ -611,6 +873,14 @@ def prepare_database(
                 target_revision = PHASE_1_REVISION
                 action = "stamped_phase1"
                 source_revision = PHASE_1_REVISION
+            elif differences == _RELIABILITY_DIFFERENCES:
+                target_revision = RELIABILITY_REVISION
+                action = "stamped_reliability"
+                source_revision = RELIABILITY_REVISION
+            elif differences == _CREDENTIAL_DIFFERENCES:
+                target_revision = CREDENTIAL_REVISION
+                action = "stamped_credentials"
+                source_revision = CREDENTIAL_REVISION
             elif differences == _LEGACY_DIFFERENCES:
                 target_revision = LEGACY_REVISION
                 action = "stamped_legacy"
@@ -664,6 +934,16 @@ def main() -> int:
             "Adopted a verified Phase 1 SQLite schema at "
             f"{result.stamped_revision}; backup: {result.backup_path}"
         )
+    elif result.action == "stamped_reliability":
+        print(
+            "Adopted a verified reliability SQLite schema at "
+            f"{result.stamped_revision}; backup: {result.backup_path}"
+        )
+    elif result.action == "stamped_credentials":
+        print(
+            "Adopted a verified Web-credential SQLite schema at "
+            f"{result.stamped_revision}; backup: {result.backup_path}"
+        )
     elif result.action == "stamped_current":
         print(
             "Adopted a verified current SQLite schema at "
@@ -677,6 +957,16 @@ def main() -> int:
     elif result.action == "versioned_phase1":
         print(
             "Verified a versioned Phase 1 SQLite schema before upgrade; "
+            f"backup: {result.backup_path}"
+        )
+    elif result.action == "versioned_reliability":
+        print(
+            "Verified a versioned reliability SQLite schema before upgrade; "
+            f"backup: {result.backup_path}"
+        )
+    elif result.action == "versioned_credentials":
+        print(
+            "Verified a versioned Web-credential SQLite schema before upgrade; "
             f"backup: {result.backup_path}"
         )
     return 0

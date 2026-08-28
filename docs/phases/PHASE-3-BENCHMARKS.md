@@ -1,6 +1,6 @@
 # Phase 3：标准 Benchmark、代码评测与数据集插件
 
-- 状态：`planned`
+- 状态：`in_progress`（仅可信本地客观 Benchmark 提前切片）
 - 前置阶段：[Phase 2 — Reliability](PHASE-2-RELIABILITY.md)（须 `completed`）
 - 后续阶段：[Phase 4 — Judge & Arena](PHASE-4-JUDGE-ARENA.md)
 
@@ -29,6 +29,10 @@
 - 可用的容器/沙箱设施及数据集许可审查流程。
 - 对代码评测协议和 Dataset Plugin 接口的 ADR。
 
+用户在 2026-08-27 明确要求优先获得可真实模型运行的完整客观评测流程；
+[ADR-0006](../decisions/ADR-0006-local-real-provider-evaluation.md) 批准在 Phase 2 尚未完成时提前交付
+MMLU-Pro/GPQA 的可信本地切片。该决定不满足代码沙箱、全局预算或完整 Phase 3 的前置依赖。
+
 ## 任务拆分
 
 | ID | 任务 | 输出 |
@@ -40,6 +44,13 @@
 | P3-05 | 安全沙箱 | 隔离执行、资源限制、默认断网、清理 |
 | P3-06 | 指标与 UI | 分组聚合、子集筛选、可比性提示 |
 | P3-07 | 安全和复现验证 | 沙箱红队、稳定 Hash、端到端复现 |
+
+当前进度：P3-01 为本地转换器/协议边界的部分实现；P3-02 已接 MMLU-Pro 与 GPQA-Diamond、
+尚无 IFEval；P3-03 的固定下载、缓存、源 SHA 与可复现 ZIP 已完成首个切片。P3-06 现可在 Web
+选择标准 Benchmark、按数据集建议输出预算/读取超时、从主导航找回全部状态 Run，并以每页 100 条
+浏览逐题证据；CLI 仍提供分组报告，但 Web 尚无分组聚合/子集指标 UI。P3-04/P3-05/P3-07 的代码与
+沙箱范围未开始。该 UI 切片的完整本地门禁已通过，功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；
+分支无 PR且精确 SHA 未触发仅监听 PR/main 的 workflow，不能称为远程绿色。
 
 ## 验收标准
 
@@ -60,6 +71,7 @@
 | 训练数据污染 | 数据卡披露、版本/时间戳、后续私有与 Live Benchmark |
 | 沙箱逃逸 | 专用隔离边界、最小权限、断网、资源限制和安全测试 |
 | 大数据集占用存储/带宽 | 分片、缓存配额、校验后复用和显式清理 |
+| 长推理输出不足或 Provider 较慢 | 按 Benchmark 给出可调输出/读取超时建议，保留 `output_truncated` 证据；Provider 默认不是无限且仍需费用控制 |
 | 指标聚合掩盖子群差异 | 默认展示总体与分组结果及样本数 |
 
 ## 交付物
@@ -71,4 +83,7 @@
 
 ## 状态
 
-`planned`。数据集名称表示计划支持，不表示仓库已获得或可再分发其内容。
+`in_progress`。仓库不再只有计划：MMLU-Pro 与 GPQA-Diamond 的固定来源转换、可信本地运行和
+报告切片已经实现，但不会提交第三方题目；Web 已有标准数据选择、建议配置、Run 列表和分页证据的
+已 push 的当前切片。IFEval、通用 Plugin SDK、代码题/沙箱、分组/子集完整 UI 与红队验收仍缺失；
+本轮精确 SHA 没有 workflow run，且其余范围仍缺失，故本阶段不得标为 `completed`。

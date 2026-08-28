@@ -1,108 +1,126 @@
-# 下一任务：Phase 2 并发治理、审计与性能基线
+# 下一任务：Phase 2 正式 SLO、可观测性与恢复闭环
 
-> 建议开始时间：可靠任务执行基础提交并通过最终门禁后
+> 状态：`ready`；治理/审计候选门禁已通过，Phase 2 仍保持 `in_progress`
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
-> 前置状态：Phase 0–1 `completed`；Phase 2 `in_progress`
+> 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)
 
-## 背景
+## 现在从哪里继续
 
-Phase 2 的可靠执行基础已经落地：PostgreSQL 是共享事实来源，Redis Streams 只提供可丢失、可重复的 at-least-once 通知，独立 Worker 通过数据库租约、心跳和 fencing token 执行 Run。API/Worker 重启、实际租约 owner 强杀、Redis 中断、取消、重复投递、迁移往返及 SQLite→PostgreSQL 导入均有真实本地证据，且没有改变 `llmbenchlab-protocol-v1` 的评分含义。
+Phase 2 治理/审计垂直切片已经作为实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 提交并 push：Alembic `20260827_0004`、六类治理/审计表与 12 表 importer、global/provider/model/run 四层 per-attempt 治理、固定窗口 RPM/TPM 和 lifetime request/Token/USD budget、policy/hash 与 Run override 冻结、materialized counter/ledger 漂移 fail-closed、confirmed pre-send retry generation、有限 question quantum/backlog、公平排序、typed audit/history、Provider metadata、credential audit、前端治理状态与真实 PostgreSQL 竞争测试。
 
-这还不是完整的 Phase 2。当前缺少 Provider/Model/Run 级并发与速率治理、预算硬边界、完整背压与公平调度；现有 `/tasks/metrics` 只是数据库当前事实 gauges，不是历史 counters、延迟分布或审计事件；也尚无可复核的容量/性能基线。因此 Phase 2 必须继续保持 `in_progress`。
+该 SHA 的本地门禁为后端 `604 passed, 29 skipped`、前端 `38 passed`、真实 PostgreSQL/Redis integration `29/29 passed`，lint、Mock smoke、前端 build 与 Compose config 均通过。增强 capacity evidence SHA-256 为 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`；完整 acceptance 9/9，evidence SHA-256 为 `ab311665ff0cb834efdd648cd634f943a4cbc5b8b00728ac8597a288a877ddec`。GitHub Actions [run `33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 4/4 成功。下一任务直接继续正式闭环，不重复候选工作，也不得跳到 Phase 3。
 
-## 当前仓库事实
+## 已完成的候选门禁合同
 
-- 可靠性决策由 [ADR-0005](decisions/ADR-0005-durable-task-execution.md) 固定；数据库而非 Redis/进程内存裁决 Run、租约、attempt、取消和终态。
-- 新 Run 由 API 先提交数据库，再 best-effort XADD；通知失败仍可由 Worker 的数据库 reconciliation 恢复。
-- PostgreSQL 支持受限多 Worker；SQLite 只用于本地兼容和单 Worker 开发，不是多 Worker 部署目标。
-- 本地 Response 由 `(run_id, question_id)` 唯一约束和租约 token 保证幂等；Provider 调用或计费不承诺 exactly-once。
-- 应用日志已有请求/Run correlation 和脱敏 JSON，但只覆盖 LLMBenchLab 应用 logger；Worker probe 也只证明依赖能力，不证明主循环 liveness。
-- 已提交的可靠性基础 commits 为 `2be2392`、`3c975c7`、`2006d3f`、`b3289b1`、`103ab79`；详见当前工作日志与 Project Status。
+以下合同已在 `665244e…` 上满足，保留作为后续修改必须重跑的回归基线。
 
-## 目标
+### 1. 保护工作树并做定向回归
 
-在不改变 API v1 与 `llmbenchlab-protocol-v1` 评分语义、不调用真实模型的前提下，完成 Phase 2 剩余的最小垂直切片：定义并实现可持久恢复的并发/速率/预算治理和确定性背压，补齐历史可观测 counters、延迟与审计事件，并用真实 PostgreSQL/Redis 的负载和故障实验形成容量/性能基线与 Runbook。
+- 阅读 README、AGENTS、本文件、PROJECT_STATUS、ROADMAP、Phase 2、计划/工作日志及 ADR-0009/0010/0011。
+- 运行 `git status --short --branch`，确认没有与用户工作重叠；不得回滚或格式化无关改动。
+- 先运行治理 repository、Adapter、Runner、API/audit、credential、migration/importer、capacity-script 单测。
+- 特别确认：scope/minute materialized counter 高报与低报均 fail closed；policy/hash 与 Run override 漂移不能绕过限额；`max_retries=0` 的 confirmed pre-send release 仍从未发送 ordinal 恢复。
 
-## 开始前必须完成
+### 2. 真实 PostgreSQL integration
 
-1. 阅读 `README.md`、`AGENTS.md`、`docs/PROJECT_STATUS.md`、`docs/ROADMAP.md`、`docs/phases/PHASE-2-RELIABILITY.md`、ADR-0005、现有 lease/Worker/queue/metrics 实现和本工作日志。
-2. 检查 Git 状态，保护所有未提交工作；创建新的工作日志并列出阶段 commit、push 与远程 CI 边界。
-3. 先写新的 ADR，再写实现。ADR 必须明确配额事实来源、预留/结算/释放、重试与恢复、时钟、原子性、过载响应、公平性、审计保留和回滚语义。
-4. 不得把 Redis 的瞬时计数当成预算或任务事实来源；若使用 Redis 加速，必须有数据库可恢复裁决和故障语义。
+在隔离 PostgreSQL 运行全部 integration marker，至少实际覆盖并记录：
 
-## 范围
+- global/provider/model/run concurrency 竞争；
+- 四层 RPM/TPM 原子限制；
+- global/run lifetime request、Token、USD budget；
+- 并发 backlog 精确 admission 数和 typed `run_backlog_full`；
+- finish settlement 与 lease reconciliation 竞争只有一个终态事实；
+- audit replay 幂等、同 key 不同 payload fail closed；
+- active policy 并发切换、Run 创建/Model 敏感更新锁序；
+- `0004` PostgreSQL upgrade/check/downgrade guard/upgrade 和 12 表 importer 对账。
 
-### P2-05：并发、速率、预算与背压
+不得用 SQLite 单测替代上述真实 PostgreSQL 证据；所有 Provider 行为仍只用 Mock/Stub。
 
-- 定义全局、Provider、Model 和 Run 层级的并发上限与优先级；说明限制的组合顺序和数据库事实字段。
-- 为请求/Token/费用预算定义原子预留、实际结算、释放与超限语义；未知 usage/pricing 不得静默按零结算。
-- 为 retry、租约接管、取消、dead-letter 和 Worker 崩溃定义不会永久占用额度、也不会重复结算本地证据的恢复路径。
-- 增加确定性背压：明确哪些请求延迟、拒绝或保持 pending，使用稳定且文档化的 API 错误/状态；不得丢失已经提交的 Run。
-- 增加有限公平调度，证明低流量 Model/Provider 不会被持续高流量来源无限饿死。
+### 3. 增强 capacity 与 acceptance
 
-### P2-06：历史指标与审计
+在同一个冻结候选 commit 上运行增强 `make phase2-capacity`：
 
-- 保留现有 DB gauges，同时增加可解释的历史 counters、队列/领取/重试/取消/dead-letter 事件和端到端/排队/执行延迟。
-- 定义 append-only 审计事件的 schema、关联 ID、保留、脱敏和完整性边界；不得把普通应用日志冒充不可篡改审计。
-- 让单个 Run 的 admission、排队、claim、heartbeat/recovery、题级结果、结算和终态可以用稳定标识串联。
-- 为指标与审计增加重启、重复投递、Redis 故障和迁移测试，避免 counter double-count 或证据漂移。
+- policy read-back 的所有 concurrency/RPM/TPM/lifetime 数值必须有限；
+- Run input reservation、output limit、Token/cost budget 必须有显式上界；
+- question quantum 必须小于 15 题 Demo Run，并由 durable audit 证明 cooperative yield；
+- 停止 Worker 后并发提交必须得到精确 backlog-limit 个 `202` 和其余 typed `429`，随后恢复 Worker 并 drain 到零；
+- 高流量 Model 持续竞争时，低流量 Model 必须在高流量 backlog 排空前取得 claim/slice；
+- 比较一/二 Worker 的吞吐与 p50/p95/p99，并验证 Worker loss、Redis interruption、ledger/audit/counter 对账和完整清理；
+- evidence 必须记录候选 commit SHA、脚本 SHA-256、环境、配置、原始脱敏计数和限制说明，不得冒充生产 SLA。
 
-### P2-07：容量、性能与 Runbook
+`phase2_acceptance.py` 的脚本单测为 `19 passed`，完整 `make phase2-acceptance` 已在冻结候选上验证以下三条确定性数据库 seam injection 与真实 Worker/Redis 恢复：
 
-- 在真实 PostgreSQL/Redis、至少两个独立 Worker 和纯 Mock Adapter 下建立可重复负载脚本。
-- 记录硬件/容器资源、数据规模、并发、吞吐、p50/p95/p99 排队与完成延迟、错误/重试率、数据库与队列压力；结果必须可复核，不能写成生产 SLA。
-- 验证过载、Worker 缩放、租约到期、Redis 中断和数据库恢复时的治理/审计一致性。
-- 编写限流、预算告警、积压、dead-letter、commit outcome unknown、扩缩 Worker 和安全回滚 Runbook。
+1. reservation 已提交、`send_started` 尚未提交：接管只能 `released_pre_send`，不得消耗未发送 retry；
+2. `send_started` 已提交、settlement 尚未提交：接管必须 conservative settlement，释放并发但不按零退回预算；
+3. Provider response 已返回、Response/settlement 本地 commit 尚未确认：本地唯一事实不得 double-count，并明确外部调用/费用可能重复的 at-least-once 边界。
 
-## 非目标
+这些场景明确是 deterministic database seam injection，不宣称 `SIGKILL` 精确命中亚毫秒边界；一般的“Worker 在若干 Response 后 SIGKILL”也不能替代它们。任一完整 Compose 场景失败或未运行都必须保留为未通过/遗留，Phase 2 继续 `in_progress`。
 
-- 不接入或调用真实 OpenAI-compatible Provider，不要求真实 API Key，不产生付费调用。
-- 不新增大型 Benchmark、代码沙箱、LLM Judge、Arena、Agent、鉴权、多租户、计费系统或公共部署。
-- 不承诺 Kubernetes、多区域容灾、严格全局 exactly-once、无限水平扩展或生产 SLA。
-- 不改变逐题 evaluator、总分分母、完成率、回答准确率、排行榜隔离或历史快照语义；必要的不兼容变化必须另起协议/API 版本。
-- 不把本任务扩张为 Phase 3；Phase 2 未完成前不启动新的 Benchmark 产品范围。
+### 4. 全量门禁、commit、push 与精确 SHA CI（已完成）
 
-## 验收标准
-
-- [ ] 新 ADR 在代码前接受，覆盖额度事实来源、原子预留/结算/释放、背压、公平、恢复、审计和回滚。
-- [ ] 在并发 API 提交和多 Worker 领取下，全局/Provider/Model/Run 上限都不会被突破；重启和租约接管后无永久占用。
-- [ ] rate/budget 超限具有稳定状态与 API 语义；已提交 Run 不因 Redis 故障或背压丢失。
-- [ ] retry、duplicate delivery、取消、dead-letter 和 commit-uncertain 场景不会重复结算本地 Token/费用证据。
-- [ ] 公平性测试证明受限低流量来源在持续竞争下能在文档化边界内获得执行机会。
-- [ ] gauges、历史 counters、延迟和 append-only 审计的边界清楚；重复投递/恢复不会 double-count。
-- [ ] 单个 Run 可通过关联 ID 串联 admission、queue、claim/recovery、question evidence、settlement 和 terminal state。
-- [ ] 真实 PostgreSQL/Redis 负载实验产出环境、命令、原始脱敏证据和容量基线；不冒充生产 SLA。
-- [ ] `make lint`、`make test`、`make smoke`、双方言迁移、真实基础设施 integration 和全栈故障回归继续通过。
-- [ ] 每个阶段 commit 已 push 到 `origin`，且该精确 SHA 的 GitHub Actions 必需 job 全部成功；失败时不得把阶段或 Phase 标记为完成。
-- [ ] `llmbenchlab-protocol-v1` 固定回归通过；所有测试仅使用 Mock/Stub/故障注入，没有真实 Provider 调用。
-- [ ] README、Architecture、API、Testing、Deployment、Security、Roadmap、Project Status、Changelog、Phase 2、Next Task 和新工作日志与证据一致。
-
-只有 P2-05、P2-06、P2-07 的全部关键验收都通过，Phase 2 才可评估是否从 `in_progress` 改为 `completed`；任何关键项失败或未运行都必须保留为 `in_progress`。
-
-## 必须运行并记录的证据
+至少运行并记录：
 
 ```bash
 make lint
 make test
 make smoke
+make phase2-capacity
 make phase2-acceptance
 (cd backend && uv run alembic upgrade head)
 (cd backend && uv run alembic check)
 docker compose config --quiet
+git diff --check
 ```
 
-此外必须有：并发 admission/claim 压测、各层限额竞争、预算预留/结算/释放、Worker kill/lease takeover、Redis stop/start、取消与 dead-letter、duplicate delivery、counter/audit 重放、低流量公平性和容量基线。基础设施不可用时必须明确列出未运行项，不得用单元测试替代真实 PostgreSQL/Redis 证据。
+- 检查 staged diff、调试残留、生成物、真实密钥/Authorization/Cookie、审计 payload 和文档虚假完成标记。
+- 形成一个独立、可审查的 Phase 2 治理/审计候选 commit，push 到 `origin/codex/complete-evaluation-workflow`，继续使用 PR #1；禁止 force push。
+- 等待该精确 commit SHA 的四个 GitHub Actions 必需 job 全部成功。任何失败都读取日志、修复、创建新 commit、push 并等待新 SHA；不能用本地通过替代远程绿色。
+- commit/SHA、branch、Actions URL、job 结论、capacity/acceptance artifact path 与 SHA-256、命令计数和清理结果已补入 Changelog、Project Status、Phase 2、计划与工作日志。
 
-## 风险
+## 当前任务：继续 Phase 2 正式闭环
 
-- 分布式配额若同时由数据库和 Redis 裁决会产生双重事实；ADR 必须指定唯一权威和可恢复缓存语义。
-- 预算预留在 Worker 崩溃、usage 未知或 commit acknowledgement 丢失时可能泄漏或重复结算；需要显式状态机与对账。
-- 粗粒度锁可保证正确但损害吞吐；性能优化不得先于原子性证明，也不得绕开 fencing。
-- 公平调度可能与吞吐、优先级和 Provider 限流冲突；必须记录权衡与饥饿上界。
-- 高基数指标或含题目/响应的审计会泄露敏感数据并推高存储；必须限制字段、脱敏与保留期。
+治理切片已经取得精确 SHA 绿色；仍必须完成以下范围，Phase 2 才能评估是否改为 `completed`。
+
+### P2-01：正式 SLO 与容量模型
+
+- 定义仅针对受支持本地/单区域拓扑的排队、恢复、吞吐、错误率和 backlog SLO/容量假设，列出硬件、数据库连接池、Worker 数、Run/题规模、quantum、Provider-latency 模型和测量方法。
+- 用多轮可重复实验给出置信区间/变异而非单次峰值；明确 Mock 容量不能推断真实 Provider、生产 HA 或无限扩展。
+- 根据实测校准 lease/heartbeat、scan、backoff、backlog 与 Worker 扩缩边界。
+
+### P2-06：Exporter、告警、retention 与 Worker progress
+
+- 为现有 DB gauges、typed counters 和 latency 提供受控 exporter；定义 label cardinality、抓取失败、数据库压力和脱敏边界。
+- 为 backlog、dead-letter、governance integrity、overdraw、queue degraded、Worker stalled 和恢复时长定义告警规则、持续时间、严重度、静默与 Runbook 链接。
+- 增加 Worker 主循环 progress/liveness 事实，例如最后 scan/claim/heartbeat/progress 的 DB-time 证据；不能继续把 dependency probe 冒充 Worker 正在推进。
+- 定义 audit retention class 的实际保留、archive、删除/校验、恢复与失败语义；archive 不得含 Key、ciphertext、nonce、URL、题目/prompt/response正文，且不能宣称不可篡改存储。
+- 若加入 resume canary 独立事件，先用固定安全 enum/bitset 设计 schema；不得写 Provider 控制文本。
+
+### P2-07：备份/恢复与完整运维演练
+
+- 演练 PostgreSQL backup→空目标 restore→Alembic head→12 表 count/PK/content fingerprint→managed Run/ledger/audit 可读。
+- 数据库和 keyring 必须独立备份/恢复；既要验证匹配 keyring 可解密，也要验证缺失/错误 keyring fail closed，日志和证据不得回显 Key 或 envelope。
+- 演练 audit archive restore、Redis 重建/consumer group 恢复、Worker 扩缩、dead-letter、commit outcome unknown 和治理完整性告警处置。
+- 补齐尚未覆盖的取消/重试/租约/预算/崩溃组合矩阵，并在真实 PostgreSQL/Redis 下执行。
+
+## 不变量与非目标
+
+- 不改变 `llmbenchlab-protocol-v1` 的评分、分母、完成率、answered accuracy、排行榜隔离或不可变历史快照。
+- 不调用真实或付费 Provider；自动化只使用 Mock、MockTransport、stub 和故障注入。
+- API/Worker managed Run 受 `0004` 治理；可信本地 CLI 按 ADR-0010 继续 `legacy_unmanaged`，操作者必须独占数据库且没有全局 RPM/TPM/USD 硬保证。
+- Provider 调用不是 exactly-once；本地幂等、ledger 和保守结算不能证明外部调用/账单恰好一次。
+- 不把 Redis、进程内计数或 materialized counter 当成第二事实来源；ledger/DB truth 漂移必须 fail closed。
+- 不把审计称为 WORM；数据库管理员仍可修改数据，读取完整性检查只提供应用层 fail-closed。
+- 不移除 write-only Key、AES-GCM credential、数据库外 keyring、legacy environment、真 SSE、严格 `[DONE]`、nullable `max_tokens` 或既有安全限制。
+- 不新增 Phase 3 Benchmark、代码沙箱、Judge、Arena、Agent、认证、多租户、公共部署或 Kubernetes。
+
+## Definition of Done
+
+- 当前候选：已完成。所有定向/全量/真实基础设施/capacity/acceptance 门禁在同一精确 SHA 上通过，三条 crash seam 有实际证据，独立 commit 已 push，精确 SHA CI 4/4，并完成 evidence/secret/diff/清理记录。
+- Phase 2 整体：除上述候选外，正式 SLO/容量模型、Exporter/告警、audit retention archive、Worker progress/liveness、备份恢复和剩余故障矩阵均实现并验证；所有 Phase 2 验收项有可复核证据。
+- 任一关键项未运行或失败时，Phase 2 必须保持 `in_progress`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
 
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-请在 LLMBenchLab 仓库执行 docs/NEXT_TASK.md 定义的“Phase 2 并发治理、审计与性能基线”。开始前阅读所有指定文档、ADR-0005 和现有 Worker/lease/queue/metrics，检查 Git 状态并创建新工作日志。先写 ADR，明确数据库事实来源下的并发、速率、预算预留/结算/释放、背压、公平、审计、恢复与回滚语义，再按 P2-05、P2-06、P2-07 实施。不得改变 llmbenchlab-protocol-v1，不得调用真实模型，不得覆盖用户未提交工作，不得 force push。每个阶段必须执行独立 commit，push 到 `origin`，并等待该精确 SHA 的 GitHub Actions 必需 job 全部成功；CI 失败时修复后重新 commit/push，绿色前不得宣称阶段完成。必须用真实 PostgreSQL/Redis、多 Worker 并发、故障与负载证据验收；任何关键项未通过时保持 Phase 2 in_progress，并如实同步全部状态、运维、测试和工作日志文档。
+请执行 docs/NEXT_TASK.md 的“Phase 2 正式 SLO、可观测性与恢复闭环”。治理/审计候选 `665244e095905083b606b8e98e946ed1a02dc0fc` 的 capacity、9/9 acceptance 与远程 4/4 CI 已完成，不要重复实现或改写既有证据。先建立新的工作日志与执行计划，定义受支持拓扑的正式 SLO/容量模型和多轮测量方法；再交付受控 exporter/告警、低基数标签、Worker DB-time progress/liveness、audit retention archive/restore；最后演练 PostgreSQL 与数据库外 keyring 配对 backup/restore、Redis 重建和剩余故障矩阵。自动化只能用 Mock/Stub，不得调用真实 Provider；保持 protocol-v1、ledger/DB truth、write-only Key 和 fail-closed 边界。每个独立切片都须测试、提交、push 并等待精确 SHA CI；正式闭环未全部满足前 Phase 2 保持 in_progress，不得跳到 Phase 3 或宣称生产 HA/Provider exactly-once。
 ```
