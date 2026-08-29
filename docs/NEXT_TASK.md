@@ -20,7 +20,7 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 - `llmbenchlab-audit-retention archive|verify|reconcile|restore|delete` 提供 canonical JSONL v1、严格文件/权限/大小/schema/hash/rollup 校验、真正离线 verify、精确 digest 绑定、默认不删除和 commit-outcome 分类。它不提供签名/WORM，也不替代整库+keyring backup。
 - 全生产日志调用受字面量/无格式参数静态门禁；第三方动态消息固定化、结构化数值有限化，raw Uvicorn access handler 关闭。
 
-`0006` 兼容修复已完成本地 migration/full test/lint/Mock smoke、真实失败备份副本升级和当前重建库 startup/check；精确 SHA 远程 CI 尚待执行，因此当前标记为 `local_verified`，不改变 P2-07 的 `planned` 状态或范围。
+`0006` 兼容修复已完成本地 migration/full test/lint/Mock smoke、真实失败备份副本升级和当前重建库 startup/check；实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 已 push，[run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 4/4 成功，因此该维护任务为 `completed`，不改变 P2-07 的 `planned` 状态或范围。
 
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；本次兼容修复已在自动备份后将当前重建库前进到 `0006` 并通过 startup/check。
 

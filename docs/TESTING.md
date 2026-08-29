@@ -398,7 +398,7 @@ P2-06 实现 SHA 与提交前阶段性证据如下。Dirty 结果只作为历史
 | `make smoke` | `1 passed, 7 deselected`；完全离线 Mock |
 | Frontend production build | 从根目录误运行 `npm run build` 因无 `package.json` 失败；改为 `cd frontend && npm run build` 后成功（2192 modules），保留 662.39 kB 主 chunk 非阻断 warning |
 | Migration | 默认用户 SQLite 尚未在 head，直接 `alembic check` 失败且未擅自迁移；临时 SQLite head→`0001`→head/check 与隔离真实 PostgreSQL 往返/check 全绿；P2-06 当时 head `20260828_0005` |
-| 2026-08-29 DB compatibility repair（本地） | 真实失败备份副本 `0004 -> 0005 -> 0006`、migration `52 passed`、最终完整 backend `927 passed, 33 skipped`、frontend `38 passed`、当前重建库 migrate/startup/check、lint/smoke/build/config 全绿；current head `20260829_0006`。本地未单独重跑真实 PostgreSQL integration 或完整 Compose acceptance；historical PG `0005` missing-index 分支仅有 Mock 控制流回归，exact-SHA CI 的真实 PG job 覆盖 fresh canonical 分支 |
+| 2026-08-29 DB compatibility repair | 真实失败备份副本 `0004 -> 0005 -> 0006`、migration `52 passed`、最终完整 backend `927 passed, 33 skipped`、frontend `38 passed`、当前重建库 migrate/startup/check、lint/smoke/build/config 全绿；实现 SHA `8fb51b6…` 的 run `33263405214` 4/4 成功。historical PG `0005` missing-index 分支仅有 Mock 控制流回归，exact-SHA CI 的真实 PG job 覆盖 fresh canonical 分支 |
 | Compose config | `docker compose config --quiet` exit 0 |
 | Prometheus rules | 临时 `prom/prometheus:v3.5.0` 中 `promtool check rules` 成功，八条规则全部通过 |
 | Ruff scripts 补充检查 | 对 `scripts/` 的过宽默认 Ruff 命令报告 93 条既有 modernization 告警；按本任务合同使用 `--select E,F,I` 后通过，未把既有告警冒充本次失败 |

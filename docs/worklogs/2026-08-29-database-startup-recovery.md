@@ -8,7 +8,7 @@
 - 初始 HEAD：`6df84d9bb26ee81c2f91ed9772dd6f45e9e17741`
 - 计划：[数据库启动与迁移恢复修复](../plans/2026-08-29-database-startup-recovery.md)
 - 阶段：[Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
-- 状态：`in_progress`
+- 状态：`completed`
 
 ## 目标与背景
 
@@ -80,11 +80,13 @@
 - `make smoke`：`1 passed, 7 deselected`，完全离线 Mock。
 - `docker compose config --quiet`：exit 0；未启动长期服务。
 - 当前重建库 `make migrate`：exit 0，自动备份后 revision=`20260829_0006`；随后 `initialize_database()`=0、quick check=`ok`、FK violations=`0`、repair indexes=`3`、`alembic check` 为 `No new upgrade operations detected`。迁移前后业务表均为 0 行，既有 `worker_processes=2` 保持。
+- staged review：`git diff --cached --check` 与秘密扫描通过，独立终审无 Blocker/High/Medium；实现 commit `8fb51b690ae6335b8ef93b3cbe54e039781fb173` 已普通 push 到 `origin/codex/complete-evaluation-workflow`。
+- 精确 SHA GitHub Actions [run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214)：4/4 成功；backend、真实 PostgreSQL/Redis integration、完整 Compose reliability acceptance 与 frontend job 全绿。
 
 ## 已知问题与下一步
 
 - 当前新库已在自动备份后完成 `0005 -> 0006`，完整性、外键、schema fingerprint、startup head gate 与 `alembic check` 均正常；业务表计数和 Worker facts 保持。
 - 修复只接受 canonical schema 或三个已知索引的缺失子集，并在补建唯一部分索引前拒绝多条 active policy；不会自动挑选或改写治理事实，额外 drift 仍拒绝。
 - root `data/llmbenchlab.db` 是旧 `0003` 文件；支持的 `make setup/migrate/dev/backend/worker` 入口都会进入 `backend/`，本任务不删除或合并这个旧文件。不要从仓库 root 直接以相对 SQLite URL 绕过统一入口。
-- 本地未单独重跑真实 PostgreSQL integration 或完整 Compose acceptance；required CI 的 PostgreSQL/integration/full-stack job 将作为精确 SHA 远程门禁，不把历史 P2-06 evidence 冒充本次运行。historical PostgreSQL `0005` 缺索引的 preflight/create 分支本次只有 Mock 控制流回归；标准真实 PostgreSQL CI 覆盖 fresh canonical existing-index 分支，不宣称覆盖该历史缺口。
-- 本地实现、当前库和回归已验证；尚待 staged review、普通 push 与精确 SHA GitHub Actions 必需 job。绿色前状态保持 `in_progress`。
+- 本地未单独重跑真实 PostgreSQL integration 或完整 Compose acceptance；实现精确 SHA run `33263405214` 的 PostgreSQL/integration/full-stack job 已完成远程覆盖，不把历史 P2-06 evidence 冒充本次运行。historical PostgreSQL `0005` 缺索引的 preflight/create 分支本次只有 Mock 控制流回归；标准真实 PostgreSQL CI 覆盖 fresh canonical existing-index 分支，不宣称覆盖该历史缺口。
+- 实现、当前库、回归、普通 push 与实现精确 SHA 远程门禁均已完成；本任务停止于数据库兼容修复，不推进 P2-07。

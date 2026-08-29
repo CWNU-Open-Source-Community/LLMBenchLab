@@ -1,7 +1,7 @@
 # 数据库启动与迁移恢复修复执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed
 - Created: 2026-08-29
 - Updated: 2026-08-30
 - Related phase: [Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
@@ -53,7 +53,7 @@
    - Validation: 旧回归在修复前失败、修复后通过；未知/partial schema 仍拒绝。
 3. [completed] 验证新库、旧 head、重复迁移和真实启动路径。
    - Validation: 目标 pytest、Alembic upgrade/check、临时副本数据保持、API/Worker startup probe、Ruff。
-4. [in_progress] 同步运维/状态文档并完成交付门禁。
+4. [completed] 同步运维/状态文档并完成交付门禁。
    - Validation: diff/secret/staged review、commit/push、精确 SHA GitHub Actions 四 job 全绿。
 
 ## Risks
@@ -74,8 +74,8 @@
 | SQLite round trip | 真实失败备份副本 `0004 -> 0005 -> 0006 -> check` | 数据/约束/index/revision 正确 | 通过；integrity ok、FK 0、三索引存在、匿名计数保持 |
 | Startup | 当前重建库标准 migrate + head gate | 能启动并只连预期库 | 通过；备份后到 `0006`，`initialize_database()`=0 |
 | Full gates | `make lint`、`make test`、`make smoke`、frontend build、Compose config | 全部通过 | 通过；后端 927/33、前端 38、smoke 1/7、build/config exit 0 |
-| Docs/security | links、diff、secret、staged review | 无未解决 Blocker/High/Medium | diff check 已通过；staged 终审待 commit 前执行 |
-| Remote | 普通 push + exact-SHA CI | 四个 required job 全绿 | 待执行 |
+| Docs/security | links、diff、secret、staged review | 无未解决 Blocker/High/Medium | 通过；staged secret scan 无命中，独立终审无 Blocker/High/Medium |
+| Remote | 普通 push + exact-SHA CI | 四个 required job 全绿 | 实现 SHA `8fb51b690ae6335b8ef93b3cbe54e039781fb173` 已 push；run `33263405214` 4/4 成功 |
 
 ## Rollback
 
@@ -93,8 +93,8 @@
 
 - Changed files: migration/preflight/audit compatibility/acceptance constants、回归、README 与运维/安全/测试/状态文档。
 - Commands run: migration 52 tests、真实失败备份副本 upgrade/check、`make lint/test/smoke`、Compose config、当前库 migrate/startup/check。
-- Acceptance evidence: 本任务已执行的本地门禁全部通过；远程 exact-SHA 待 push 后记录。
-- Not run: 本地真实 PostgreSQL integration 与完整 Compose acceptance 未单独重跑；required CI 的 PostgreSQL/integration/full-stack job 将作为精确 SHA 远程门禁。historical PostgreSQL `0005` 缺索引的 preflight/create 分支只有 Mock 控制流回归；标准 CI 的真实 PostgreSQL migration 覆盖 fresh canonical existing-index 分支，不把两者混写。
+- Acceptance evidence: 本任务已执行的本地门禁全部通过；实现 SHA `8fb51b690ae6335b8ef93b3cbe54e039781fb173` 已普通 push，精确 SHA run `33263405214` 的 backend、PostgreSQL/Redis integration、完整 Compose 与 frontend 四个 job 全部成功。
+- Not run locally: 本地真实 PostgreSQL integration 与完整 Compose acceptance 未单独重跑；实现精确 SHA run `33263405214` 已由 PostgreSQL/integration/full-stack job 完成远程覆盖。historical PostgreSQL `0005` 缺索引的 preflight/create 分支只有 Mock 控制流回归；标准 CI 的真实 PostgreSQL migration 覆盖 fresh canonical existing-index 分支，不把两者混写。
 - Known issues: root `data/llmbenchlab.db` 仍是未由统一 Make 入口使用的旧 `0003` 文件；未删除。旧失败备份保留，是否含需恢复的业务数据由用户决定。
 
 ## Decision and discovery log
