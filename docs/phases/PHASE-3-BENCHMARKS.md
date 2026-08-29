@@ -52,6 +52,11 @@ MMLU-Pro/GPQA 的可信本地切片。该决定不满足代码沙箱、全局预
 沙箱范围未开始。该 UI 切片的完整本地门禁已通过，功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；
 分支无 PR且精确 SHA 未触发仅监听 PR/main 的 workflow，不能称为远程绿色。
 
+2026-08-30 的个人本地实例已把 `artifacts/benchmarks/` 中现有的三份可复现 ZIP 经正式 API 加载：
+GPQA-Diamond `198` 题，以及 MMLU-Pro Direct/Official-CoT 各 `12,032` 题；默认库连同 Demo 共
+`4` 个 Benchmark、`24,277` 题。第三方题目和导入前备份继续位于 Git 忽略目录，本次没有重新下载、
+运行评测或调用 Provider，也不代表 IFEval、Plugin SDK、沙箱、分组 UI 或本阶段验收已经完成。
+
 ## 验收标准
 
 - [ ] 每个标准 Benchmark 可从固定来源/版本重复导入并得到相同 Hash。

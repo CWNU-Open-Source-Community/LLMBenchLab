@@ -24,6 +24,8 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 2026-08-30 的个人本地维护又从最新逻辑非空的 SQLite 一致性备份在 staging 中前进迁移并恢复 Demo 数据，同时让 `make dev` 默认把 API/Worker/Vite 详细输出分流到私有 Git 忽略日志。实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 的 [run `33265171953`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33265171953) 4/4 成功；该维护只处理默认本地开发库和启动体验，不提供 PostgreSQL+keyring backup/restore、Redis rebuild 或告警演练，因而不算 P2-07 功能实现；本文件的下一切片保持不变。
 
+同日又把 `artifacts/benchmarks/` 中已存在的 GPQA-Diamond 与两种 MMLU-Pro profile 通过正式导入 API 加载到默认个人 SQLite，当前为 `4` 个 Benchmark、`24,277` 题，原 Model/Run/Response 保持且没有 Provider 调用。该本地数据操作不提交第三方题目、不改变产品实现或路线图，P2-07 的下一任务仍保持不变。
+
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；本次兼容修复已在自动备份后将当前重建库前进到 `0006` 并通过 startup/check。
 
 ## 已完成：建立 P2-07 工作包
