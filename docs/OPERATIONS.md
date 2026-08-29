@@ -368,7 +368,11 @@ llmbenchlab-audit-retention restore \
 
 退出码 `0` 表示已确认成功，`2` 表示在提交前安全失败，`3` 表示提交已成功但后验核验失败，`4` 表示 commit outcome unknown。遇到 `3` 或 `4` 不得盲目重跑 mutation：保留 archive/count/digest，先执行只读 `reconcile` 判定数据库与 archive 的精确关系，再由操作者决定恢复或删除。Archive 与数据库/keyring 备份是不同资产；archive 不含 credential ciphertext/nonce/keyring，也不能单独恢复 stored Provider Key。
 
-## 10. 0005 与 0004 安全回滚
+## 10. 0006、0005 与 0004 安全回滚
+
+### 10.0 Governance index compatibility repair 0006
+
+revision `20260829_0006` 不增加新的业务字段或表，只为曾执行早期 `0004` 变体的数据库条件补齐 `ix_evaluation_runs_started_at_id`、`ix_evaluation_runs_finished_at_id` 与 `uq_governance_policies_single_active`。`make migrate` 只在 revision fingerprint 为 canonical，或缺失项是这三个索引的非空子集时放行，并先创建 SQLite 一致性备份；这允许在 SQLite repair DDL 部分完成但 marker 仍为 `0005` 时安全重入。PostgreSQL `0005` 也必须通过 metadata drift 校验。若有多条 active policy、错误的同名索引或任何额外 drift，必须人工核对，工具不会自动停用 policy。`0006 -> 0005` 保留这三个 canonical `0004` 索引，因此是有意的 no-op downgrade。
 
 ### 10.1 Worker progress / retention revision 0005
 

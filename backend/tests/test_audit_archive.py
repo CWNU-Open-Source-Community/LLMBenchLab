@@ -282,6 +282,17 @@ def test_archive_v1_rejects_unsupported_source_revision_on_write_and_read(tmp_pa
         verify_archive(path)
 
 
+def test_archive_v1_accepts_schema_equivalent_repair_revision() -> None:
+    data, _digest = build_archive_bytes(
+        (),
+        cutoff_at=datetime(2026, 1, 1, tzinfo=UTC),
+        source_alembic_head="20260829_0006",
+        has_more_eligible=False,
+    )
+
+    assert b'"source_alembic_head":"20260829_0006"' in data
+
+
 def test_frozen_archive_v1_fixture_remains_verifiable(tmp_path) -> None:
     fixture = Path(__file__).with_name("fixtures") / "audit-archive-v1-empty.jsonl"
     path = tmp_path / "archive-v1-empty.jsonl"

@@ -39,7 +39,7 @@ P2-06 已在 implementation SHA `9a20676dcf545040782f04c166205d0043345753`、evi
 
 ## 验收标准
 
-- 正确 dump+keyring 在新空 PG16 目标恢复后 head=`20260828_0005`、13 表 count/PK/content digest 与治理/audit 完整性全 exact。
+- 按后续 [ADR-0017](../decisions/ADR-0017-schema-equivalent-governance-index-repair.md) amendment，正确 dump+keyring 在新空 PG16 目标恢复后 head=`20260829_0006`、13 表 count/PK/content digest 与治理/audit 完整性全 exact。
 - Manifest/dump/keyring swap、missing/wrong/权限/类型/size/race/tamper 全部 fail closed；stored fake credential 全部本地解密且 Provider I/O=0。
 - Redis container/volume 完全替换后，DB-only scan 恢复 pending/expired、group 从 `0-0` 重建、PEL/lag=0、重复通知不改变 durable snapshot。
 - Worker 1↔2 扩缩的 expected/live/stalled/shortfall、graceful stop、lease/fencing/ledger/Response 唯一性收敛。

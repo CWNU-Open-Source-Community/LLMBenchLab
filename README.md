@@ -373,7 +373,7 @@ uv run python -m app.db.import_sqlite \
 | `3` | `committed_but_verification_failed` | 目标已提交完整 precommit 快照，但 postcommit 验证或报告失败；停止服务并独立对账 |
 | `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 |
 
-退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、13 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。正常使用后的 `20260828_0005` 不能在 `worker_processes` 有事实时原地降级；先停止 Worker、保存必要事实并显式清空该表后，才能进入 `0005 → 0004`，而 `0004` 原有 ledger/audit downgrade guard 仍继续生效。只有隔离空库用于完整降级/升级往返，处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、13 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。当前 repair head `20260829_0006` 降到 `0005` 不删除对象；继续跨过 `20260828_0005` 时，只要 `worker_processes` 有事实就会拒绝。先停止 Worker、保存必要事实并显式清空该表后，才能进入 `0005 → 0004`，而 `0004` 原有 ledger/audit downgrade guard 仍继续生效。只有隔离空库用于完整降级/升级往返，处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
 ## Audit retention 维护
 

@@ -13,6 +13,7 @@
 - 镜像指纹修正：[ADR-0013](../decisions/ADR-0013-stable-image-content-fingerprint.md)
 - 双 backlog 资格：[ADR-0014](../decisions/ADR-0014-dual-backlog-slo-profile.md)
 - 可观测性与审计保留：[ADR-0015](../decisions/ADR-0015-observability-worker-progress-audit-retention.md)
+- Schema-equivalent 索引修复：[ADR-0017](../decisions/ADR-0017-schema-equivalent-governance-index-repair.md)
 
 ## 阶段目标
 
@@ -20,7 +21,7 @@
 
 ## 当前功能范围
 
-- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容、双方言 Alembic 链已在 P2-06 implementation SHA `9a20676…` 扩展至 `20260828_0005`。
+- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容；P2-06 implementation SHA `9a20676…` 将双方言 Alembic 链扩展至 `20260828_0005`，当前 schema-equivalent maintenance head `20260829_0006` 仅修复早期 `0004` 三索引缺口。
 - Redis at-least-once 通知；Run、取消、重试、租约、Response、终态、治理、attempt ledger 和 audit 全由数据库裁决。
 - 原子 claim、数据库时间 lease/heartbeat、fencing、有限 retry/backoff、取消、过期接管、duplicate no-op 和 dead-letter。
 - 停写只读 SQLite→空 PostgreSQL 的单向 importer；`0005` 按依赖顺序复制 13 张应用表并做 count/PK/content fingerprint，源有 live Worker generation 时拒绝，stopped/stale progress 可精确复制。keyring 仍在数据库之外。
@@ -81,6 +82,7 @@
 - [x] **远程实现门禁**：GitHub Actions run [`33099260233`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33099260233) 对精确实现 SHA 4/4 成功。
 - [x] **P2-01 完成**：clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 与 `qualified` 容量模型；aggregate SHA-256 `a76d167b…d0d9`。证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 已普通 push，[GitHub Actions run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 对该精确 SHA 4/4 成功。结论只适用于固定 Mock 单机 profile。
 - [x] **P2-06 仓库级闭环完成**：clean implementation commit `9a20676dcf545040782f04c166205d0043345753` 已 push，clean capacity/9/9 acceptance 与 [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 通过；evidence-doc commit `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 也精确 4/4 通过。
+- [ ] **0004 历史索引兼容修复待远程门禁**：schema-equivalent `20260829_0006`、仅允许三个已知索引缺失子集的可重入 SQLite preflight、PostgreSQL `0005` metadata 白名单控制流、重复 active/额外 drift 拒绝、真实失败备份副本升级及本任务已执行的本地门禁均通过；historical PG missing-index 分支仅有 Mock 回归，标准 CI 真实 PG 只覆盖 fresh canonical 分支。本地未单独重跑真实 PostgreSQL integration 或完整 Compose acceptance，精确 SHA CI 绿色前保持 `local_verified`。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
 ## 已实际运行的中间证据
@@ -110,6 +112,7 @@
 | P2-06 补充 Ruff | 过宽 scripts 命令报告 93 条既有 modernization 告警；`--select E,F,I` 通过 | 保留首次结果，不扩大本切片清理范围 |
 | P2-06 staged 技术/安全终审 | structured-extra High 与 Worker `__main__` logger Medium 已修复；76-file implementation index 为 0 Blocker/High/Medium；hydration/import integrity 目标集 `67 passed` | 已进入 clean implementation commit `9a20676…` |
 | P2-06 evidence-doc remote gate | [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) | 精确 `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`，四个必需 job 全 success；P2-06 仓库级闭环完成 |
+| 2026-08-29 DB compatibility repair | migration `52 passed`；完整 backend `927 passed, 33 skipped`、frontend `38 passed`；lint/smoke/config、真实失败备份副本与当前库 startup/check 全绿 | current head `20260829_0006`；exact-SHA remote gate 待执行，不改变 P2-07 planned 状态 |
 
 所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
 

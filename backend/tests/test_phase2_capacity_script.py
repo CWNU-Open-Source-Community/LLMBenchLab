@@ -1974,6 +1974,7 @@ def test_acceptance_requires_both_populated_guards_and_empty_round_trips() -> No
     assert 'PRE_GOVERNANCE_REVISION = "20260827_0003"' in source
     assert 'GOVERNANCE_REVISION = "20260827_0004"' in source
     assert 'WORKER_PROGRESS_REVISION = "20260828_0005"' in source
+    assert 'DATABASE_HEAD_REVISION = "20260829_0006"' in source
     assert "application_worker_progress_0005_to_0004_guard" in source
     assert "isolated_governance_0004_to_0003_guard" in source
     assert "worker_progress_0005_to_0004_round_trip" in source

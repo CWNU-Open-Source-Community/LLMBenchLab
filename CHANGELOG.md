@@ -64,6 +64,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Fixed
 
+- Added ADR-0017 and the forward-only, schema-equivalent Alembic repair revision `20260829_0006` for databases that executed an early `0004` variant before three governance indexes were present. Migration preflight accepts canonical schemas or only a missing subset of those three indexes, so an interrupted SQLite repair is resumable; it backs up SQLite, validates newly historical PostgreSQL `0005` metadata, rejects multiple active policies, and continues to reject every other schema drift.
 - Prevented external `LogRecord` extras from injecting allowlisted request/run fields, rejected FIFO/non-regular archive inputs without blocking by opening them nonblocking before `fstat`, and made oversized audit archives fail on their global line cap before decoding attacker-controlled lines.
 - Made importer post-commit verification and no-op retention post-verification fail closed instead of treating an unchanged row count as sufficient evidence; PostgreSQL retention paths now preserve their advisory/row-lock gate through the mutation decision.
 - Made materialized governance scope/minute counters fail closed when they diverge from the never-delete attempt ledger; low or high counter drift cannot be used to bypass admission, mutation, reconciliation, or importer preflight.

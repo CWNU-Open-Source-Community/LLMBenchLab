@@ -560,7 +560,7 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 
 带凭据的目标 DSN 必须通过 `--target-env` 从受控环境读取；`--target` 拒绝 URL password 和 password query。COMMIT 未获得 PostgreSQL 确认时退出 `4`/`commit_outcome_unknown`；由于事务原子性，目标可能为空，也可能是完整的 precommit 快照。COMMIT 已确认但连接收尾、postcommit 快照/对账或报告失败时退出 `3`/`committed_but_verification_failed`；这时目标已提交完整 precommit 快照，不会自动回滚。两种结果都禁止盲目重试，必须保持目标离线，按已输出摘要独立检查目标是空还是完整提交。非空目标会拒绝再次导入，工具也不提供 PostgreSQL 到 SQLite 的反向同步。
 
-Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`20260828_0005` 增加 `worker_processes` 与 audit retention/exporter 扫描索引。两个 downgrade guard 都在第一条 DDL 前拒绝可能丢失的事实：0005 拒绝任意 Worker generation，0004 拒绝 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 证据。隔离空数据库分别验证 `0005 ↔ 0004` 与 `0004 ↔ 0003`；已使用环境应优先向前修复，或恢复经核验的旧备份并单独保留新 schema 证据。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
+Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`20260828_0005` 增加 `worker_processes` 与 audit retention/exporter 扫描索引；schema-equivalent `20260829_0006` 只条件补齐早期 `0004` 变体缺少的三个 canonical 索引。兼容 preflight 仍以精确 fingerprint、integrity/FK、索引定义和 single-active 数据约束 fail closed。`0006 → 0005` 不删除 canonical 对象；后续两个 downgrade guard 都在第一条有损 DDL 前拒绝可能丢失的事实：0005 拒绝任意 Worker generation，0004 拒绝 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 证据。隔离空数据库分别验证 `0005 ↔ 0004` 与 `0004 ↔ 0003`；已使用环境应优先向前修复，或恢复经核验的旧备份并单独保留新 schema 证据。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
 
 ## 错误处理与可观察性
 

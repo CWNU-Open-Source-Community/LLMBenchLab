@@ -5,6 +5,7 @@
 - **Deciders**: LLMBenchLab maintainers
 - **Scope**: Phase 2 P2-06 metrics exporter、告警、Worker 主循环进展与 audit retention
 - **Amends**: [ADR-0005](ADR-0005-durable-task-execution.md) 的任务可观测性、[ADR-0009](ADR-0009-database-governance-audit-fair-scheduling.md) 的 typed audit 保留流程，以及 [ADR-0010](ADR-0010-phase-2-governance-delivery-boundaries.md) 的恢复指标边界
+- **Amended by**: [ADR-0017](ADR-0017-schema-equivalent-governance-index-repair.md) 将 schema-equivalent `0006` 加入 archive-v1 compatible-head allowlist
 - **Preserves**: PostgreSQL/数据库事实来源、Redis 非权威通知、`llmbenchlab-protocol-v1`、write-only Provider Key、Mock-only 自动化和可信 loopback 部署边界
 
 ## Context
@@ -220,7 +221,7 @@ Dead-letter 与 integrity 是 15 分钟 rolling symptom；Prometheus 整个窗�
 - cutoff 不由用户任意传入；空集合也生成有效 archive。
 - archive 默认绝不删除；运维顺序固定为 archive -> offline verify -> maintenance-window delete。
 
-单文件 canonical JSONL schema 为 `llmbenchlab-audit-archive-v1`：一行 header、零至一万行 `audit_event`、唯一末行 manifest。V1 的 event/payload/retention contract 与 compatible Alembic head allowlist 独立冻结；当前唯一 compatible head 是 `20260828_0005`。`source_alembic_head` 不是装饰性字符串：write/verify/restore/delete/reconcile 都拒绝未列入 allowlist 的旧版、分支或未来 head；未来 schema 只有在证明 V1 全字段语义仍兼容后才能显式扩充 allowlist，否则必须提升 archive schema 并保留 V1 reader。Event 保存完整恢复事实：
+单文件 canonical JSONL schema 为 `llmbenchlab-audit-archive-v1`：一行 header、零至一万行 `audit_event`、唯一末行 manifest。V1 的 event/payload/retention contract 与 compatible Alembic head allowlist 独立冻结；compatible heads 为 `20260828_0005` 与 schema-equivalent repair head `20260829_0006`。后者只恢复 canonical `0004` 的三个索引，不改变 archive event、字段或保留语义。`source_alembic_head` 不是装饰性字符串：write/verify/restore/delete/reconcile 都拒绝未列入 allowlist 的旧版、分支或未来 head；未来 schema 只有在证明 V1 全字段语义仍兼容后才能显式扩充 allowlist，否则必须提升 archive schema 并保留 V1 reader。Event 保存完整恢复事实：
 
 ```text
 id, event_key, event_type, payload_hash, payload, retention_class,
@@ -278,7 +279,7 @@ Delete 永不执行宽泛 `DELETE WHERE expires_at < cutoff`：
 
 ### 11. Schema、migration 与 importer
 
-新 Alembic head `20260828_0005`，同时是 archive-v1 当前唯一 compatible source/target head：
+Worker progress revision 为 `20260828_0005`；当前 Alembic head `20260829_0006` 是 schema-equivalent index repair。两者都是 archive-v1 compatible source/target head：
 
 - 创建 `worker_processes` 及本文约束/索引；
 - 为 audit archive 扫描增加 `(expires_at,id)` 索引；
@@ -286,6 +287,8 @@ Delete 永不执行宽泛 `DELETE WHERE expires_at < cutoff`：
 - 不创建 retention 状态表，不回填旧 Worker 进展，也不修改历史 audit expiry。
 
 `prepare_migrations.py` 将 `20260827_0004` 纳入 historical head/fingerprint/备份/adoption，严格验证新表、约束和索引。`0005 -> 0004` 在第一条 DDL 前要求 `worker_processes` 为空；有行即拒绝且不得静默丢失事实。空隔离库继续支持 downgrade/re-upgrade。
+
+`0006` 对三个 canonical governance 索引逐一检查并只补建缺失项；SQLite preflight 仅对白名单 `0004/0005` canonical fingerprint 或这三个索引的缺失子集放行，并在创建 single-active 唯一部分索引前确认 active policy 不超过一条。`0006 -> 0005` 不删除这些本应属于 `0004` 的索引。
 
 SQLite -> PostgreSQL importer 的 core table list 从 12 增至 13，精确复制 stopped 和已经 stale 的 Worker facts并纳入 count/PK/content digest、目标空表与锁序；source preflight 使用 DB now/stale threshold拒绝仍 live 的 generation，防止把正在运行的 Worker 数据库迁走。Stale crash row不会被当成 live，也不会让 expected shortfall 消失。
 

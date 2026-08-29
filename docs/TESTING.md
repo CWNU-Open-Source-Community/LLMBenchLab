@@ -262,7 +262,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 
 `backend/tests/test_migrations.py` 使用独立临时 SQLite 和 Alembic 子进程验证：
 
-- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260828_0005` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束，以及两个 bounded audit scan indexes。
+- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260829_0006` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束、两个 bounded audit scan indexes，以及早期 `0004/0005` 三索引缺口、repair DDL 部分完成后的重入和 PostgreSQL `0005` metadata 白名单/额外 drift 拒绝控制流（Mock）。
 - 有模型、Benchmark、题目、Run 与 Response 的 legacy schema 被一致性备份、严格识别并无损升级；题目按原插入顺序回填 0-based `position`。
 - 与当前 metadata 一致但没有版本标记的库可安全收养，已有 head 重复 preflight 不生成多余备份。
 - 部分表、server default/CHECK 内容或重名、PK/UNIQUE/FK/index/partial index、trigger、SQLite conflict policy/generated column、`STRICT`/`WITHOUT ROWID` 等未知 drift 在创建版本标记和备份前被拒绝；已在 head 的库同样验证。
@@ -280,7 +280,7 @@ cd backend
 uv run pytest tests/test_migrations.py
 ```
 
-真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline 并停止 API/Worker 后，先断言 populated `0005 -> 0004` 在任何 DDL 前拒绝且 head 不变；另建隔离空 PostgreSQL 完成 `0005 -> 0004 -> 0005`/check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
+真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline 并停止 API/Worker 后，从 head `0006` 发起 downgrade；`0006 -> 0005` 为 no-op，随后 populated `0005 -> 0004` 在任何有损 DDL 前拒绝。另建隔离空 PostgreSQL 跨过 `0005 -> 0004 -> 0005`，最终 `upgrade head` 回到 `0006` 并 check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
 
 ### 6.3 SQLite→PostgreSQL 导入
 
@@ -397,7 +397,8 @@ P2-06 实现 SHA 与提交前阶段性证据如下。Dirty 结果只作为历史
 | `make test` | 后端 `916 passed, 33 skipped`；前端 `38 passed`；模型路径只使用 Mock/MockTransport/stub |
 | `make smoke` | `1 passed, 7 deselected`；完全离线 Mock |
 | Frontend production build | 从根目录误运行 `npm run build` 因无 `package.json` 失败；改为 `cd frontend && npm run build` 后成功（2192 modules），保留 662.39 kB 主 chunk 非阻断 warning |
-| Migration | 默认用户 SQLite 尚未在 head，直接 `alembic check` 失败且未擅自迁移；临时 SQLite head→`0001`→head/check 与隔离真实 PostgreSQL 往返/check 全绿；当前 head `20260828_0005` |
+| Migration | 默认用户 SQLite 尚未在 head，直接 `alembic check` 失败且未擅自迁移；临时 SQLite head→`0001`→head/check 与隔离真实 PostgreSQL 往返/check 全绿；P2-06 当时 head `20260828_0005` |
+| 2026-08-29 DB compatibility repair（本地） | 真实失败备份副本 `0004 -> 0005 -> 0006`、migration `52 passed`、最终完整 backend `927 passed, 33 skipped`、frontend `38 passed`、当前重建库 migrate/startup/check、lint/smoke/build/config 全绿；current head `20260829_0006`。本地未单独重跑真实 PostgreSQL integration 或完整 Compose acceptance；historical PG `0005` missing-index 分支仅有 Mock 控制流回归，exact-SHA CI 的真实 PG job 覆盖 fresh canonical 分支 |
 | Compose config | `docker compose config --quiet` exit 0 |
 | Prometheus rules | 临时 `prom/prometheus:v3.5.0` 中 `promtool check rules` 成功，八条规则全部通过 |
 | Ruff scripts 补充检查 | 对 `scripts/` 的过宽默认 Ruff 命令报告 93 条既有 modernization 告警；按本任务合同使用 `--select E,F,I` 后通过，未把既有告警冒充本次失败 |
@@ -574,7 +575,7 @@ make phase2-acceptance
 6. Redis 完全 stop/start；`live`/`health` 保持可用、`ready` 降级，API 仍以 `202` 提交数据库事实，Worker 仅靠 DB reconciliation 完成；Redis 恢复后新消息正常 ACK。
 7. Worker 停止时取消 pending Run；Worker 恢复消费旧通知后终态和 0 Response 不漂移。
 8. 运行中取消并再次 XADD 同一 Run；Response 数在取消后冻结，重复投递被 ACK 且 canonical snapshot 不变。
-9. 停止 API/Worker 后在 populated PostgreSQL 上尝试 `20260828_0005 -> 0004`：Worker progress rows 存在时必须在第一条 DDL 前拒绝，application revision、13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005` 和 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
+9. 停止 API/Worker 后从 current head `20260829_0006` 尝试 downgrade 到 `0004`：schema-no-op `0006 -> 0005` 后，Worker progress rows 存在时必须在 `0005 -> 0004` 第一条有损 DDL 前拒绝，13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005`，最终回到 `0006` 并 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
 
 任何一个场景失败、未运行、使用真实 Provider、最终 PEL/lag 非零或清理不完整，都不能把可靠执行基础写成通过。`--self-check-only` 只验证 Docker/Compose、隔离和清理 guard，不执行九场景，不能替代正式命令。精确 SHA `665244e…` 的最终本地运行已 9/9 通过；artifact 与 hash 见第 10.1 节。
 

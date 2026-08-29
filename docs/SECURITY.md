@@ -288,7 +288,7 @@ Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL
 - 退出码 `3` 表示 `COMMIT` 已确认、但提交后验证或报告失败；导入已经提交。**禁止盲目重试或把它描述为回滚**，应先只读核验目标，必要时从已验证备份执行人工恢复。
 - 工具是单向导入，不提供 PostgreSQL→SQLite 自动回迁。schema downgrade 也不等于数据平台回滚。
 
-`20260828_0005 → 0004` 会移除 Worker progress，guard 在第一条 DDL 前拒绝任何 generation 行；`20260827_0004 → 0003` 会移除治理/ledger/audit/Provider metadata并拒绝任何相关事实。正常运行后的数据库不可原地 downgrade；应优先向前修复，或恢复经核验的旧备份并保留只读证据。只有隔离空数据库用于双方向往返验证；详见 [OPERATIONS.md](OPERATIONS.md)。
+`20260829_0006` 只补齐 canonical `0004` 的三个索引；兼容入口只接受 canonical schema，或缺失项为这三个索引的非空子集，以便 SQLite 非事务 DDL 中断后安全重入。新近成为 historical 的 PostgreSQL `0005` 也必须先通过 metadata drift 校验；任何额外差异仍 fail closed。SQLite preflight 与 repair migration 都会在恢复 single-active 唯一索引前拒绝多条 active policy。`0006 → 0005` 不删除对象；`20260828_0005 → 0004` 会移除 Worker progress，guard 在第一条 DDL 前拒绝任何 generation 行；`20260827_0004 → 0003` 会移除治理/ledger/audit/Provider metadata并拒绝任何相关事实。正常运行后的数据库不可原地 downgrade；应优先向前修复，或恢复经核验的旧备份并保留只读证据。只有隔离空数据库用于双方向往返验证；详见 [OPERATIONS.md](OPERATIONS.md)。
 
 ## 10. 依赖与构建供应链
 

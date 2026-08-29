@@ -7,15 +7,18 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+import app.db.prepare_migrations as prepare_migrations_module
 from app.db.base import Base
 from app.db.prepare_migrations import (
     CREDENTIAL_REVISION,
     GOVERNANCE_REVISION,
     LEGACY_REVISION,
     PHASE_1_REVISION,
+    WORKER_PROGRESS_REVISION,
     SchemaPreparationError,
     database_heads,
     prepare_database,
@@ -25,7 +28,7 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260828_0005"
+HEAD_REVISION = "20260829_0006"
 WEB_CREDENTIAL_REVISION = CREDENTIAL_REVISION
 RELIABILITY_REVISION = "20260825_0002"
 
@@ -120,6 +123,66 @@ def _insert_legacy_rows(database_path: Path) -> None:
             );
             """
         )
+
+
+def _drop_known_governance_indexes(database_path: Path) -> None:
+    with sqlite3.connect(database_path) as connection:
+        for index_name in (
+            "ix_evaluation_runs_started_at_id",
+            "ix_evaluation_runs_finished_at_id",
+            "uq_governance_policies_single_active",
+        ):
+            connection.execute(f'DROP INDEX "{index_name}"')
+
+
+def _insert_active_policy(
+    connection: sqlite3.Connection,
+    *,
+    policy_id: str,
+    version: int,
+) -> None:
+    connection.execute(
+        "INSERT INTO governance_policies ("
+        "id, version, policy_hash, is_active, backlog_limit, question_quantum, "
+        "activated_at, created_at"
+        ") VALUES (?, ?, ?, 1, 100, 25, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        (policy_id, version, f"{version:064x}"),
+    )
+
+
+def _mock_postgresql_0005_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    differences: tuple[str, ...],
+) -> tuple[Mock, Mock, list[object]]:
+    connection = Mock()
+    connection.dialect.name = "postgresql"
+    connection.in_transaction.return_value = False
+    connection.execute.return_value.scalar_one.return_value = 0
+    engine = Mock()
+    engine.connect.return_value = connection
+    inspector = Mock()
+    inspector.get_table_names.return_value = list(Base.metadata.tables)
+    metadata_calls: list[object] = []
+
+    def schema_differences(candidate: object) -> tuple[str, ...]:
+        metadata_calls.append(candidate)
+        return differences
+
+    monkeypatch.setattr(prepare_migrations_module, "create_database_engine", lambda _url: engine)
+    monkeypatch.setattr(
+        prepare_migrations_module,
+        "database_heads",
+        lambda _connection: (WORKER_PROGRESS_REVISION,),
+    )
+    monkeypatch.setattr(
+        prepare_migrations_module,
+        "expected_database_heads",
+        lambda _config_path: (HEAD_REVISION,),
+    )
+    monkeypatch.setattr(prepare_migrations_module.sa, "inspect", lambda _connection: inspector)
+    monkeypatch.setattr(prepare_migrations_module, "_schema_differences", schema_differences)
+    return engine, connection, metadata_calls
 
 
 def _rewrite_table_ddl(database_path: Path, table_name: str, old: str, new: str) -> None:
@@ -419,6 +482,307 @@ def test_prepare_backs_up_and_adopts_governance_schema(
     _run_alembic(database_path, "upgrade", "head")
     assert _read_heads(database_path) == (HEAD_REVISION,)
     _run_alembic(database_path, "check")
+
+
+def test_known_governance_index_gap_upgrades_through_0005_and_0006(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "known-governance-index-gap.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        _insert_active_policy(connection, policy_id="policy-active", version=1)
+        data_counts_before = connection.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM models), "
+            "(SELECT COUNT(*) FROM benchmarks), "
+            "(SELECT COUNT(*) FROM questions), "
+            "(SELECT COUNT(*) FROM evaluation_runs), "
+            "(SELECT COUNT(*) FROM evaluation_responses), "
+            "(SELECT COUNT(*) FROM governance_policies)"
+        ).fetchone()
+    _drop_known_governance_indexes(database_path)
+
+    governance_result = prepare_database(_database_url(database_path))
+
+    assert governance_result.action == "versioned_governance"
+    assert governance_result.backup_path is not None
+    assert governance_result.backup_path.is_file()
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert (
+            not {
+                "ix_evaluation_runs_started_at_id",
+                "ix_evaluation_runs_finished_at_id",
+                "uq_governance_policies_single_active",
+            }
+            & indexes
+        )
+
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert "worker_processes" in tables
+        assert {
+            "ix_worker_processes_stopped_seen_generation",
+            "ix_audit_events_expires_id",
+            "ix_audit_events_occurred_id",
+        } <= indexes
+        assert (
+            not {
+                "ix_evaluation_runs_started_at_id",
+                "ix_evaluation_runs_finished_at_id",
+                "uq_governance_policies_single_active",
+            }
+            & indexes
+        )
+
+    worker_progress_result = prepare_database(_database_url(database_path))
+
+    assert worker_progress_result.action == "versioned_worker_progress"
+    assert worker_progress_result.backup_path is not None
+    assert worker_progress_result.backup_path.is_file()
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        data_counts_after = connection.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM models), "
+            "(SELECT COUNT(*) FROM benchmarks), "
+            "(SELECT COUNT(*) FROM questions), "
+            "(SELECT COUNT(*) FROM evaluation_runs), "
+            "(SELECT COUNT(*) FROM evaluation_responses), "
+            "(SELECT COUNT(*) FROM governance_policies)"
+        ).fetchone()
+        assert data_counts_after == data_counts_before
+        for index_name, expected_columns in (
+            ("ix_evaluation_runs_started_at_id", ["started_at", "id"]),
+            ("ix_evaluation_runs_finished_at_id", ["finished_at", "id"]),
+        ):
+            assert [
+                row[2] for row in connection.execute(f'PRAGMA index_info("{index_name}")')
+            ] == expected_columns
+        active_index = {
+            row[1]: row for row in connection.execute("PRAGMA index_list(governance_policies)")
+        }["uq_governance_policies_single_active"]
+        assert active_index[2] == 1
+        assert active_index[4] == 1
+        active_index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='uq_governance_policies_single_active'"
+        ).fetchone()[0]
+        assert active_index_sql.endswith("WHERE is_active = 1")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_active_policy(connection, policy_id="policy-active-second", version=2)
+        connection.rollback()
+    _run_alembic(database_path, "check")
+
+    _run_alembic(database_path, "downgrade", WORKER_PROGRESS_REVISION)
+
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert {
+            "ix_evaluation_runs_started_at_id",
+            "ix_evaluation_runs_finished_at_id",
+            "uq_governance_policies_single_active",
+        } <= indexes
+    canonical_0005_result = prepare_database(_database_url(database_path))
+    assert canonical_0005_result.action == "versioned_worker_progress"
+    _run_alembic(database_path, "upgrade", "head")
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+
+
+def test_known_governance_index_gap_resumes_after_partial_0006_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "partial-governance-index-repair.db"
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE INDEX ix_evaluation_runs_started_at_id ON evaluation_runs (started_at, id)"
+        )
+
+    result = prepare_database(_database_url(database_path))
+
+    assert result.action == "versioned_worker_progress"
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert {
+            "ix_evaluation_runs_started_at_id",
+            "ix_evaluation_runs_finished_at_id",
+            "uq_governance_policies_single_active",
+        } <= indexes
+    _run_alembic(database_path, "check")
+
+
+@pytest.mark.parametrize(
+    ("differences", "expected_row_guard_calls"),
+    [
+        (
+            (),
+            0,
+        ),
+        (
+            ("add_index:evaluation_runs.ix_evaluation_runs_started_at_id",),
+            1,
+        ),
+        (
+            (
+                "add_index:evaluation_runs.ix_evaluation_runs_finished_at_id",
+                "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
+                "add_index:governance_policies.uq_governance_policies_single_active",
+            ),
+            1,
+        ),
+    ],
+)
+def test_prepare_postgresql_0005_accepts_only_canonical_or_known_index_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    differences: tuple[str, ...],
+    expected_row_guard_calls: int,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_0005_preflight(
+        monkeypatch,
+        differences=differences,
+    )
+
+    result = prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert result.action == "versioned"
+    assert metadata_calls == [connection]
+    assert connection.execute.call_count == expected_row_guard_calls
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_prepare_postgresql_0005_rejects_unknown_drift_with_known_index_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_0005_preflight(
+        monkeypatch,
+        differences=(
+            "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
+            "add_index:models.ix_models_enabled",
+        ),
+    )
+
+    with pytest.raises(SchemaPreparationError, match="historical database"):
+        prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert metadata_calls == [connection]
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_known_governance_index_gap_rejects_duplicate_active_policies(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "duplicate-active-policy-index-gap.db"
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        _insert_active_policy(connection, policy_id="policy-active-first", version=1)
+        _insert_active_policy(connection, policy_id="policy-active-second", version=2)
+
+    with pytest.raises(SchemaPreparationError, match="multiple active policies"):
+        prepare_database(_database_url(database_path))
+
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    assert list(tmp_path.glob("*.bak")) == []
+
+
+def test_governance_index_repair_migration_guards_duplicate_active_policies_before_ddl(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "direct-upgrade-duplicate-active-policy.db"
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        _insert_active_policy(connection, policy_id="policy-active-first", version=1)
+        _insert_active_policy(connection, policy_id="policy-active-second", version=2)
+
+    failed = _invoke_alembic(database_path, "upgrade", "head")
+
+    assert failed.returncode != 0
+    assert "multiple active policies exist" in failed.stderr
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert (
+            not {
+                "ix_evaluation_runs_started_at_id",
+                "ix_evaluation_runs_finished_at_id",
+                "uq_governance_policies_single_active",
+            }
+            & indexes
+        )
+
+
+def test_governance_index_repair_rejects_same_name_partial_run_index(tmp_path: Path) -> None:
+    database_path = tmp_path / "direct-upgrade-partial-run-index.db"
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP INDEX ix_evaluation_runs_started_at_id")
+        connection.execute(
+            "CREATE INDEX ix_evaluation_runs_started_at_id "
+            "ON evaluation_runs (started_at, id) WHERE started_at IS NOT NULL"
+        )
+
+    failed = _invoke_alembic(database_path, "upgrade", "head")
+
+    assert failed.returncode != 0
+    assert "does not match the repair migration predicate" in failed.stderr
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='ix_evaluation_runs_started_at_id'"
+        ).fetchone()[0]
+        assert index_sql.endswith("WHERE started_at IS NOT NULL")
+
+
+def test_known_governance_index_gap_does_not_allow_additional_drift(tmp_path: Path) -> None:
+    database_path = tmp_path / "governance-index-gap-with-extra-drift.db"
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP INDEX ix_models_enabled")
+
+    with pytest.raises(SchemaPreparationError, match="historical database"):
+        prepare_database(_database_url(database_path))
+
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    assert list(tmp_path.glob("*.bak")) == []
 
 
 @pytest.mark.parametrize(
@@ -801,7 +1165,9 @@ def test_worker_progress_downgrade_rejects_process_facts_before_ddl(tmp_path: Pa
 
     assert failed.returncode != 0
     assert "process facts exist" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    # Revision 0006 has a schema-no-op downgrade, so the 0005 evidence guard
+    # still refuses before any Worker table or index DDL is attempted.
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
     with sqlite3.connect(database_path) as connection:
         assert connection.execute("SELECT COUNT(*) FROM worker_processes").fetchone()[0] == 1
         audit_indexes = {row[1] for row in connection.execute("PRAGMA index_list(audit_events)")}

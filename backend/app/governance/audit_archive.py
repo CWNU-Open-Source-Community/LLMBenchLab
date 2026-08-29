@@ -30,7 +30,12 @@ from app.governance.audit import (
 from app.models import AuditRetentionClass
 
 ARCHIVE_SCHEMA = "llmbenchlab-audit-archive-v1"
-ARCHIVE_V1_COMPATIBLE_ALEMBIC_HEADS = frozenset({"20260828_0005"})
+ARCHIVE_V1_COMPATIBLE_ALEMBIC_HEADS = frozenset(
+    {
+        "20260828_0005",
+        "20260829_0006",
+    }
+)
 ARCHIVE_V1_RETENTION_VALUES = ("operational", "security")
 ARCHIVE_EVENT_LIMIT = 10_000
 ARCHIVE_FILE_LIMIT_BYTES = 128 * 1024 * 1024

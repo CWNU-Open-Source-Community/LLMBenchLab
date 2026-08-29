@@ -43,6 +43,7 @@ PROTOCOL_VERSION = "llmbenchlab-protocol-v1"
 PRE_GOVERNANCE_REVISION = "20260827_0003"
 GOVERNANCE_REVISION = "20260827_0004"
 WORKER_PROGRESS_REVISION = "20260828_0005"
+DATABASE_HEAD_REVISION = "20260829_0006"
 TASK_MESSAGE_VERSION = "llmbenchlab-run-task-v1"
 TASK_STREAM = "llmbenchlab:runs:v1"
 TASK_GROUP = "llmbenchlab-workers-v1"
@@ -2367,7 +2368,7 @@ WHERE r.id = '{}';
                 "SELECT version_num FROM alembic_version;"
             ).stdout.strip()
             self.require(
-                application_revision == WORKER_PROGRESS_REVISION,
+                application_revision == DATABASE_HEAD_REVISION,
                 "failed populated downgrade changed the application database revision",
                 application_revision,
             )
@@ -2545,8 +2546,8 @@ WHERE r.id = '{}';
                     database=empty_database,
                 ).stdout.strip()
                 self.require(
-                    empty_head_before == WORKER_PROGRESS_REVISION,
-                    "empty PostgreSQL database did not upgrade to 0005",
+                    empty_head_before == DATABASE_HEAD_REVISION,
+                    "empty PostgreSQL database did not upgrade to current head",
                     empty_head_before,
                 )
                 downgrade_empty = self.compose(
@@ -2672,7 +2673,7 @@ WHERE r.id = '{}';
                     database=empty_database,
                 ).stdout.strip()
                 self.require(
-                    empty_final_head == WORKER_PROGRESS_REVISION,
+                    empty_final_head == DATABASE_HEAD_REVISION,
                     "empty PostgreSQL database did not return to migration head",
                     empty_final_head,
                 )

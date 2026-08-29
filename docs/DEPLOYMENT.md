@@ -325,6 +325,8 @@ Redis 开启 AOF (`appendfsync everysec`) 只改善通知持久性，不是备�
 - `20260825_0002`：attempt、租约、心跳、backoff、queue audit 与 dead-letter 字段/约束/索引。
 - `20260827_0003`：Model credential source、AES-GCM `model_credentials` 与 Web write-only Key。
 - `20260827_0004`：版本化治理 policy、四层 scope/minute counter、question execution、Provider attempt ledger、typed audit、Run fairness/backpressure 字段和 Response Provider metadata。
+- `20260828_0005`：Worker progress facts 与 audit retention/exporter 有界扫描索引。
+- `20260829_0006`：不改变逻辑 schema 的兼容修复；仅为早期 `0004` 历史变体补齐三个 canonical governance 索引。
 
 本地 SQLite 更新：
 
@@ -332,7 +334,7 @@ Redis 开启 AOF (`appendfsync everysec`) 只改善通知持久性，不是备�
 make migrate
 ```
 
-命令先执行 `app.db.prepare_migrations`，再 `alembic upgrade head`。受支持的未版本化 SQLite 会在严格结构/integrity/FK 检查和一致性备份后 stamp；未知 drift 在写 revision 前拒绝。普通 API/Worker 启动只检查 head，不运行 `create_all`、preflight 或 upgrade。
+命令先执行 `app.db.prepare_migrations`，再 `alembic upgrade head`。受支持的未版本化 SQLite 会在严格结构/integrity/FK 检查和一致性备份后 stamp；已知早期 `0004/0005` 变体只有在 revision fingerprint 为 canonical，或仅缺这三个已知索引的非空子集且最多一条 active policy 时，才会备份并交给 `0006` 修复，因此修复 DDL 中断后可安全重入。新近成为 historical 的 PostgreSQL `0005` 同样先做 metadata drift 校验。未知 drift 在写 revision 或 repair DDL 前拒绝。普通 API/Worker 启动只检查 head，不运行 `create_all`、preflight 或 upgrade。
 
 Compose 中只有一次性 `migrate` 服务执行：
 
@@ -342,7 +344,7 @@ python -m app.db.prepare_migrations && alembic upgrade head && alembic check
 
 `api` 与 `worker` 必须等待 migrate exit 0，然后仅执行 head check。不要把 Alembic 命令加回 API/Worker entrypoint，也不要同时运行多个 migration owner。
 
-`0005 -> 0004` 在 `worker_processes` 有任意 generation fact 时于第一条 DDL 前拒绝；`0004 -> 0003` 在任何 policy/scope/bucket/question-execution/ledger/audit 行或新 Run/Response 证据存在时同样拒绝。正常使用后的数据库不能把它们当普通代码回滚。`0003 -> 0002` 只要 `model_credentials` 存在任意行也会拒绝，避免静默丢失 Provider Key。`0002 -> 0001` 在发现 `pending` 或 `running` Run 时拒绝；它会删除可靠性元数据但保留核心实体与协议证据。完整 0005/0004 回滚流程见 [OPERATIONS.md](OPERATIONS.md)；schema downgrade 不是 PostgreSQL→SQLite 反向同步，也不恢复 Phase 1 进程内 Runner。
+`0006 -> 0005` 是 no-op downgrade，因为三个索引本来就属于 canonical `0004`；`0005 -> 0004` 在 `worker_processes` 有任意 generation fact 时于第一条 DDL 前拒绝；`0004 -> 0003` 在任何 policy/scope/bucket/question-execution/ledger/audit 行或新 Run/Response 证据存在时同样拒绝。正常使用后的数据库不能把它们当普通代码回滚。`0003 -> 0002` 只要 `model_credentials` 存在任意行也会拒绝，避免静默丢失 Provider Key。`0002 -> 0001` 在发现 `pending` 或 `running` Run 时拒绝；它会删除可靠性元数据但保留核心实体与协议证据。完整 0006/0005/0004 回滚流程见 [OPERATIONS.md](OPERATIONS.md)；schema downgrade 不是 PostgreSQL→SQLite 反向同步，也不恢复 Phase 1 进程内 Runner。
 
 ### 5.3 备份与恢复证据边界
 

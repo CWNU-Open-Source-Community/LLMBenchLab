@@ -3,10 +3,10 @@
 - Owner: Codex
 - Status: in_progress
 - Created: 2026-08-28
-- Updated: 2026-08-28
+- Updated: 2026-08-30
 - Related phase: [Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
 - Worklog: [2026-08-28 工作日志](../worklogs/2026-08-28-phase-2-recovery-operations.md)
-- ADRs: [ADR-0005](../decisions/ADR-0005-durable-task-execution.md)、[ADR-0007](../decisions/ADR-0007-web-provider-credentials.md)、[ADR-0009](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0015](../decisions/ADR-0015-observability-worker-progress-audit-retention.md)、[ADR-0016](../decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)
+- ADRs: [ADR-0005](../decisions/ADR-0005-durable-task-execution.md)、[ADR-0007](../decisions/ADR-0007-web-provider-credentials.md)、[ADR-0009](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0015](../decisions/ADR-0015-observability-worker-progress-audit-retention.md)、[ADR-0016](../decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、[ADR-0017](../decisions/ADR-0017-schema-equivalent-governance-index-repair.md)
 
 ## Context
 

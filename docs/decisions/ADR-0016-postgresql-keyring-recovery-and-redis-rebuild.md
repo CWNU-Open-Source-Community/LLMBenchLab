@@ -5,6 +5,7 @@
 - **Deciders**: LLMBenchLab maintainers
 - **Scope**: Phase 2 P2-07 备份/恢复验证、Redis rebuild、告警响应与故障矩阵
 - **Amends**: [ADR-0005](ADR-0005-durable-task-execution.md) 的恢复运维边界、[ADR-0007](ADR-0007-web-provider-credentials.md) 的数据库外 keyring 备份边界，以及 [ADR-0015](ADR-0015-observability-worker-progress-audit-retention.md) 的告警与 archive 后续演练
+- **Amended by**: [ADR-0017](ADR-0017-schema-equivalent-governance-index-repair.md) 将尚未实施的 recovery-manifest-v1 exact head 显式更新为 schema-equivalent `20260829_0006`
 - **Preserves**: PostgreSQL 唯一任务事实来源、Redis 非权威通知、write-only Provider Key、`llmbenchlab-protocol-v1`、Mock-only 自动化和可信本地运维边界
 
 ## Context
@@ -38,7 +39,7 @@ Phase 2 已交付 PostgreSQL 任务/治理事实、Redis Streams 通知、独立
 - 创建备份前停止 admission、API、Worker、CLI mutation 和所有 application/audit writer；确认 Worker 已 graceful stop 或进入可解释 stale 状态。数据库健康探针可以继续只读连接，但任何未知 writer 都使备份集不合格。
 - `pg_dump` 与 source manifest snapshot 必须来自同一停写窗口。恢复后的 13 表摘要与 manifest 不一致即证明期间发生漂移或 artifact 不匹配，整组 fail closed。
 - 目标必须由操作者预先创建且没有任何用户 schema/table/Alembic row。先运行只读 empty-target 检查；目标非空时拒绝，绝不由工具清空。
-- 恢复后数据库必须已经精确位于 Alembic `20260828_0005`。禁止先升级旧 dump 再把它报告为原备份恢复成功；若未来支持新 head，必须在新 ADR/manifest schema 中显式声明兼容。
+- 按 [ADR-0017](ADR-0017-schema-equivalent-governance-index-repair.md)，恢复后数据库必须已经精确位于 Alembic `20260829_0006`。该 revision 与 `0005` 逻辑 schema 等价，只修复早期 `0004` 三索引缺口；P2-07 尚未实施，因此 recovery-manifest-v1 在实现前直接固定当前 head。禁止先升级旧 dump 再把它报告为原备份恢复成功；若未来支持新 head，必须在新 ADR/manifest schema 中显式声明兼容。
 - 13 张核心表固定为：
 
   ```text
@@ -70,8 +71,8 @@ Manifest schema 固定为 `llmbenchlab-recovery-manifest-v1`，UTF-8、canonical
 {
   "schema": "llmbenchlab-recovery-manifest-v1",
   "backup_set_id": "00000000-0000-4000-8000-000000000000",
-  "created_at_utc": "2026-08-28T00:00:00.000000Z",
-  "source_alembic_head": "20260828_0005",
+  "created_at_utc": "2026-08-30T00:00:00.000000Z",
+  "source_alembic_head": "20260829_0006",
   "source_git_commit": null,
   "database_dump": {
     "format": "postgresql-custom",
