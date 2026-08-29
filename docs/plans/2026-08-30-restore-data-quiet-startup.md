@@ -1,7 +1,7 @@
 # 恢复本地数据并静默一键启动执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed
 - Created: 2026-08-30
 - Updated: 2026-08-30
 - Related phase: [Phase 2](../phases/PHASE-2-RELIABILITY.md)
@@ -52,7 +52,7 @@
 3. [completed] 实现静默 `make dev` 并增加回归测试。
    - Files/modules: `scripts/dev.sh`、`backend/tests/test_dev_script.py`
    - Validation: 正常启动只输出简洁摘要，三个日志文件接收详细输出，失败状态和清理行为有自动化覆盖。
-4. [in_progress] 运行定向与全量验证，更新强制文档并完成审查、提交、push 与精确 SHA CI。
+4. [completed] 运行定向与全量验证，更新强制文档并完成审查、提交、push 与精确 SHA CI。
    - Files/modules: README、部署/运维/安全/测试、CHANGELOG、PROJECT_STATUS、PHASE-2、NEXT_TASK、本计划与工作日志
    - Validation: 本地验证通过、diff/秘密扫描通过、远程必需 jobs 对精确 SHA 全绿。
 
@@ -74,7 +74,7 @@
 | 恢复后数据一致 | SQLite count/digest、`alembic current/check` | 业务数据与源一致，revision 为 head | 通过：`1/1/15/1/15`，共有列 digest 一致，quick/FK/head/check 全绿 |
 | 静默启动行为 | 定向 pytest + 有界 `make dev` 探针 | 控制台简洁、详细日志分流、服务可用 | 通过：`3 passed`；真实启动期间仅两行摘要，API/Web/恢复数据可读，详细日志 `0600` |
 | 全量质量门禁 | `make test`、`make lint`、frontend build、`make smoke`、Compose config | 全部适用项通过 | 通过：backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config 全绿，build 保留既有 chunk warning |
-| 远程门禁 | push 后 GitHub Actions | 精确提交 4/4 必需 job 成功 | 待执行 |
+| 远程门禁 | push 后 GitHub Actions | 精确提交 4/4 必需 job 成功 | 通过：`5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 的 [run 33265171953](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33265171953) 4/4 成功 |
 
 ## Rollback
 
@@ -90,9 +90,9 @@
 ## Completion evidence
 
 - Changed files: `scripts/dev.sh`、`backend/tests/test_dev_script.py`、README、Deployment/Operations/Security/Testing、CHANGELOG、PROJECT_STATUS、Phase 2、NEXT_TASK、本计划与工作日志；另有 Git 忽略的默认 SQLite 恢复和安全备份。
-- Commands run: SQLite 只读审计/backup/staging migration/digest/head 检查；启动器定向 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/Compose config；真实有界 `make dev` 与 API/Web 探针。
+- Commands run: SQLite 只读审计/backup/staging migration/digest/head 检查；启动器定向 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/Compose config；真实有界 `make dev` 与 API/Web 探针；commit/push 和精确 SHA CI 4/4。
 - Acceptance evidence: 默认库 `1/1/15/1/15` 且共有列 digest 与源一致；quick/FK/head/check 通过；真实运行控制台仅两行摘要，日志分流为 `0600`，API/Web 可读恢复数据。
-- Not run: 本地真实 PostgreSQL/Redis integration、capacity/SLO/Phase 2 acceptance；本任务不改变其语义，远程必需 jobs 尚待提交后运行。
+- Not run: 本机 capacity/SLO/完整 Phase 2 acceptance；本任务不改变其语义。远程 CI 已运行真实 PostgreSQL/Redis integration 和完整 Compose reliability acceptance 并成功。
 - Known issues: 既有 Python 3.14 依赖 warning 和 Vite 662.39 kB chunk warning；2026-08-28 大备份逻辑为空但继续保留。
 
 ## Decision and discovery log
@@ -104,3 +104,4 @@
 | 2026-08-30 | decision | 选择 `backend/data/llmbenchlab.db.pre-alembic-20260827T073137431634Z.bak`：它是最新、revision 最高且逻辑非空的候选，SHA-256 为 `7e046c1e7cd4ec39c5fe6f57b34f130670e0d249a70bf052a84a23e085a59a53`；与两个更早非空备份在所有共有列上的内容摘要一致。 | 只在该文件的一致性副本上迁移；源文件保持只读不变。 |
 | 2026-08-30 | discovery | staging 从 `0002` 顺序升级到 `0006` 后，五张原有业务表共有列摘要保持 `d1b3b74b7726f9e7903fbd3f445ad258d5f5aa4b885c976582f2d53e1d30302f`；完整性、外键、head、索引和 active-state 检查通过。 | 允许替换默认库。 |
 | 2026-08-30 | action | 当前空库先通过 SQLite backup API 保存为 `backend/data/llmbenchlab.db.pre-original-data-restore-20260829T170121Z.bak`，SHA-256 `ec2ef8b2d5c9a338ce3e5f94c68a3c5742d288a798df2b7a6096960a48610c90`；随后用已验证 staging 同目录替换默认库。 | 空库及其 3 条 Worker process facts 可回滚；原恢复源未修改。 |
+| 2026-08-30 | validation | 实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 已 push；GitHub Actions run `33265171953` 的 frontend、backend、真实 PostgreSQL/Redis integration 和完整 Compose reliability 四个必需 job 全部成功。 | 远程门禁完成，任务可收尾。 |

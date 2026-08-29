@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2](../phases/PHASE-2-RELIABILITY.md)
 - 关联计划：[恢复本地数据并静默一键启动](../plans/2026-08-30-restore-data-quiet-startup.md)
 - 关联 ADR：无；不改变 schema、协议或应用日志合同
-- 最终状态：in_progress
+- 最终状态：completed
 
 ## 初始仓库状态
 
@@ -42,7 +42,7 @@
 - [x] `make dev` 正常运行时不持续刷 API/Worker/Vite 详细日志，并清楚显示服务地址和日志位置。
 - [x] 任一子进程退出仍会停止其余进程；失败时返回非零并指向详细日志。
 - [x] 定向/全量测试、lint、build、离线 smoke 和适用部署检查有真实结果，文档与项目状态同步。
-- [ ] 阶段提交 push 到工作分支，对应精确 SHA 的 GitHub Actions 必需 jobs 全部成功。
+- [x] 阶段提交 push 到工作分支，对应精确 SHA 的 GitHub Actions 必需 jobs 全部成功。
 
 ## 假设
 
@@ -63,7 +63,7 @@
 1. [completed] 只读核验候选备份、当前进程、keyring 边界和启动脚本。
 2. [completed] 停止服务、准备/迁移/验真副本并可回滚替换默认库。
 3. [completed] 实现静默启动与回归测试。
-4. [in_progress] 运行完整验证、更新文档、审查、提交、push 并等待精确 SHA CI。
+4. [completed] 运行完整验证、更新文档、审查、提交、push 并等待精确 SHA CI。
 
 ## 实际修改
 
@@ -94,6 +94,7 @@
 | 01:05 CST | validation | 首次从 `backend/` 运行定向组合命令时误写 `scripts/dev.sh`，`bash -n`/ShellCheck 因路径不存在失败；该命令未启用 `set -e`，后续 Ruff/pytest 仍通过。随后用 `set -euo pipefail` 和 `../scripts/dev.sh` 完整重跑，全项通过。 | 最终证据只采用纠正后的完整命令，同时保留首次操作偏差。 |
 | 01:06 CST | validation | 真实 `make dev` 控制台只出现两行摘要；live/health/ready、Web 及 Model/Benchmark/Run 读取通过，重复请求后控制台无新增输出。发送 Ctrl-C 后 Make 报预期中断 130，所有服务/端口退出。 | 用户可正常启动且不再刷屏；详细日志仍可追查。 |
 | 01:11 CST | review | 独立终审为 0 Blocker/High/Medium；指出 PROJECT_STATUS 仍写“等待完整测试”的 Low 文档残留，已改为只等待提交/push/CI。可信本地日志目录的同用户 symlink 边界为非阻断 Low，默认目录 `0700` 且威胁模型不承诺防同权限攻击者，本次不扩成安全文件安装器。 | 关闭文档不一致，保持最小范围。 |
+| 01:19 CST | validation | 实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 已普通 push；GitHub Actions run `33265171953` 的 frontend、backend、真实 PostgreSQL/Redis integration 和完整 Compose reliability 四个必需 job 全部成功。 | 精确实现 SHA 远程门禁完成。 |
 
 ## 实际运行命令
 
@@ -118,6 +119,8 @@
 | `docker compose config --quiet` | 部署配置语法 | 0 | 通过，未启动容器 |
 | `alembic current && alembic check` + 默认库 quick/FK/count | 恢复后最终 schema/data 复核 | 0 | `0006 (head)`、无新操作、quick ok、FK 0、`1/1/15/1/15` |
 | 真实启动后的共有列 digest/Worker process 核验 | 确认启动探针未改历史业务数据 | 0 | digest 仍为 `d1b3b74b…0302f`；新增 1 条正常 stopped Worker process，active 为 0 |
+| `git commit` + `git push origin codex/complete-evaluation-workflow` | 提交并推送实现阶段 | 0 | commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 已推送 |
+| `gh run watch 33265171953 --exit-status` | 等待精确实现 SHA 远程门禁 | 0 | 四个必需 job 全部 success；仅现有 GitHub Actions Node runtime deprecation 注解 |
 
 ## 测试结果
 
@@ -125,14 +128,15 @@
 - 失败：最终验证 0；曾有一次只读 reservation 列名错误和一次检查路径错误，均已记录并完整纠正重跑
 - Lint/typecheck/build：Ruff/format 154 files、ESLint、TypeScript、Vite build 全部通过；保留既有 662.39 kB chunk warning
 - Smoke/Docker：离线 Mock smoke `1 passed, 7 deselected`；Compose config 通过且未启动容器
+- 远程 CI：frontend、backend、真实 PostgreSQL/Redis integration、完整 Compose reliability 4/4 success
 
 ## 未运行验证
 
-- 真实 PostgreSQL/Redis integration、capacity、SLO 和 Phase 2 acceptance：未运行；本次只修改本地启动器和个人 SQLite 数据，不改变其生产/并发语义，远程 CI 仍会执行仓库必需 integration/full-stack jobs。
+- 本机 capacity、SLO 和完整 Phase 2 acceptance：未运行；本次不改变其语义。远程 CI 已执行真实 PostgreSQL/Redis integration 与完整 Compose reliability acceptance 并成功。
 
 ## 未完成项
 
-- 数据库恢复、代码、文档和本地全量验证已完成；仍需终审、提交/push 与精确 SHA CI。
+- 无；约定范围、实现/文档、本地验证、实现提交/push 与精确 SHA CI 均已完成。
 
 ## 已知问题与限制
 
@@ -140,20 +144,20 @@
 
 ## 安全检查
 
-- 真实密钥扫描：未暂存 diff 的高置信模式扫描和 `git diff --check` 已通过；提交前仍复核 staged diff；核验未读取或输出 keyring 内容、credential envelope 或 Provider Key
+- 真实密钥扫描：未暂存与 staged diff 的高置信模式扫描、`git diff --check` 均通过；核验未读取或输出 keyring 内容、credential envelope 或 Provider Key
 - 真实 API 调用：否
 - 日志/API 脱敏：应用日志合同不变；组合启动详细输出保留到 Git 忽略目录，目录/文件收紧为 `0700/0600`
 - 危险 Git 操作（force push/reset 等）：无
-- 阶段 push：待执行
-- 远程 CI：待执行
+- 阶段 push：`origin/codex/complete-evaluation-workflow`，实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b`，成功
+- 远程 CI：精确实现 SHA 的 [run 33265171953](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33265171953) 4/4 必需 job 成功
 - 遗留安全风险：数据库与 keyring 必须配对恢复；若存在 stored credential 且 keyring 不匹配，应保持 fail closed
 
 ## 结果与下一步
 
-进行中；数据、实现、文档和本地门禁已经完成，下一步是终审、staged diff/秘密复核、commit/push 和精确 SHA CI。
+任务完成：默认本地 SQLite 已恢复原 Demo 数据，组合启动控制台保持简洁且详细日志可追查，全部本地和远程门禁通过。[NEXT_TASK.md](../NEXT_TASK.md) 仍指向原定 P2-07 最小 verifier，本维护不改变路线图。
 
 ## 最终 Git 状态
 
 ```text
-任务进行中
+## codex/complete-evaluation-workflow...origin/codex/complete-evaluation-workflow
 ```

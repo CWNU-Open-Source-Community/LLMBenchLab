@@ -115,7 +115,7 @@
 | P2-06 staged 技术/安全终审 | structured-extra High 与 Worker `__main__` logger Medium 已修复；76-file implementation index 为 0 Blocker/High/Medium；hydration/import integrity 目标集 `67 passed` | 已进入 clean implementation commit `9a20676…` |
 | P2-06 evidence-doc remote gate | [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) | 精确 `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`，四个必需 job 全 success；P2-06 仓库级闭环完成 |
 | 2026-08-29 DB compatibility repair | migration `52 passed`；完整 backend `927 passed, 33 skipped`、frontend `38 passed`；lint/smoke/config、真实失败备份副本与当前库 startup/check 全绿 | `8fb51b6…` 的 exact-SHA run `33263405214` 4/4；不改变 P2-07 planned 状态 |
-| 2026-08-30 本地恢复/静默启动维护 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、SQLite digest/quick/FK/head、真实 API/Web 读取通过 | 个人本地 Demo 数据恢复和开发 UX；尚待精确 SHA CI，且不是 P2-07 恢复认证 |
+| 2026-08-30 本地恢复/静默启动维护 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、SQLite digest/quick/FK/head、真实 API/Web 读取通过 | 个人本地 Demo 数据恢复和开发 UX；`5075bdb…` 的 run `33265171953` 4/4 成功，且不是 P2-07 恢复认证 |
 
 所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
 
