@@ -26,7 +26,7 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 同日又把 `artifacts/benchmarks/` 中已存在的 GPQA-Diamond 与两种 MMLU-Pro profile 通过正式导入 API 加载到默认个人 SQLite，当前为 `4` 个 Benchmark、`24,277` 题，原 Model/Run/Response 保持且没有 Provider 调用。记录 commit `0163b67c00eb59ae59db5f3adb679ad85c799142` 已 push，其精确 SHA run `33266167547` 4/4 成功；该本地数据操作不提交第三方题目、不改变产品实现或路线图，P2-07 的下一任务仍保持不变。
 
-当前必须先完成 [observational Token overdraw 修复](plans/2026-08-30-fix-observational-token-overdraw.md)。ADR-0018 已把非显式 input 估算与 hard reservation 分离，并把 data-only head 定为 `20260830_0007`；该 revision 只重算 `governance_scopes.overdrawn`，upgrade/downgrade 均拒绝 active reservation，历史 ledger/actual/Response/Run 终态保持。本地完整验证和当前个人 SQLite 迁移已通过；此维护仍为 `in_progress`，commit/push 与 exact-SHA CI 待完成。在其仓库级闭环前不要启动 P2-07 实施。
+[Observational Token overdraw 修复](plans/2026-08-30-fix-observational-token-overdraw.md) 已完成。ADR-0018 已把非显式 input 估算与 hard reservation 分离，并把 data-only head 定为 `20260830_0007`；该 revision 只重算 `governance_scopes.overdrawn`，upgrade/downgrade 均拒绝 active reservation，历史 ledger/actual/Response/Run 终态保持。本地完整验证、当前个人 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与 [exact-SHA CI run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 均通过。P2-07 前置阻碍已解除，但本次任务到此停止。
 
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；随后的兼容修复已在自动备份后将当时重建库前进到 `0006` 并通过 startup/check。
 

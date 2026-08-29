@@ -68,7 +68,7 @@
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；`9a20676…` 增加 generation 级 DB-time scan/claim/lease-heartbeat/progress 与 stale 聚合，dependency probe 仍只表示 capability |
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
 | P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
-| P2-05 observational overdraw 维护 | `in_progress` | ADR-0018 与 data-only `0007` 已进入工作树；migration 只重算 overdrawn 并保留 ledger/actual/Response/Run，active reservation 时拒绝；本地完整验证和当前库迁移已完成，commit/push/exact-SHA CI 待完成 |
+| P2-05 observational overdraw 维护 | `completed` | ADR-0018 与 data-only `0007` 只重算 overdrawn 并保留 ledger/actual/Response/Run，active reservation 时拒绝；本地完整验证、当前库迁移和最终 SHA `cb00924…` 的 CI 4/4 均通过 |
 | P2-06 可观测性 | `completed` | 固定 exporter/八规则、canonical retention CLI、Worker DB-time progress、`0005` / 13 表 importer、公共 retained-row 校验与全日志源治理已进入 clean commit `9a20676…`；clean capacity/9/9 acceptance、实现 CI 与 evidence-doc commit `ec29596…` 的 CI 4/4 均通过 |
 | P2-07 验证与运维 | `planned` | [ADR-0016](../decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、[独立计划](../plans/2026-08-28-phase-2-recovery-operations.md) 与 [工作日志](../worklogs/2026-08-28-phase-2-recovery-operations.md) 已建立；功能尚未实现，后续从最小只读 verifier 开始 |
 
@@ -76,7 +76,7 @@
 
 2026-08-30 的个人本地维护已从最新非空 SQLite 一致性备份恢复 1 个 Mock Model、1 个 Demo Benchmark、15 Questions、1 个 completed Run 和 15 Responses，并让组合开发启动器把三服务详细输出分流到私有 Git 忽略日志。该操作有 staging 迁移、共有列摘要、完整性/外键/head、真实本地启动与 API/Web 读取证据，但不包含 PostgreSQL/keyring、Redis 或告警恢复认证，不能计作 P2-07 实施或改变本阶段状态。
 
-同日的 OpenCode Go `hy3` Run 又暴露 observational input estimate 被错误写成 hard reservation：7 个 attempt 全部 actual settlement，第七次 estimate/actual 为 59/75，而所有 hard policy/Run override 均为 `null`，四层 scope 却被标记 overdrawn。ADR-0018/`0007` 修正这一派生语义并把 UI 文案改为“实际用量曾被判定超过预留”；旧 ledger、actual usage、7 条 Response 和 failed/exhausted Run 终态不改写。本地完整门禁和当前 SQLite 迁移已通过，但 commit/push/exact-SHA CI 尚未完成，因此不能计为仓库级闭环。
+同日的 OpenCode Go `hy3` Run 又暴露 observational input estimate 被错误写成 hard reservation：7 个 attempt 全部 actual settlement，第七次 estimate/actual 为 59/75，而所有 hard policy/Run override 均为 `null`，四层 scope 却被标记 overdrawn。ADR-0018/`0007` 修正这一派生语义并把 UI 文案改为“实际用量曾被判定超过预留”；旧 ledger、actual usage、7 条 Response 和 failed/exhausted Run 终态不改写。本地完整门禁、当前 SQLite 迁移、最终 SHA `cb00924…` 的 real-Compose 9/9 与精确 SHA CI 4/4 均通过，仓库级闭环完成。
 
 ## 验收标准与当前结论
 
@@ -90,7 +90,7 @@
 - [x] **P2-01 完成**：clean SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 warm-up + 5 measured、23/23 SLO、逐轮 hard invariant/cleanup 与 `qualified` 容量模型；aggregate SHA-256 `a76d167b…d0d9`。证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 已普通 push，[GitHub Actions run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 对该精确 SHA 4/4 成功。结论只适用于固定 Mock 单机 profile。
 - [x] **P2-06 仓库级闭环完成**：clean implementation commit `9a20676dcf545040782f04c166205d0043345753` 已 push，clean capacity/9/9 acceptance 与 [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 通过；evidence-doc commit `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 也精确 4/4 通过。
 - [x] **0004 历史索引兼容修复完成**：schema-equivalent `20260829_0006`、仅允许三个已知索引缺失子集的可重入 SQLite preflight、PostgreSQL `0005` metadata 白名单控制流、重复 active/额外 drift 拒绝、真实失败备份副本升级及本地门禁均通过；实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 的 [run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 4/4 成功。historical PG missing-index 分支仍仅有 Mock 回归，标准 CI 真实 PG 只覆盖 fresh canonical 分支。
-- [ ] **Observational overdraw 修复尚未闭环**：目标行为与 `0007` migration 已通过本地完整测试、双方言 migration 和当前个人 SQLite 验真；commit/push 与 exact-SHA CI 证据待填。
+- [x] **Observational overdraw 修复完成**：目标行为与 `0007` migration 已通过本地完整测试、双方言 migration 和当前个人 SQLite 验真；最终修正 SHA [`cb00924ea3ba3d01ce5bc322b7eabdae1345baf3`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/cb00924ea3ba3d01ce5bc322b7eabdae1345baf3) 的 [run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 成功。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
 ## 已实际运行的中间证据
@@ -122,7 +122,7 @@
 | P2-06 evidence-doc remote gate | [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) | 精确 `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`，四个必需 job 全 success；P2-06 仓库级闭环完成 |
 | 2026-08-29 DB compatibility repair | migration `52 passed`；完整 backend `927 passed, 33 skipped`、frontend `38 passed`；lint/smoke/config、真实失败备份副本与当前库 startup/check 全绿 | `8fb51b6…` 的 exact-SHA run `33263405214` 4/4；不改变 P2-07 planned 状态 |
 | 2026-08-30 本地恢复/静默启动维护 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、SQLite digest/quick/FK/head、真实 API/Web 读取通过 | 个人本地 Demo 数据恢复和开发 UX；`5075bdb…` 的 run `33265171953` 4/4 成功，且不是 P2-07 恢复认证 |
-| 2026-08-30 observational overdraw 修复 | backend `946 passed, 33 skipped`；真实 PG+Redis integration `33 passed`；双方言 migration 往返/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、Compose config 与当前库迁移验真通过 | 当前 SQLite head `0007`，scope `4→0`，7 Responses/7 ledger/407 input/599 output、13 表行数、quick/FK 保持；无真实 Provider；远程门禁待完成 |
+| 2026-08-30 observational overdraw 修复 | backend `946 passed, 33 skipped`；真实 PG+Redis integration `33 passed`；双方言 migration 往返/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、本地 real-Compose `9/9`、Compose config 与当前库迁移验真通过 | 当前 SQLite head `0007`，scope `4→0`，7 Responses/7 ledger/407 input/599 output、13 表行数、quick/FK 保持；无真实 Provider；`cb00924…` run `33271095910` 4/4 成功 |
 
 所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
 
@@ -149,8 +149,8 @@
 
 ## 交付物与下一任务
 
-已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 P2-01 v2 多轮资格。治理 SHA `665244e…` 已通过真实 integration/capacity/acceptance；SLO SHA `b6a35fe…` 已通过 23/23 本地资格与远程 4/4 CI。P2-06 implementation SHA `9a20676…` 与 evidence-doc SHA `ec29596…` 已分别通过精确 4/4 CI，仓库级闭环完成。ADR-0018 observational overdraw 维护的本地门禁与当前库迁移已完成，当前只剩远程闭环；之后才按 [NEXT_TASK.md](../NEXT_TASK.md) 开始 P2-07 最小只读 verifier。
+已交付候选包括 `0004`、governance/audit 模型/repository、Adapter/Runner/Worker/API/UI、enhanced capacity/PG tests，以及 P2-01 v2 多轮资格。治理 SHA `665244e…` 已通过真实 integration/capacity/acceptance；SLO SHA `b6a35fe…` 已通过 23/23 本地资格与远程 4/4 CI。P2-06 implementation SHA `9a20676…` 与 evidence-doc SHA `ec29596…` 已分别通过精确 4/4 CI，仓库级闭环完成。ADR-0018 observational overdraw 维护也已在最终 SHA `cb00924…` 完成本地/当前库/远程闭环；后续才按 [NEXT_TASK.md](../NEXT_TASK.md) 开始 P2-07 最小只读 verifier。
 
 ## 状态
 
-`in_progress`。P2-01 与 P2-06 已完成，P2-05 主切片已交付；observational overdraw 维护已完成本地验证，但尚无 commit/push/exact-SHA CI。P2-07 状态为 `planned`，功能尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 或当前维护标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+`in_progress`。P2-01、P2-06 与 observational overdraw 维护已完成，P2-05 主切片已交付。P2-07 状态为 `planned`，功能尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
