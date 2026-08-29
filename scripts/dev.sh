@@ -16,20 +16,31 @@ if [[ ! -d backend/.venv || ! -d frontend/node_modules ]]; then
   exit 1
 fi
 
-./scripts/bootstrap_credential_keyring.sh
+./scripts/bootstrap_credential_keyring.sh >/dev/null
 
 if [[ -f .env ]]; then
   set -a
   # shellcheck disable=SC1091
   source ./.env
   set +a
-else
-  echo "Notice: .env is absent; safe local defaults will be used. Run 'make setup' to create it."
 fi
 
 api_host="${API_HOST:-127.0.0.1}"
 api_port="${API_PORT:-8000}"
 frontend_host="${FRONTEND_HOST:-127.0.0.1}"
+dev_log_dir="${LLMBENCHLAB_DEV_LOG_DIR:-$project_root/artifacts/dev-logs}"
+mkdir -p "$dev_log_dir"
+chmod 700 "$dev_log_dir"
+
+api_log="$dev_log_dir/api.log"
+worker_log="$dev_log_dir/worker.log"
+frontend_log="$dev_log_dir/frontend.log"
+session_started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+for service_log in "$api_log" "$worker_log" "$frontend_log"; do
+  touch "$service_log"
+  chmod 600 "$service_log"
+  printf '\n=== LLMBenchLab dev session %s ===\n' "$session_started_at" >>"$service_log"
+done
 
 backend_pid=""
 worker_pid=""
@@ -56,47 +67,64 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT TERM
 
-echo "Starting API at http://${api_host}:${api_port}"
+printf 'Starting LLMBenchLab: Web http://%s:5173 | API http://%s:%s\n' \
+  "$frontend_host" "$api_host" "$api_port"
+printf 'Logs: API %s | Worker %s | frontend %s\n' \
+  "$api_log" "$worker_log" "$frontend_log"
 (
   cd backend
   exec uv run uvicorn app.main:app --host "$api_host" --port "$api_port" --reload
-) &
+) >>"$api_log" 2>&1 &
 backend_pid=$!
 
-echo "Starting independent Worker"
 (
   cd backend
   exec uv run python -m app.worker
-) &
+) >>"$worker_log" 2>&1 &
 worker_pid=$!
 
-echo "Starting web app at http://${frontend_host}:5173"
 (
   cd frontend
   exec npm run dev -- --host "$frontend_host"
-) &
+) >>"$frontend_log" 2>&1 &
 frontend_pid=$!
 
-status=0
+stopped_service=""
+stopped_pid=""
+stopped_log=""
 while true; do
   if ! kill -0 "$backend_pid" 2>/dev/null; then
-    wait "$backend_pid" || status=$?
+    stopped_service="API"
+    stopped_pid="$backend_pid"
+    stopped_log="$api_log"
     break
   fi
   if ! kill -0 "$worker_pid" 2>/dev/null; then
-    wait "$worker_pid" || status=$?
+    stopped_service="Worker"
+    stopped_pid="$worker_pid"
+    stopped_log="$worker_log"
     break
   fi
   if ! kill -0 "$frontend_pid" 2>/dev/null; then
-    wait "$frontend_pid" || status=$?
+    stopped_service="frontend"
+    stopped_pid="$frontend_pid"
+    stopped_log="$frontend_log"
     break
   fi
   sleep 1
 done
 
-if (( status == 0 )); then
-  echo "A development service stopped; shutting down the other service."
+if wait "$stopped_pid"; then
+  status=0
 else
-  echo "Error: a development service exited with status ${status}." >&2
+  status=$?
+fi
+
+if (( status == 0 )); then
+  printf '%s stopped with status 0; shutting down the other services. Log: %s\n' \
+    "$stopped_service" "$stopped_log"
+else
+  printf 'Error: %s exited with status %s. Log: %s\n' \
+    "$stopped_service" "$status" "$stopped_log" >&2
 fi
 exit "$status"

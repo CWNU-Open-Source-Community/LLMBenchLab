@@ -14,7 +14,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.constants import API_V1_PREFIX
-from app.core.logging import REQUEST_ID_HEADER, configure_logging, new_correlation_id, request_scope
+from app.core.logging import (
+    REQUEST_ID_HEADER,
+    configure_logging,
+    new_correlation_id,
+    normalize_request_method,
+    normalize_request_path,
+    request_scope,
+)
 from app.db.init_db import initialize_database
 from app.task_queue import create_run_queue
 
@@ -143,8 +150,8 @@ def create_app() -> FastAPI:
                     extra={
                         "event": "api_request_failed",
                         "request_id": request_id,
-                        "request_method": request.method,
-                        "request_path": route_template,
+                        "request_method": normalize_request_method(request.method),
+                        "request_path": normalize_request_path(route_template),
                         "duration_ms": round((monotonic() - started) * 1000, 3),
                         "error_code": f"api_error:{type(exc).__name__}",
                         "result": "internal_server_error",
@@ -168,8 +175,8 @@ def create_app() -> FastAPI:
                 extra={
                     "event": "api_request_completed",
                     "request_id": request_id,
-                    "request_method": request.method,
-                    "request_path": route_template,
+                    "request_method": normalize_request_method(request.method),
+                    "request_path": normalize_request_path(route_template),
                     "status_code": response.status_code,
                     "duration_ms": round((monotonic() - started) * 1000, 3),
                 },

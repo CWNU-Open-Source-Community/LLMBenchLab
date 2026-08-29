@@ -330,6 +330,7 @@ def test_formal_profile_is_one_fixed_switch_with_an_independent_schema() -> None
     harness = script.Phase2Capacity(_REPOSITORY_ROOT, args)
     try:
         assert harness.formal_slo_v2 is True
+        assert harness.env["LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES"] == "2"
         assert harness.evidence["schema_version"] == script.CAPACITY_EVIDENCE_SCHEMA_V2
         assert (
             harness.evidence["configuration"]["qualification_profile"]
@@ -399,6 +400,7 @@ def test_default_profile_retains_v1_schema_and_single_burst_identity() -> None:
     harness = script.Phase2Capacity(_REPOSITORY_ROOT, script.parse_arguments([]))
     try:
         assert harness.formal_slo_v2 is False
+        assert harness.env["LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES"] == "2"
         assert harness.evidence["schema_version"] == script.CAPACITY_EVIDENCE_SCHEMA_V1
         assert (
             harness.evidence["configuration"]["qualification_profile"]
@@ -452,6 +454,11 @@ def test_default_profile_retains_v1_schema_and_single_burst_identity() -> None:
     assert configurable.run_concurrency == 2
     assert configurable.lease_seconds == 32
     assert configurable.redis_operation_timeout_seconds == 1.1
+    configurable_harness = script.Phase2Capacity(_REPOSITORY_ROOT, configurable)
+    try:
+        assert configurable_harness.env["LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES"] == "3"
+    finally:
+        configurable_harness._credential_secret_dir.cleanup()
 
 
 def test_demo_producer_retains_slo_identity_fields() -> None:
@@ -1246,6 +1253,8 @@ def test_formal_run_all_appends_fixed_warmed_then_cold_bursts() -> None:
 def test_governance_reconciliation_sql_independently_rebuilds_both_projections() -> None:
     sql = script.GOVERNANCE_RECONCILIATION_SQL
 
+    assert "LEFT JOIN evaluation_runs AS run ON run.id = reservation.run_id" in sql
+    assert "input_reservation_is_explicit" in sql
     for scope_reference in (
         "reservation.global_scope_id",
         "reservation.provider_scope_id",
@@ -1957,14 +1966,26 @@ def test_capacity_harness_is_mock_only_sanitized_and_make_addressable() -> None:
     }
 
 
-def test_acceptance_requires_populated_0004_refusal_and_empty_round_trip() -> None:
+def test_acceptance_requires_both_populated_guards_and_empty_round_trips() -> None:
     source = _ACCEPTANCE_SCRIPT.read_text(encoding="utf-8")
 
-    assert "postgres_populated_0004_downgrade_refusal_and_empty_round_trip" in source
+    assert "postgres_populated_0005_and_0004_downgrade_guards_with_empty_round_trips" in source
+    assert "Cannot downgrade Worker progress schema" in source
     assert "Cannot downgrade governance schema" in source
+    assert "worker_processes" in source
+    assert 'PRE_GOVERNANCE_REVISION = "20260827_0003"' in source
+    assert 'GOVERNANCE_REVISION = "20260827_0004"' in source
+    assert 'WORKER_PROGRESS_REVISION = "20260828_0005"' in source
+    assert 'DATABASE_HEAD_REVISION = "20260830_0007"' in source
+    assert "application_worker_progress_0005_to_0004_guard" in source
+    assert "isolated_governance_0004_to_0003_guard" in source
+    assert "worker_progress_0005_to_0004_round_trip" in source
+    assert "governance_0004_to_0003_round_trip" in source
     assert "p2roundtrip_" in source
+    assert "p2governance_" in source
     assert "DATABASE_URL=" in source and "empty_database_url" in source
-    assert 'DROP DATABASE IF EXISTS "{}" WITH (FORCE)' in source
+    assert source.count("DROP DATABASE IF EXISTS") >= 2
+    assert source.count("WITH (FORCE)") >= 2
 
 
 def test_acceptance_command_failure_redacts_database_credentials() -> None:

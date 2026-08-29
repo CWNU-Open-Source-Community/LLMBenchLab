@@ -44,10 +44,12 @@ async def test_real_redis_pending_delivery_is_autoclaimed_and_acked() -> None:
         version = tuple(int(part) for part in server["redis_version"].split(".")[:2])
         assert version >= (6, 2)
 
-        await queue.publish("run-real-redis", correlation_id="correlation-real-redis")
+        run_id = str(uuid4())
+        correlation_id = str(uuid4())
+        await queue.publish(run_id, correlation_id=correlation_id)
         await queue.ensure_consumer_group()
         first = await queue.read_new(consumer="worker-a", block_milliseconds=100)
-        assert first is not None and first.run_id == "run-real-redis"
+        assert first is not None and first.run_id == run_id
 
         cursor, claimed = await queue.claim_stale(
             consumer="worker-b",
@@ -179,7 +181,7 @@ async def test_real_worker_commits_protocol_evidence_before_ack_and_duplicate_is
     )
     assert created.status_code == 202
     run_id = created.json()["id"]
-    await queue.publish(run_id, correlation_id="queue-first-delivery")
+    await queue.publish(run_id, correlation_id=str(uuid4()))
     settings = get_settings()
     repository = _QueueFirstRepository(
         SessionLocal,
@@ -207,7 +209,7 @@ async def test_real_worker_commits_protocol_evidence_before_ack_and_duplicate_is
         assert float(durable["estimated_cost"] or 0) == 0
         assert (await raw.xpending(stream, group))["pending"] == 0
 
-        await ambiguous_queue.publish(run_id, correlation_id="duplicate-after-unknown-ack")
+        await ambiguous_queue.publish(run_id, correlation_id=str(uuid4()))
         assert await worker.run_once() is True
 
         assert _run_snapshot(run_id) == durable

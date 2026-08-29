@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     worker_retry_backoff_base_seconds: float = Field(default=1.0, ge=0.0, le=3600.0)
     worker_retry_backoff_cap_seconds: float = Field(default=30.0, ge=0.0, le=86_400.0)
     worker_shutdown_grace_seconds: float = Field(default=30.0, ge=0.0, le=3600.0)
+    worker_progress_flush_seconds: float = Field(default=5.0, ge=1.0, le=300.0)
+    worker_progress_stale_seconds: float = Field(default=60.0, ge=3.0, le=86_400.0)
+    worker_expected_processes: int = Field(default=1, ge=0, le=1000)
+    worker_recovery_alert_seconds: float = Field(default=60.0, gt=0.0, le=86_400.0)
     mock_generation_delay_seconds: float = Field(default=0.0, ge=0.0, le=5.0)
     redis_block_milliseconds: int = Field(default=1000, ge=50, le=60_000)
     cors_origins: Annotated[list[str], NoDecode] = Field(
@@ -134,6 +138,17 @@ class Settings(BaseSettings):
             raise ValueError("worker_heartbeat_seconds must be at most half the lease duration")
         if self.worker_retry_backoff_base_seconds > self.worker_retry_backoff_cap_seconds:
             raise ValueError("worker retry backoff base must not exceed its cap")
+        minimum_stale_seconds = 3 * max(
+            self.worker_progress_flush_seconds,
+            self.worker_poll_seconds,
+            self.redis_block_milliseconds / 1000,
+            self.worker_heartbeat_seconds,
+        )
+        if self.worker_progress_stale_seconds < minimum_stale_seconds:
+            raise ValueError(
+                "worker_progress_stale_seconds must be at least three times the longest "
+                "Worker progress, poll, Redis block, or heartbeat interval"
+            )
         return self
 
 

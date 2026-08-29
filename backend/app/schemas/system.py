@@ -53,6 +53,17 @@ class TaskMetricsResponse(ORMModel):
     total_attempts: int
     total_failed_attempts: int
     total_dispatches: int
+    worker_expected_processes: int
+    worker_registered_processes: int
+    worker_live_processes: int
+    worker_stalled_processes: int
+    worker_shortfall_processes: int
+    worker_stale_after_seconds: float
+    worker_last_seen_at: datetime | None
+    worker_last_scan_at: datetime | None
+    worker_last_claim_at: datetime | None
+    worker_last_progress_at: datetime | None
+    worker_last_lease_heartbeat_at: datetime | None
     timestamp: datetime
 
 

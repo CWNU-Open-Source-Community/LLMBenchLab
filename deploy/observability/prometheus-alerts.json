@@ -1,0 +1,130 @@
+{
+  "groups": [
+    {
+      "name": "llmbenchlab.phase2",
+      "interval": "30s",
+      "rules": [
+        {
+          "alert": "LLMBenchLabMetricsUnavailable",
+          "expr": "up{job=\"llmbenchlab\"} == 0",
+          "for": "2m",
+          "labels": {
+            "severity": "critical",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab metrics exporter is unavailable",
+            "description": "Prometheus has been unable to scrape the controlled metrics endpoint for two minutes.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-exporter-unavailable",
+            "silence_policy": "Narrow job or instance matcher only; owner, ticket, and expiry required; maximum 4h; never global."
+          }
+        },
+        {
+          "alert": "LLMBenchLabBacklogPersistent",
+          "expr": "llmbenchlab_runs_due_pending > 0",
+          "for": "15m",
+          "labels": {
+            "severity": "warning",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab dispatchable backlog is persistent",
+            "description": "At least one due pending Run has remained dispatchable for fifteen minutes.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-backlog-persistent",
+            "silence_policy": "Narrow job matcher only; owner, ticket, and expiry required; maximum 4h; never global."
+          }
+        },
+        {
+          "alert": "LLMBenchLabDeadLettered",
+          "expr": "llmbenchlab_audit_events_window{event_type=\"run_dead_lettered\"} > 0",
+          "for": "0s",
+          "labels": {
+            "severity": "critical",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab recorded a dead-letter event",
+            "description": "A validated run_dead_lettered event is present in the fixed fifteen-minute audit window.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-dead-letter",
+            "silence_policy": "Narrow job matcher only after evidence capture; owner, ticket, and expiry required; maximum 1h."
+          }
+        },
+        {
+          "alert": "LLMBenchLabGovernanceIntegrityError",
+          "expr": "llmbenchlab_audit_events_window{event_type=\"governance_integrity_error\"} > 0",
+          "for": "0s",
+          "labels": {
+            "severity": "critical",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab recorded a governance integrity error",
+            "description": "A validated governance_integrity_error event is present in the fixed fifteen-minute audit window.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-governance-integrity",
+            "silence_policy": "Do not routinely silence; capture evidence and remediate the durable governance facts."
+          }
+        },
+        {
+          "alert": "LLMBenchLabGovernanceOverdrawn",
+          "expr": "llmbenchlab_governance_scopes_overdrawn > 0",
+          "for": "0s",
+          "labels": {
+            "severity": "critical",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab governance scope is overdrawn",
+            "description": "At least one database governance scope is marked overdrawn.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-governance-overdraw",
+            "silence_policy": "Do not routinely silence; capture evidence and reconcile the durable governance ledger."
+          }
+        },
+        {
+          "alert": "LLMBenchLabQueueDegraded",
+          "expr": "llmbenchlab_queue_configured == 1 and llmbenchlab_queue_available == 0",
+          "for": "2m",
+          "labels": {
+            "severity": "warning",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab Redis notification queue is degraded",
+            "description": "The configured non-authoritative Redis notification queue has been unavailable for two minutes.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-queue-degraded",
+            "silence_policy": "Narrow job matcher only; owner, ticket, and expiry required; maximum 4h; never global."
+          }
+        },
+        {
+          "alert": "LLMBenchLabWorkerStalled",
+          "expr": "llmbenchlab_worker_shortfall > 0",
+          "for": "2m",
+          "labels": {
+            "severity": "critical",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab has fewer live Workers than configured",
+            "description": "Database-time Worker progress shows a live process shortfall for two minutes.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-worker-stalled",
+            "silence_policy": "Narrow job matcher only during controlled maintenance; owner, ticket, and expiry required; maximum 1h."
+          }
+        },
+        {
+          "alert": "LLMBenchLabLeaseRecoverySlow",
+          "expr": "llmbenchlab_run_expired_lease_oldest_age_seconds > llmbenchlab_run_recovery_alert_threshold_seconds",
+          "for": "1m",
+          "labels": {
+            "severity": "warning",
+            "component": "llmbenchlab-control-plane"
+          },
+          "annotations": {
+            "summary": "LLMBenchLab expired lease recovery is slow",
+            "description": "The oldest currently expired running lease exceeds the configured recovery alert threshold.",
+            "runbook_url": "https://github.com/CWNU-Open-Source-Community/LLMBenchLab/blob/main/docs/OPERATIONS.md#alert-lease-recovery-slow",
+            "silence_policy": "Narrow job matcher only after recovery ownership is established; owner, ticket, and expiry required; maximum 15m."
+          }
+        }
+      ]
+    }
+  ]
+}

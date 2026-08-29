@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -19,12 +18,10 @@ from app.governance import (
     GovernanceIntegrityError,
     GovernanceRepository,
     record_governance_integrity_event,
-    validate_audit_identity_for_read,
-    validate_audit_payload_for_read,
 )
+from app.governance.audit import validate_audit_event_for_read
 from app.models import (
     AuditEvent,
-    AuditRetentionClass,
     Benchmark,
     EvaluationResponse,
     EvaluationRun,
@@ -96,73 +93,24 @@ def _record_governance_integrity(
 
 
 def _audit_event_read_item(event: AuditEvent) -> dict[str, object]:
-    minimum_retention = timedelta(
-        days=365 if event.retention_class == AuditRetentionClass.SECURITY else 90
-    )
-    if (
-        (
-            event.attempt is not None
-            and (
-                isinstance(event.attempt, bool)
-                or not isinstance(event.attempt, int)
-                or not 0 <= event.attempt <= 2**31 - 1
-            )
-        )
-        or (
-            event.provider_attempt is not None
-            and (
-                isinstance(event.provider_attempt, bool)
-                or not isinstance(event.provider_attempt, int)
-                or not 1 <= event.provider_attempt <= 2**31 - 1
-            )
-        )
-        or (
-            event.lease_token is not None
-            and (
-                isinstance(event.lease_token, bool)
-                or not isinstance(event.lease_token, int)
-                or not 0 <= event.lease_token <= 2**63 - 1
-            )
-        )
-        or (
-            event.duration_ms is not None
-            and (
-                isinstance(event.duration_ms, bool)
-                or not isinstance(event.duration_ms, (int, float))
-                or not math.isfinite(event.duration_ms)
-                or event.duration_ms < 0
-            )
-        )
-        or event.expires_at - event.occurred_at < minimum_retention
-    ):
-        raise AuditIntegrityError("retained audit event failed integrity validation")
+    facts = validate_audit_event_for_read(event)
     return {
-        "id": validate_audit_identity_for_read("id", event.id, maximum=36),
-        "event_type": event.event_type,
-        "payload": validate_audit_payload_for_read(
-            event.event_type,
-            event.payload,
-            event.payload_hash,
-        ),
-        "retention_class": event.retention_class,
-        "occurred_at": event.occurred_at,
-        "expires_at": event.expires_at,
-        "correlation_id": validate_audit_identity_for_read(
-            "correlation_id", event.correlation_id, maximum=128
-        ),
-        "run_id": validate_audit_identity_for_read("run_id", event.run_id, maximum=36),
-        "model_id": validate_audit_identity_for_read("model_id", event.model_id, maximum=36),
-        "question_id": validate_audit_identity_for_read(
-            "question_id", event.question_id, maximum=36
-        ),
-        "worker_id": validate_audit_identity_for_read("worker_id", event.worker_id, maximum=128),
-        "reservation_id": validate_audit_identity_for_read(
-            "reservation_id", event.reservation_id, maximum=36
-        ),
-        "attempt": event.attempt,
-        "provider_attempt": event.provider_attempt,
-        "lease_token": event.lease_token,
-        "duration_ms": event.duration_ms,
+        "id": facts.id,
+        "event_type": facts.event_type,
+        "payload": facts.payload,
+        "retention_class": facts.retention_class,
+        "occurred_at": facts.occurred_at,
+        "expires_at": facts.expires_at,
+        "correlation_id": facts.correlation_id,
+        "run_id": facts.run_id,
+        "model_id": facts.model_id,
+        "question_id": facts.question_id,
+        "worker_id": facts.worker_id,
+        "reservation_id": facts.reservation_id,
+        "attempt": facts.attempt,
+        "provider_attempt": facts.provider_attempt,
+        "lease_token": facts.lease_token,
+        "duration_ms": facts.duration_ms,
     }
 
 
@@ -366,18 +314,18 @@ def list_run_audit_events(
     _get_run_or_404(session, run_id)
     filters = (AuditEvent.run_id == run_id,)
     total = session.scalar(select(func.count()).select_from(AuditEvent).where(*filters)) or 0
-    events = list(
-        session.scalars(
-            select(AuditEvent)
-            .where(*filters)
-            .order_by(AuditEvent.occurred_at, AuditEvent.id)
-            .offset(pagination.offset)
-            .limit(pagination.limit)
-        )
-    )
     try:
+        events = list(
+            session.scalars(
+                select(AuditEvent)
+                .where(*filters)
+                .order_by(AuditEvent.occurred_at, AuditEvent.id)
+                .offset(pagination.offset)
+                .limit(pagination.limit)
+            )
+        )
         items = [_audit_event_read_item(event) for event in events]
-    except AuditIntegrityError as exc:
+    except (AuditIntegrityError, LookupError, OverflowError, TypeError, ValueError) as exc:
         logger.error(
             "Retained Run audit event failed read validation",
             extra={

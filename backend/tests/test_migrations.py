@@ -7,14 +7,19 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
+import app.db.prepare_migrations as prepare_migrations_module
 from app.db.base import Base
 from app.db.prepare_migrations import (
     CREDENTIAL_REVISION,
+    GOVERNANCE_REVISION,
+    INDEX_REPAIR_REVISION,
     LEGACY_REVISION,
     PHASE_1_REVISION,
+    WORKER_PROGRESS_REVISION,
     SchemaPreparationError,
     database_heads,
     prepare_database,
@@ -24,7 +29,7 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260827_0004"
+HEAD_REVISION = "20260830_0007"
 WEB_CREDENTIAL_REVISION = CREDENTIAL_REVISION
 RELIABILITY_REVISION = "20260825_0002"
 
@@ -119,6 +124,194 @@ def _insert_legacy_rows(database_path: Path) -> None:
             );
             """
         )
+
+
+def _drop_known_governance_indexes(database_path: Path) -> None:
+    with sqlite3.connect(database_path) as connection:
+        for index_name in (
+            "ix_evaluation_runs_started_at_id",
+            "ix_evaluation_runs_finished_at_id",
+            "uq_governance_policies_single_active",
+        ):
+            connection.execute(f'DROP INDEX "{index_name}"')
+
+
+def _insert_active_policy(
+    connection: sqlite3.Connection,
+    *,
+    policy_id: str,
+    version: int,
+) -> None:
+    connection.execute(
+        "INSERT INTO governance_policies ("
+        "id, version, policy_hash, is_active, backlog_limit, question_quantum, "
+        "activated_at, created_at"
+        ") VALUES (?, ?, ?, 1, 100, 25, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        (policy_id, version, f"{version:064x}"),
+    )
+
+
+def _insert_overdraw_repair_fixture(
+    database_path: Path,
+    *,
+    input_token_reservation: int | None,
+    reserved_input_tokens: int,
+    reserved_output_tokens: int,
+    reserved_cost_usd: str,
+    actual_input_tokens: int,
+    actual_output_tokens: int,
+    actual_cost_usd: str,
+    state: str = "settled_actual",
+) -> None:
+    """Insert one old-semantics ledger projection at revision 0006."""
+
+    if state not in {"settled_actual", "send_started"}:
+        raise ValueError("unsupported overdraw repair fixture state")
+    active = state == "send_started"
+    settled_actual_input = None if active else actual_input_tokens
+    settled_actual_output = None if active else actual_output_tokens
+    settled_actual_cost = None if active else actual_cost_usd
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO governance_policies ("
+            "id, version, policy_hash, is_active, backlog_limit, question_quantum, "
+            "activated_at, created_at) VALUES ("
+            "'policy-overdraw-repair', 1, ?, 1, 10, 2, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            ("a" * 64,),
+        )
+        scope_rows = (
+            ("scope-overdraw-global", "global", "global"),
+            ("scope-overdraw-provider", "provider", "b" * 64),
+            ("scope-overdraw-model", "model", "model-1"),
+            ("scope-overdraw-run", "run", "run-1"),
+        )
+        for scope_id, scope_type, scope_key in scope_rows:
+            connection.execute(
+                "INSERT INTO governance_scopes ("
+                "id, scope_type, scope_key, active_reservations, reserved_requests, "
+                "reserved_input_tokens, reserved_output_tokens, reserved_cost_usd, "
+                "consumed_requests, consumed_input_tokens, consumed_output_tokens, "
+                "consumed_cost_usd, overdrawn, created_at, updated_at) VALUES ("
+                "?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?, ?, 1, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (
+                    scope_id,
+                    scope_type,
+                    scope_key,
+                    int(active),
+                    reserved_input_tokens if active else 0,
+                    reserved_output_tokens if active else 0,
+                    reserved_cost_usd if active else "0",
+                    settled_actual_input or 0,
+                    settled_actual_output or 0,
+                    settled_actual_cost or "0",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO governance_minute_buckets ("
+                "id, scope_id, policy_id, window_start, reserved_requests, "
+                "reserved_input_tokens, reserved_output_tokens, consumed_requests, "
+                "consumed_input_tokens, consumed_output_tokens, created_at, updated_at) "
+                "VALUES (?, ?, 'policy-overdraw-repair', '2026-08-30 00:00:00', "
+                "0, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (
+                    f"bucket-{scope_type}-overdraw-repair",
+                    scope_id,
+                    reserved_input_tokens if active else 0,
+                    reserved_output_tokens if active else 0,
+                    settled_actual_input or 0,
+                    settled_actual_output or 0,
+                ),
+            )
+        connection.execute(
+            "UPDATE evaluation_runs SET governance_policy_id = 'policy-overdraw-repair', "
+            "governance_status = 'managed', input_token_reservation = ? WHERE id = 'run-1'",
+            (input_token_reservation,),
+        )
+        connection.execute(
+            "INSERT INTO question_executions ("
+            "id, run_id, question_id, execution_generation, next_provider_attempt, "
+            "created_at, updated_at) VALUES ("
+            "'execution-overdraw-repair', 'run-1', 'question-1', 0, 2, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO provider_call_reservations ("
+            "id, operation_key, policy_id, question_execution_id, run_id, question_id, "
+            "model_id, global_scope_id, provider_scope_id, model_scope_id, run_scope_id, "
+            "execution_generation, provider_attempt, lease_owner, lease_token, state, "
+            "window_start, reserved_input_tokens, reserved_output_tokens, reserved_cost_usd, "
+            "actual_input_tokens, actual_output_tokens, actual_cost_usd, outcome_code, "
+            "send_started_at, settled_at, created_at, updated_at) VALUES ("
+            "'reservation-overdraw-repair', 'run-1:question-1:0:1', "
+            "'policy-overdraw-repair', 'execution-overdraw-repair', 'run-1', 'question-1', "
+            "'model-1', 'scope-overdraw-global', 'scope-overdraw-provider', "
+            "'scope-overdraw-model', 'scope-overdraw-run', 0, 1, 'worker-overdraw-repair', "
+            "1, ?, '2026-08-30 00:00:00', ?, ?, ?, ?, ?, ?, ?, "
+            "'2026-08-30 00:00:01', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (
+                state,
+                reserved_input_tokens,
+                reserved_output_tokens,
+                reserved_cost_usd,
+                settled_actual_input,
+                settled_actual_output,
+                settled_actual_cost,
+                None if active else "succeeded",
+                None if active else "2026-08-30 00:00:02",
+            ),
+        )
+
+
+def _overdraw_repair_ledger_snapshot(database_path: Path) -> tuple[object, ...]:
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT id, operation_key, state, reserved_input_tokens, "
+            "reserved_output_tokens, reserved_cost_usd, actual_input_tokens, "
+            "actual_output_tokens, actual_cost_usd, outcome_code, send_started_at, "
+            "settled_at, created_at, updated_at FROM provider_call_reservations "
+            "WHERE id = 'reservation-overdraw-repair'"
+        ).fetchone()
+    assert row is not None
+    return row
+
+
+def _mock_postgresql_historical_preflight(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    differences: tuple[str, ...],
+    source_revision: str = WORKER_PROGRESS_REVISION,
+) -> tuple[Mock, Mock, list[object]]:
+    connection = Mock()
+    connection.dialect.name = "postgresql"
+    connection.in_transaction.return_value = False
+    connection.execute.return_value.scalar_one.return_value = 0
+    engine = Mock()
+    engine.connect.return_value = connection
+    inspector = Mock()
+    inspector.get_table_names.return_value = list(Base.metadata.tables)
+    metadata_calls: list[object] = []
+
+    def schema_differences(candidate: object) -> tuple[str, ...]:
+        metadata_calls.append(candidate)
+        return differences
+
+    monkeypatch.setattr(prepare_migrations_module, "create_database_engine", lambda _url: engine)
+    monkeypatch.setattr(
+        prepare_migrations_module,
+        "database_heads",
+        lambda _connection: (source_revision,),
+    )
+    monkeypatch.setattr(
+        prepare_migrations_module,
+        "expected_database_heads",
+        lambda _config_path: (HEAD_REVISION,),
+    )
+    monkeypatch.setattr(prepare_migrations_module.sa, "inspect", lambda _connection: inspector)
+    monkeypatch.setattr(prepare_migrations_module, "_schema_differences", schema_differences)
+    return engine, connection, metadata_calls
 
 
 def _rewrite_table_ddl(database_path: Path, table_name: str, old: str, new: str) -> None:
@@ -302,9 +495,11 @@ def test_prepare_adopts_current_unversioned_schema(tmp_path: Path) -> None:
 
     result = prepare_database(_database_url(database_path))
 
-    assert result.action == "stamped_current"
-    assert result.stamped_revision == HEAD_REVISION
+    assert result.action == "stamped_index_repair"
+    assert result.stamped_revision == INDEX_REPAIR_REVISION
     assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (INDEX_REPAIR_REVISION,)
+    _run_alembic(database_path, "upgrade", "head")
     assert _read_heads(database_path) == (HEAD_REVISION,)
 
 
@@ -384,6 +579,553 @@ def test_prepare_backs_up_and_adopts_web_credential_schema(
     _run_alembic(database_path, "upgrade", "head")
     assert _read_heads(database_path) == (HEAD_REVISION,)
     _run_alembic(database_path, "check")
+
+
+@pytest.mark.parametrize("versioned", [False, True])
+def test_prepare_backs_up_and_adopts_governance_schema(
+    tmp_path: Path,
+    versioned: bool,
+) -> None:
+    database_path = tmp_path / f"governance-{'versioned' if versioned else 'unversioned'}.db"
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    if not versioned:
+        with sqlite3.connect(database_path) as connection:
+            connection.execute("DELETE FROM alembic_version")
+
+    result = prepare_database(_database_url(database_path))
+
+    assert result.action == ("versioned_governance" if versioned else "stamped_governance")
+    assert result.stamped_revision == GOVERNANCE_REVISION
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    with sqlite3.connect(result.backup_path) as backup:
+        tables = {
+            row[0] for row in backup.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        indexes = {
+            row[0] for row in backup.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert "audit_events" in tables
+        assert "worker_processes" not in tables
+        assert "ix_audit_events_expires_id" not in indexes
+        assert "ix_audit_events_occurred_id" not in indexes
+
+    _run_alembic(database_path, "upgrade", "head")
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    _run_alembic(database_path, "check")
+
+
+def test_known_governance_index_gap_upgrades_through_0005_and_0006(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "known-governance-index-gap.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        _insert_active_policy(connection, policy_id="policy-active", version=1)
+        data_counts_before = connection.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM models), "
+            "(SELECT COUNT(*) FROM benchmarks), "
+            "(SELECT COUNT(*) FROM questions), "
+            "(SELECT COUNT(*) FROM evaluation_runs), "
+            "(SELECT COUNT(*) FROM evaluation_responses), "
+            "(SELECT COUNT(*) FROM governance_policies)"
+        ).fetchone()
+    _drop_known_governance_indexes(database_path)
+
+    governance_result = prepare_database(_database_url(database_path))
+
+    assert governance_result.action == "versioned_governance"
+    assert governance_result.backup_path is not None
+    assert governance_result.backup_path.is_file()
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert (
+            not {
+                "ix_evaluation_runs_started_at_id",
+                "ix_evaluation_runs_finished_at_id",
+                "uq_governance_policies_single_active",
+            }
+            & indexes
+        )
+
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert "worker_processes" in tables
+        assert {
+            "ix_worker_processes_stopped_seen_generation",
+            "ix_audit_events_expires_id",
+            "ix_audit_events_occurred_id",
+        } <= indexes
+        assert (
+            not {
+                "ix_evaluation_runs_started_at_id",
+                "ix_evaluation_runs_finished_at_id",
+                "uq_governance_policies_single_active",
+            }
+            & indexes
+        )
+
+    worker_progress_result = prepare_database(_database_url(database_path))
+
+    assert worker_progress_result.action == "versioned_worker_progress"
+    assert worker_progress_result.backup_path is not None
+    assert worker_progress_result.backup_path.is_file()
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        data_counts_after = connection.execute(
+            "SELECT "
+            "(SELECT COUNT(*) FROM models), "
+            "(SELECT COUNT(*) FROM benchmarks), "
+            "(SELECT COUNT(*) FROM questions), "
+            "(SELECT COUNT(*) FROM evaluation_runs), "
+            "(SELECT COUNT(*) FROM evaluation_responses), "
+            "(SELECT COUNT(*) FROM governance_policies)"
+        ).fetchone()
+        assert data_counts_after == data_counts_before
+        for index_name, expected_columns in (
+            ("ix_evaluation_runs_started_at_id", ["started_at", "id"]),
+            ("ix_evaluation_runs_finished_at_id", ["finished_at", "id"]),
+        ):
+            assert [
+                row[2] for row in connection.execute(f'PRAGMA index_info("{index_name}")')
+            ] == expected_columns
+        active_index = {
+            row[1]: row for row in connection.execute("PRAGMA index_list(governance_policies)")
+        }["uq_governance_policies_single_active"]
+        assert active_index[2] == 1
+        assert active_index[4] == 1
+        active_index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='uq_governance_policies_single_active'"
+        ).fetchone()[0]
+        assert active_index_sql.endswith("WHERE is_active = 1")
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_active_policy(connection, policy_id="policy-active-second", version=2)
+        connection.rollback()
+    _run_alembic(database_path, "check")
+
+    _run_alembic(database_path, "downgrade", WORKER_PROGRESS_REVISION)
+
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert {
+            "ix_evaluation_runs_started_at_id",
+            "ix_evaluation_runs_finished_at_id",
+            "uq_governance_policies_single_active",
+        } <= indexes
+    canonical_0005_result = prepare_database(_database_url(database_path))
+    assert canonical_0005_result.action == "versioned_worker_progress"
+    _run_alembic(database_path, "upgrade", "head")
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+
+
+def test_known_governance_index_gap_resumes_after_partial_0006_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "partial-governance-index-repair.db"
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "CREATE INDEX ix_evaluation_runs_started_at_id ON evaluation_runs (started_at, id)"
+        )
+
+    result = prepare_database(_database_url(database_path))
+
+    assert result.action == "versioned_worker_progress"
+    assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert {
+            "ix_evaluation_runs_started_at_id",
+            "ix_evaluation_runs_finished_at_id",
+            "uq_governance_policies_single_active",
+        } <= indexes
+    _run_alembic(database_path, "check")
+
+
+def test_observational_overdraw_repair_preserves_ledger_and_is_reversible(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observational-overdraw-repair.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", INDEX_REPAIR_REVISION)
+    _insert_overdraw_repair_fixture(
+        database_path,
+        input_token_reservation=None,
+        reserved_input_tokens=59,
+        reserved_output_tokens=128,
+        reserved_cost_usd="0.00010000",
+        actual_input_tokens=75,
+        actual_output_tokens=64,
+        actual_cost_usd="0.00020000",
+    )
+    ledger_before = _overdraw_repair_ledger_snapshot(database_path)
+    with sqlite3.connect(database_path) as connection:
+        counters_before = connection.execute(
+            "SELECT active_reservations, reserved_requests, reserved_input_tokens, "
+            "reserved_output_tokens, reserved_cost_usd, consumed_requests, "
+            "consumed_input_tokens, consumed_output_tokens, consumed_cost_usd "
+            "FROM governance_scopes ORDER BY id"
+        ).fetchall()
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 4
+        )
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT active_reservations, reserved_requests, reserved_input_tokens, "
+                "reserved_output_tokens, reserved_cost_usd, consumed_requests, "
+                "consumed_input_tokens, consumed_output_tokens, consumed_cost_usd "
+                "FROM governance_scopes ORDER BY id"
+            ).fetchall()
+            == counters_before
+        )
+
+    _run_alembic(database_path, "downgrade", INDEX_REPAIR_REVISION)
+
+    assert _read_heads(database_path) == (INDEX_REPAIR_REVISION,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 4
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "case_name",
+        "input_token_reservation",
+        "reserved_input_tokens",
+        "reserved_output_tokens",
+        "reserved_cost_usd",
+        "actual_input_tokens",
+        "actual_output_tokens",
+        "actual_cost_usd",
+    ),
+    [
+        ("input", 59, 59, 128, "0.00020000", 75, 64, "0.00010000"),
+        ("output", None, 59, 4, "0.00020000", 40, 5, "0.00010000"),
+        ("cost", 128, 128, 128, "0.00010000", 40, 64, "0.00020000"),
+    ],
+)
+def test_overdraw_repair_preserves_explicit_hard_bound_overdraw(
+    tmp_path: Path,
+    case_name: str,
+    input_token_reservation: int | None,
+    reserved_input_tokens: int,
+    reserved_output_tokens: int,
+    reserved_cost_usd: str,
+    actual_input_tokens: int,
+    actual_output_tokens: int,
+    actual_cost_usd: str,
+) -> None:
+    database_path = tmp_path / f"explicit-{case_name}-overdraw-repair.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", INDEX_REPAIR_REVISION)
+    _insert_overdraw_repair_fixture(
+        database_path,
+        input_token_reservation=input_token_reservation,
+        reserved_input_tokens=reserved_input_tokens,
+        reserved_output_tokens=reserved_output_tokens,
+        reserved_cost_usd=reserved_cost_usd,
+        actual_input_tokens=actual_input_tokens,
+        actual_output_tokens=actual_output_tokens,
+        actual_cost_usd=actual_cost_usd,
+    )
+    ledger_before = _overdraw_repair_ledger_snapshot(database_path)
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 4
+        )
+
+
+@pytest.mark.parametrize(
+    ("start_revision", "direction", "target_revision"),
+    [
+        (INDEX_REPAIR_REVISION, "upgrade", "head"),
+        (HEAD_REVISION, "downgrade", INDEX_REPAIR_REVISION),
+    ],
+)
+def test_overdraw_repair_refuses_active_reservations_before_mutation(
+    tmp_path: Path,
+    start_revision: str,
+    direction: str,
+    target_revision: str,
+) -> None:
+    database_path = tmp_path / f"active-overdraw-{direction}.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", start_revision)
+    _insert_overdraw_repair_fixture(
+        database_path,
+        input_token_reservation=None,
+        reserved_input_tokens=59,
+        reserved_output_tokens=128,
+        reserved_cost_usd="0.00010000",
+        actual_input_tokens=75,
+        actual_output_tokens=64,
+        actual_cost_usd="0.00020000",
+        state="send_started",
+    )
+    ledger_before = _overdraw_repair_ledger_snapshot(database_path)
+    with sqlite3.connect(database_path) as connection:
+        scope_rows_before = connection.execute(
+            "SELECT id, active_reservations, reserved_input_tokens, "
+            "reserved_output_tokens, reserved_cost_usd, overdrawn "
+            "FROM governance_scopes ORDER BY id"
+        ).fetchall()
+
+    failed = _invoke_alembic(database_path, direction, target_revision)
+
+    assert failed.returncode != 0
+    assert "Provider reservations are active" in failed.stderr
+    assert _read_heads(database_path) == (start_revision,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT id, active_reservations, reserved_input_tokens, "
+                "reserved_output_tokens, reserved_cost_usd, overdrawn "
+                "FROM governance_scopes ORDER BY id"
+            ).fetchall()
+            == scope_rows_before
+        )
+
+
+@pytest.mark.parametrize(
+    ("differences", "expected_row_guard_calls"),
+    [
+        (
+            (),
+            0,
+        ),
+        (
+            ("add_index:evaluation_runs.ix_evaluation_runs_started_at_id",),
+            1,
+        ),
+        (
+            (
+                "add_index:evaluation_runs.ix_evaluation_runs_finished_at_id",
+                "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
+                "add_index:governance_policies.uq_governance_policies_single_active",
+            ),
+            1,
+        ),
+    ],
+)
+def test_prepare_postgresql_0005_accepts_only_canonical_or_known_index_gap(
+    monkeypatch: pytest.MonkeyPatch,
+    differences: tuple[str, ...],
+    expected_row_guard_calls: int,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
+        monkeypatch,
+        differences=differences,
+    )
+
+    result = prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert result.action == "versioned"
+    assert metadata_calls == [connection]
+    assert connection.execute.call_count == expected_row_guard_calls
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_prepare_postgresql_0005_rejects_unknown_drift_with_known_index_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
+        monkeypatch,
+        differences=(
+            "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
+            "add_index:models.ix_models_enabled",
+        ),
+    )
+
+    with pytest.raises(SchemaPreparationError, match="historical database"):
+        prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert metadata_calls == [connection]
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_prepare_postgresql_0006_checks_canonical_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
+        monkeypatch,
+        differences=(),
+        source_revision=INDEX_REPAIR_REVISION,
+    )
+
+    result = prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert result.action == "versioned"
+    assert metadata_calls == [connection]
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_prepare_postgresql_0006_rejects_metadata_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
+        monkeypatch,
+        differences=("add_index:models.ix_models_enabled",),
+        source_revision=INDEX_REPAIR_REVISION,
+    )
+
+    with pytest.raises(SchemaPreparationError, match="historical database"):
+        prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert metadata_calls == [connection]
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_known_governance_index_gap_rejects_duplicate_active_policies(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "duplicate-active-policy-index-gap.db"
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        _insert_active_policy(connection, policy_id="policy-active-first", version=1)
+        _insert_active_policy(connection, policy_id="policy-active-second", version=2)
+
+    with pytest.raises(SchemaPreparationError, match="multiple active policies"):
+        prepare_database(_database_url(database_path))
+
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    assert list(tmp_path.glob("*.bak")) == []
+
+
+def test_governance_index_repair_migration_guards_duplicate_active_policies_before_ddl(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "direct-upgrade-duplicate-active-policy.db"
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        _insert_active_policy(connection, policy_id="policy-active-first", version=1)
+        _insert_active_policy(connection, policy_id="policy-active-second", version=2)
+
+    failed = _invoke_alembic(database_path, "upgrade", "head")
+
+    assert failed.returncode != 0
+    assert "multiple active policies exist" in failed.stderr
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        indexes = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+        assert (
+            not {
+                "ix_evaluation_runs_started_at_id",
+                "ix_evaluation_runs_finished_at_id",
+                "uq_governance_policies_single_active",
+            }
+            & indexes
+        )
+
+
+def test_governance_index_repair_rejects_same_name_partial_run_index(tmp_path: Path) -> None:
+    database_path = tmp_path / "direct-upgrade-partial-run-index.db"
+    _run_alembic(database_path, "upgrade", WORKER_PROGRESS_REVISION)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP INDEX ix_evaluation_runs_started_at_id")
+        connection.execute(
+            "CREATE INDEX ix_evaluation_runs_started_at_id "
+            "ON evaluation_runs (started_at, id) WHERE started_at IS NOT NULL"
+        )
+
+    failed = _invoke_alembic(database_path, "upgrade", "head")
+
+    assert failed.returncode != 0
+    assert "does not match the repair migration predicate" in failed.stderr
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        index_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' "
+            "AND name='ix_evaluation_runs_started_at_id'"
+        ).fetchone()[0]
+        assert index_sql.endswith("WHERE started_at IS NOT NULL")
+
+
+def test_known_governance_index_gap_does_not_allow_additional_drift(tmp_path: Path) -> None:
+    database_path = tmp_path / "governance-index-gap-with-extra-drift.db"
+    _run_alembic(database_path, "upgrade", GOVERNANCE_REVISION)
+    _drop_known_governance_indexes(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("DROP INDEX ix_models_enabled")
+
+    with pytest.raises(SchemaPreparationError, match="historical database"):
+        prepare_database(_database_url(database_path))
+
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
+    assert list(tmp_path.glob("*.bak")) == []
 
 
 @pytest.mark.parametrize(
@@ -550,6 +1292,7 @@ def test_governance_schema_matches_orm_and_does_not_seed_policy(tmp_path: Path) 
         "question_executions",
         "provider_call_reservations",
         "audit_events",
+        "worker_processes",
     }
     with sqlite3.connect(database_path) as connection:
         tables = {
@@ -557,6 +1300,52 @@ def test_governance_schema_matches_orm_and_does_not_seed_policy(tmp_path: Path) 
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         assert expected_tables <= tables
+        worker_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(worker_processes)")
+        }
+        assert worker_columns == {
+            "generation_id",
+            "worker_id",
+            "started_at",
+            "last_seen_at",
+            "last_scan_at",
+            "last_claim_at",
+            "last_progress_at",
+            "last_lease_heartbeat_at",
+            "stopped_at",
+        }
+        worker_indexes = {
+            row[1]: row for row in connection.execute("PRAGMA index_list(worker_processes)")
+        }
+        assert worker_indexes["ix_worker_processes_stopped_seen_generation"][2] == 0
+        assert [
+            row[2]
+            for row in connection.execute(
+                "PRAGMA index_info(ix_worker_processes_stopped_seen_generation)"
+            )
+        ] == ["stopped_at", "last_seen_at", "generation_id"]
+        audit_indexes = {
+            row[1]: row for row in connection.execute("PRAGMA index_list(audit_events)")
+        }
+        for index_name, expected_columns in (
+            ("ix_audit_events_expires_id", ["expires_at", "id"]),
+            ("ix_audit_events_occurred_id", ["occurred_at", "id"]),
+        ):
+            assert audit_indexes[index_name][2] == 0
+            assert [
+                row[2] for row in connection.execute(f'PRAGMA index_info("{index_name}")')
+            ] == expected_columns
+        audit_window_plan = [
+            row[3]
+            for row in connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM audit_events "
+                "WHERE occurred_at >= ? AND occurred_at < ? "
+                "ORDER BY occurred_at, id LIMIT 50001",
+                ("2026-08-28 00:00:00", "2026-08-28 00:15:00"),
+            )
+        ]
+        assert any("ix_audit_events_occurred_id" in detail for detail in audit_window_plan)
+        assert all("TEMP B-TREE" not in detail for detail in audit_window_plan)
         assert connection.execute("SELECT COUNT(*) FROM governance_policies").fetchone()[0] == 0
         policy_indexes = {
             row[1]: row for row in connection.execute("PRAGMA index_list(governance_policies)")
@@ -705,6 +1494,30 @@ def test_governance_upgrade_backfills_failed_attempts_by_run_state(
             )
 
 
+def test_worker_progress_downgrade_rejects_process_facts_before_ddl(tmp_path: Path) -> None:
+    database_path = tmp_path / "worker-progress-downgrade.db"
+    _run_alembic(database_path, "upgrade", "head")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO worker_processes (generation_id, worker_id, started_at, last_seen_at) "
+            "VALUES ('00000000-0000-0000-0000-000000000001', 'worker-test', "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+
+    failed = _invoke_alembic(database_path, "downgrade", GOVERNANCE_REVISION)
+
+    assert failed.returncode != 0
+    assert "process facts exist" in failed.stderr
+    # Revision 0006 has a schema-no-op downgrade, so the 0005 evidence guard
+    # still refuses before any Worker table or index DDL is attempted.
+    assert _read_heads(database_path) == (WORKER_PROGRESS_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM worker_processes").fetchone()[0] == 1
+        audit_indexes = {row[1] for row in connection.execute("PRAGMA index_list(audit_events)")}
+        assert "ix_audit_events_expires_id" in audit_indexes
+        assert "ix_audit_events_occurred_id" in audit_indexes
+
+
 def test_governance_downgrade_rejects_response_metadata_before_ddl(tmp_path: Path) -> None:
     database_path = tmp_path / "governance-metadata-downgrade.db"
     _run_alembic(database_path, "upgrade", LEGACY_REVISION)
@@ -720,7 +1533,7 @@ def test_governance_downgrade_rejects_response_metadata_before_ddl(tmp_path: Pat
 
     assert failed.returncode != 0
     assert "Response Provider metadata exists" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
     with sqlite3.connect(database_path) as connection:
         tables = {
             row[0]
@@ -753,7 +1566,7 @@ def test_governance_downgrade_rejects_failure_and_fairness_evidence_before_ddl(
 
     assert failed.returncode != 0
     assert "Run governance/failure evidence" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT failed_attempt_count, dispatch_count FROM evaluation_runs WHERE id = 'run-1'"
@@ -781,7 +1594,7 @@ def test_governance_downgrade_rejects_question_execution_before_ddl(tmp_path: Pa
 
     assert failed.returncode != 0
     assert "question-execution evidence exists" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
     with sqlite3.connect(database_path) as connection:
         assert connection.execute(
             "SELECT run_id, question_id FROM question_executions WHERE id = 'execution-1'"
@@ -870,7 +1683,7 @@ def test_governance_ledger_foreign_keys_are_never_delete_restrict(tmp_path: Path
 
     assert failed.returncode != 0
     assert "ledger, audit, policy, scope" in failed.stderr
-    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _read_heads(database_path) == (GOVERNANCE_REVISION,)
 
 
 def test_reliability_downgrade_rejects_active_runs_before_ddl(tmp_path: Path) -> None:

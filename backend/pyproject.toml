@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 llmbenchlab-evaluate = "app.cli.evaluate:main"
+llmbenchlab-audit-retention = "app.cli.audit_retention:main"
 llmbenchlab-worker = "app.worker:main"
 llmbenchlab-worker-probe = "app.worker_probe:main"
 

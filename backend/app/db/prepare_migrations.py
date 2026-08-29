@@ -30,6 +30,39 @@ LEGACY_REVISION = "20260824_0000"
 PHASE_1_REVISION = "20260824_0001"
 RELIABILITY_REVISION = "20260825_0002"
 CREDENTIAL_REVISION = "20260827_0003"
+GOVERNANCE_REVISION = "20260827_0004"
+WORKER_PROGRESS_REVISION = "20260828_0005"
+INDEX_REPAIR_REVISION = "20260829_0006"
+
+_WORKER_PROGRESS_TABLES = {"worker_processes"}
+_WORKER_PROGRESS_INDEXES = {
+    "add_index:audit_events.ix_audit_events_expires_id",
+    "add_index:audit_events.ix_audit_events_occurred_id",
+    "add_index:worker_processes.ix_worker_processes_stopped_seen_generation",
+}
+_WORKER_PROGRESS_DIFFERENCE_SET = {
+    f"add_table:{table_name}" for table_name in _WORKER_PROGRESS_TABLES
+} | _WORKER_PROGRESS_INDEXES
+_WORKER_PROGRESS_DIFFERENCES = tuple(sorted(_WORKER_PROGRESS_DIFFERENCE_SET))
+_WORKER_PROGRESS_EXISTING_INDEX_NAMES = {
+    "ix_audit_events_expires_id",
+    "ix_audit_events_occurred_id",
+}
+
+_KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCE_BY_NAME = {
+    "ix_evaluation_runs_finished_at_id": (
+        "add_index:evaluation_runs.ix_evaluation_runs_finished_at_id"
+    ),
+    "ix_evaluation_runs_started_at_id": (
+        "add_index:evaluation_runs.ix_evaluation_runs_started_at_id"
+    ),
+    "uq_governance_policies_single_active": (
+        "add_index:governance_policies.uq_governance_policies_single_active"
+    ),
+}
+_KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCES = frozenset(
+    _KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCE_BY_NAME.values()
+)
 
 _WEB_CREDENTIAL_DIFFERENCES = {
     "add_table:model_credentials",
@@ -111,6 +144,7 @@ _GOVERNANCE_DIFFERENCE_SET = (
         "add_fk:evaluation_runs.fk_evaluation_runs_governance_policy_id_governance_policies",
         "remove_constraint:evaluation_runs.ck_evaluation_runs_attempt_within_limit",
     }
+    | _WORKER_PROGRESS_DIFFERENCE_SET
 )
 _GOVERNANCE_DIFFERENCES = tuple(sorted(_GOVERNANCE_DIFFERENCE_SET))
 _GOVERNANCE_CHECK_NAMES_BY_TABLE = {
@@ -412,6 +446,15 @@ def _validate_sqlite_ddl_modifiers(
 
 def _schema_tables_for_revision(schema_revision: str) -> dict[str, sa.Table]:
     tables = dict(Base.metadata.tables)
+    if schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+        CREDENTIAL_REVISION,
+        GOVERNANCE_REVISION,
+    }:
+        for table_name in _WORKER_PROGRESS_TABLES:
+            tables.pop(table_name, None)
     if schema_revision in {LEGACY_REVISION, PHASE_1_REVISION, RELIABILITY_REVISION}:
         tables.pop("model_credentials", None)
     if schema_revision in {
@@ -450,7 +493,12 @@ def _validate_sqlite_table_options(connection: Connection, *, schema_revision: s
             )
 
 
-def _validate_relational_structure(connection: Connection, *, schema_revision: str) -> None:
+def _validate_relational_structure(
+    connection: Connection,
+    *,
+    schema_revision: str,
+    expected_missing_index_names: frozenset[str] = frozenset(),
+) -> None:
     inspector = sa.inspect(connection)
     legacy = schema_revision == LEGACY_REVISION
     pre_reliability = schema_revision in {LEGACY_REVISION, PHASE_1_REVISION}
@@ -459,6 +507,13 @@ def _validate_relational_structure(connection: Connection, *, schema_revision: s
         PHASE_1_REVISION,
         RELIABILITY_REVISION,
         CREDENTIAL_REVISION,
+    }
+    pre_worker_progress = schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+        CREDENTIAL_REVISION,
+        GOVERNANCE_REVISION,
     }
     for table_name, table in _schema_tables_for_revision(schema_revision).items():
         table_sql = connection.exec_driver_sql(
@@ -564,6 +619,12 @@ def _validate_relational_structure(connection: Connection, *, schema_revision: s
                 and table_name == "evaluation_runs"
                 and str(index.name) in _GOVERNANCE_EXISTING_INDEX_NAMES
             )
+            and not (
+                pre_worker_progress
+                and table_name == "audit_events"
+                and str(index.name) in _WORKER_PROGRESS_EXISTING_INDEX_NAMES
+            )
+            and str(index.name) not in expected_missing_index_names
         }
         actual_indexes = {
             (
@@ -681,10 +742,19 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
             )
 
 
-def _validate_sqlite_database(connection: Connection, *, schema_revision: str) -> None:
+def _validate_sqlite_database(
+    connection: Connection,
+    *,
+    schema_revision: str,
+    expected_missing_index_names: frozenset[str] = frozenset(),
+) -> None:
     _validate_sqlite_ddl_modifiers(connection, schema_revision=schema_revision)
     _validate_sqlite_table_options(connection, schema_revision=schema_revision)
-    _validate_relational_structure(connection, schema_revision=schema_revision)
+    _validate_relational_structure(
+        connection,
+        schema_revision=schema_revision,
+        expected_missing_index_names=expected_missing_index_names,
+    )
     _validate_check_constraints(connection, schema_revision=schema_revision)
     triggers = connection.exec_driver_sql(
         "SELECT name, tbl_name FROM sqlite_master WHERE type = 'trigger'"
@@ -732,6 +802,21 @@ def validate_sqlite_schema_fingerprint(
     """Validate a read-only SQLite schema against one supported revision."""
 
     _validate_sqlite_database(connection, schema_revision=schema_revision)
+
+
+def _validate_known_governance_index_gap_rows(connection: Connection) -> None:
+    policies = sa.table(
+        "governance_policies",
+        sa.column("is_active", sa.Boolean()),
+    )
+    active_policy_count = connection.execute(
+        sa.select(sa.func.count()).select_from(policies).where(policies.c.is_active.is_(True))
+    ).scalar_one()
+    if active_policy_count > 1:
+        raise SchemaPreparationError(
+            "The known governance index compatibility schema contains multiple active "
+            "policies; the missing unique index cannot be restored safely."
+        )
 
 
 def _sqlite_database_path(database_url: str) -> Path:
@@ -786,6 +871,9 @@ def prepare_database(
             PHASE_1_REVISION,
             RELIABILITY_REVISION,
             CREDENTIAL_REVISION,
+            GOVERNANCE_REVISION,
+            WORKER_PROGRESS_REVISION,
+            INDEX_REPAIR_REVISION,
         )
         historical_heads = {(revision,) for revision in historical_revisions}
 
@@ -832,31 +920,68 @@ def prepare_database(
         target_revision: str | None
         source_revision: str
         if current_heads in historical_heads:
-            if not sqlite_locked:
-                return PreparationResult(action="versioned")
             source_revision = current_heads[0]
-            if source_revision == LEGACY_REVISION:
-                expected_differences = _LEGACY_DIFFERENCES
-            elif source_revision == PHASE_1_REVISION:
-                expected_differences = _PHASE_1_DIFFERENCES
-            elif source_revision == RELIABILITY_REVISION:
-                expected_differences = _RELIABILITY_DIFFERENCES
-            else:
-                expected_differences = _CREDENTIAL_DIFFERENCES
+            if not sqlite_locked and source_revision not in {
+                WORKER_PROGRESS_REVISION,
+                INDEX_REPAIR_REVISION,
+            }:
+                return PreparationResult(action="versioned")
+            expected_differences = {
+                LEGACY_REVISION: _LEGACY_DIFFERENCES,
+                PHASE_1_REVISION: _PHASE_1_DIFFERENCES,
+                RELIABILITY_REVISION: _RELIABILITY_DIFFERENCES,
+                CREDENTIAL_REVISION: _CREDENTIAL_DIFFERENCES,
+                GOVERNANCE_REVISION: _WORKER_PROGRESS_DIFFERENCES,
+                WORKER_PROGRESS_REVISION: (),
+                INDEX_REPAIR_REVISION: (),
+            }[source_revision]
             differences = _schema_differences(connection)
-            if differences != expected_differences:
+            expected_missing_index_names: frozenset[str] = frozenset()
+            expected_difference_set = set(expected_differences)
+            difference_set = set(differences)
+            missing_index_differences = difference_set - expected_difference_set
+            known_governance_index_gap = (
+                source_revision
+                in {
+                    GOVERNANCE_REVISION,
+                    WORKER_PROGRESS_REVISION,
+                }
+                and bool(missing_index_differences)
+                and len(difference_set) == len(differences)
+                and expected_difference_set <= difference_set
+                and missing_index_differences <= _KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCES
+            )
+            if differences != expected_differences and not known_governance_index_gap:
                 rendered_differences = ", ".join(sorted(differences)) or "unknown"
                 raise SchemaPreparationError(
                     "The versioned historical database does not match its expected schema; "
                     f"upgrade was not started. Differences: {rendered_differences}"
                 )
-            _validate_sqlite_database(connection, schema_revision=source_revision)
+            if known_governance_index_gap:
+                expected_missing_index_names = frozenset(
+                    index_name
+                    for index_name, difference in (
+                        _KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCE_BY_NAME.items()
+                    )
+                    if difference in missing_index_differences
+                )
+                _validate_known_governance_index_gap_rows(connection)
+            if not sqlite_locked:
+                return PreparationResult(action="versioned")
+            _validate_sqlite_database(
+                connection,
+                schema_revision=source_revision,
+                expected_missing_index_names=expected_missing_index_names,
+            )
             target_revision = None
             action = {
                 LEGACY_REVISION: "versioned_legacy",
                 PHASE_1_REVISION: "versioned_phase1",
                 RELIABILITY_REVISION: "versioned_reliability",
                 CREDENTIAL_REVISION: "versioned_credentials",
+                GOVERNANCE_REVISION: "versioned_governance",
+                WORKER_PROGRESS_REVISION: "versioned_worker_progress",
+                INDEX_REPAIR_REVISION: "versioned_index_repair",
             }[source_revision]
         else:
             if not sqlite_locked:
@@ -866,9 +991,9 @@ def prepare_database(
                 )
             differences = _schema_differences(connection)
             if not differences:
-                target_revision = "head"
-                action = "stamped_current"
-                source_revision = head_revision
+                target_revision = INDEX_REPAIR_REVISION
+                action = "stamped_index_repair"
+                source_revision = INDEX_REPAIR_REVISION
             elif differences == _PHASE_1_DIFFERENCES:
                 target_revision = PHASE_1_REVISION
                 action = "stamped_phase1"
@@ -881,6 +1006,10 @@ def prepare_database(
                 target_revision = CREDENTIAL_REVISION
                 action = "stamped_credentials"
                 source_revision = CREDENTIAL_REVISION
+            elif differences == _WORKER_PROGRESS_DIFFERENCES:
+                target_revision = GOVERNANCE_REVISION
+                action = "stamped_governance"
+                source_revision = GOVERNANCE_REVISION
             elif differences == _LEGACY_DIFFERENCES:
                 target_revision = LEGACY_REVISION
                 action = "stamped_legacy"
@@ -944,9 +1073,14 @@ def main() -> int:
             "Adopted a verified Web-credential SQLite schema at "
             f"{result.stamped_revision}; backup: {result.backup_path}"
         )
-    elif result.action == "stamped_current":
+    elif result.action == "stamped_index_repair":
         print(
-            "Adopted a verified current SQLite schema at "
+            "Adopted a verified current SQLite schema before the overdraw data repair at "
+            f"{result.stamped_revision}; backup: {result.backup_path}"
+        )
+    elif result.action == "stamped_governance":
+        print(
+            "Adopted a verified governance/audit SQLite schema at "
             f"{result.stamped_revision}; backup: {result.backup_path}"
         )
     elif result.action == "versioned_legacy":
@@ -967,6 +1101,21 @@ def main() -> int:
     elif result.action == "versioned_credentials":
         print(
             "Verified a versioned Web-credential SQLite schema before upgrade; "
+            f"backup: {result.backup_path}"
+        )
+    elif result.action == "versioned_governance":
+        print(
+            "Verified a versioned governance/audit SQLite schema before upgrade; "
+            f"backup: {result.backup_path}"
+        )
+    elif result.action == "versioned_worker_progress":
+        print(
+            "Verified a versioned Worker-progress SQLite schema before upgrade; "
+            f"backup: {result.backup_path}"
+        )
+    elif result.action == "versioned_index_repair":
+        print(
+            "Verified a versioned index-repair SQLite schema before upgrade; "
             f"backup: {result.backup_path}"
         )
     return 0

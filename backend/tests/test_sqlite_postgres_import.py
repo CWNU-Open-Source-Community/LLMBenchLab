@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import sqlite3
@@ -43,6 +44,7 @@ from app.db.import_sqlite import (
 )
 from app.db.session import create_database_engine
 from app.db.types import UTCDateTime
+from app.governance.repository import _policy_hash
 from app.models import CredentialSource, ProviderType, QuestionType, RunStatus
 from app.security import CredentialKeyring, EncryptedCredential
 
@@ -98,6 +100,57 @@ def _insert_complete_mock_evidence(
     question_execution_id = f"question-execution-import{suffix}"
     reservation_id = f"reservation-import{suffix}"
     window_start = created_at.replace(second=0, microsecond=0)
+    policy_values = {
+        "global_concurrency_limit": 8,
+        "provider_concurrency_limit": 4,
+        "model_concurrency_limit": 2,
+        "run_concurrency_limit": 1,
+        "global_requests_per_minute": 120,
+        "provider_requests_per_minute": 60,
+        "model_requests_per_minute": 30,
+        "run_requests_per_minute": 10,
+        "global_tokens_per_minute": 100_000,
+        "provider_tokens_per_minute": 50_000,
+        "model_tokens_per_minute": 25_000,
+        "run_tokens_per_minute": 5_000,
+        "global_lifetime_request_budget": 10_000,
+        "global_lifetime_token_budget": 1_000_000,
+        "global_lifetime_cost_budget_usd": Decimal("100.00000000"),
+        "run_lifetime_request_budget": 10,
+        "run_lifetime_token_budget": 10_000,
+        "run_lifetime_cost_budget_usd": Decimal("1.00000000"),
+        "backlog_limit": 32,
+        "question_quantum": 2,
+    }
+    policy_hash = _policy_hash(policy_values)
+    governance_snapshot = {
+        "policy_id": policy_id,
+        "policy_version": 1,
+        "policy_hash": policy_hash,
+        **{
+            name: format(value, "f") if isinstance(value, Decimal) else value
+            for name, value in policy_values.items()
+        },
+        "provider_scope_key": hashlib.sha256(b"mock\0offline").hexdigest(),
+        "local_admission_only": True,
+        "run_overrides": {
+            "input_token_reservation": 64,
+            "lifetime_request_budget": 10,
+            "lifetime_token_budget": 10_000,
+            "lifetime_cost_budget_usd": "1.00000000",
+        },
+    }
+    audit_payload = {
+        "disposition": "settled_actual",
+        "outcome": "succeeded",
+        "input_tokens": 8,
+        "output_tokens": 3,
+        "cost_usd": "0.00000050",
+        "reconciled": False,
+    }
+    audit_payload_hash = hashlib.sha256(
+        json.dumps(audit_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     engine = create_database_engine(_sqlite_url(path))
     tables = Base.metadata.tables
     encrypted = CredentialKeyring(
@@ -165,31 +218,39 @@ def _insert_complete_mock_evidence(
                 {
                     "id": policy_id,
                     "version": 1,
-                    "policy_hash": "c" * 64,
+                    "policy_hash": policy_hash,
                     "is_active": True,
-                    "global_concurrency_limit": 8,
-                    "provider_concurrency_limit": 4,
-                    "model_concurrency_limit": 2,
-                    "run_concurrency_limit": 1,
-                    "global_requests_per_minute": 120,
-                    "provider_requests_per_minute": 60,
-                    "model_requests_per_minute": 30,
-                    "run_requests_per_minute": 10,
-                    "global_tokens_per_minute": 100_000,
-                    "provider_tokens_per_minute": 50_000,
-                    "model_tokens_per_minute": 25_000,
-                    "run_tokens_per_minute": 5_000,
-                    "global_lifetime_request_budget": 10_000,
-                    "global_lifetime_token_budget": 1_000_000,
-                    "global_lifetime_cost_budget_usd": Decimal("100.00000000"),
-                    "run_lifetime_request_budget": 10,
-                    "run_lifetime_token_budget": 10_000,
-                    "run_lifetime_cost_budget_usd": Decimal("1.00000000"),
-                    "backlog_limit": 32,
-                    "question_quantum": 2,
+                    **policy_values,
                     "activated_at": created_at,
                     "created_at": created_at,
                 },
+            )
+            connection.execute(
+                tables["worker_processes"].insert(),
+                [
+                    {
+                        "generation_id": str(uuid4()),
+                        "worker_id": f"worker-import-stale{suffix}",
+                        "started_at": created_at,
+                        "last_seen_at": created_at,
+                        "last_scan_at": created_at,
+                        "last_claim_at": None,
+                        "last_progress_at": None,
+                        "last_lease_heartbeat_at": None,
+                        "stopped_at": None,
+                    },
+                    {
+                        "generation_id": str(uuid4()),
+                        "worker_id": f"worker-import-stopped{suffix}",
+                        "started_at": created_at,
+                        "last_seen_at": finished_at,
+                        "last_scan_at": finished_at,
+                        "last_claim_at": finished_at,
+                        "last_progress_at": finished_at,
+                        "last_lease_heartbeat_at": finished_at,
+                        "stopped_at": finished_at,
+                    },
+                ],
             )
             connection.execute(
                 tables["benchmarks"].insert(),
@@ -283,6 +344,7 @@ def _insert_complete_mock_evidence(
                         "execution": {
                             "restart_recovery": "database_lease_resume_missing_responses"
                         },
+                        "governance": governance_snapshot,
                     },
                     "benchmark_hash_snapshot": "a" * 64,
                     "prompt_template_snapshot": {"system": "Answer exactly", "suffix": ""},
@@ -456,8 +518,8 @@ def _insert_complete_mock_evidence(
                         "id": f"audit-import{suffix}",
                         "event_key": f"reservation:{reservation_id}:settled_actual",
                         "event_type": "provider_attempt_settled",
-                        "payload_hash": "d" * 64,
-                        "payload": {"disposition": "settled_actual", "requests": 1},
+                        "payload_hash": audit_payload_hash,
+                        "payload": audit_payload,
                         "retention_class": "operational",
                         "occurred_at": created_at + timedelta(seconds=1),
                         "expires_at": created_at + timedelta(days=90, seconds=1),
@@ -675,6 +737,7 @@ def test_read_only_source_preflight_preserves_file_and_reconciles_rows(tmp_path:
     assert snapshot.summaries["question_executions"].row_count == 1
     assert snapshot.summaries["provider_call_reservations"].row_count == 1
     assert snapshot.summaries["audit_events"].row_count == 1
+    assert snapshot.summaries["worker_processes"].row_count == 2
     assert snapshot.summaries["questions"].row_count == 2
     assert snapshot.summaries["evaluation_responses"].row_count == 2
     assert hashlib.sha256(source.read_bytes()).hexdigest() == before
@@ -799,6 +862,105 @@ def test_source_preflight_rejects_active_provider_reservations(
         engine.dispose()
 
 
+def test_source_preflight_rejects_live_worker_but_accepts_stale_and_stopped(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "worker-process-state.db"
+    _run_alembic(source)
+    _insert_complete_mock_evidence(source)
+
+    snapshot = _read_only_snapshot(source)
+    assert snapshot.summaries["worker_processes"].row_count == 2
+
+    with sqlite3.connect(source) as connection:
+        connection.execute(
+            "UPDATE worker_processes SET last_seen_at = CURRENT_TIMESTAMP, "
+            "last_scan_at = CURRENT_TIMESTAMP WHERE stopped_at IS NULL"
+        )
+
+    engine = _read_only_sqlite_engine(source)
+    try:
+        with engine.connect() as connection:
+            connection.exec_driver_sql("BEGIN")
+            with pytest.raises(SQLiteImportError, match="live Worker generation"):
+                preflight_sqlite_source(connection, worker_stale_seconds=60)
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("damage", "error_pattern"),
+    [
+        ("policy_hash", "governance policy or managed Run snapshot"),
+        ("policy_column", "governance policy or managed Run snapshot"),
+        ("policy_snapshot", "governance policy or managed Run snapshot"),
+        ("run_override", "governance policy or managed Run snapshot"),
+        ("audit_payload_hash", "retained audit event failed integrity validation"),
+    ],
+)
+def test_import_rejects_governance_and_audit_integrity_drift_before_target_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    damage: str,
+    error_pattern: str,
+) -> None:
+    source = tmp_path / f"source-integrity-{damage}.db"
+    _run_alembic(source)
+    _insert_complete_mock_evidence(source)
+    with sqlite3.connect(source) as connection:
+        if damage == "policy_hash":
+            connection.execute(
+                "UPDATE governance_policies SET policy_hash = ? WHERE id = 'policy-import'",
+                ("e" * 64,),
+            )
+        elif damage == "policy_column":
+            connection.execute(
+                "UPDATE governance_policies SET question_quantum = 3 WHERE id = 'policy-import'"
+            )
+        elif damage in {"policy_snapshot", "run_override"}:
+            encoded = connection.execute(
+                "SELECT model_parameters_snapshot FROM evaluation_runs WHERE id = 'run-import'"
+            ).fetchone()[0]
+            snapshot = json.loads(encoded)
+            if damage == "policy_snapshot":
+                snapshot["governance"]["policy_hash"] = "e" * 64
+            else:
+                snapshot["governance"]["run_overrides"]["input_token_reservation"] = 65
+            connection.execute(
+                "UPDATE evaluation_runs SET model_parameters_snapshot = ? WHERE id = 'run-import'",
+                (json.dumps(snapshot, sort_keys=True, separators=(",", ":")),),
+            )
+        else:
+            connection.execute(
+                "UPDATE audit_events SET payload_hash = ? WHERE id = 'audit-import'",
+                ("e" * 64,),
+            )
+
+    class TargetProbe:
+        connect_calls = 0
+
+        def connect(self):
+            self.connect_calls += 1
+            raise AssertionError("damaged source must not open the target database")
+
+        def dispose(self) -> None:
+            return None
+
+    target = TargetProbe()
+    monkeypatch.setattr(import_sqlite_module, "create_database_engine", lambda _url: target)
+    output = io.StringIO()
+
+    with pytest.raises(SQLiteImportError, match=error_pattern):
+        import_sqlite_to_postgres(
+            str(source),
+            "postgresql+psycopg://llmbenchlab@localhost/empty_target",
+            output=output,
+        )
+
+    assert target.connect_calls == 0
+    assert output.getvalue() == ""
+
+
 @pytest.mark.parametrize(
     "statement",
     [
@@ -828,6 +990,38 @@ def test_source_preflight_rejects_reserved_governance_aggregates(
                 preflight_sqlite_source(connection)
     finally:
         engine.dispose()
+
+
+@pytest.mark.parametrize(
+    ("input_reservation_is_explicit", "actual_output_tokens", "expected"),
+    [
+        (False, 2, False),
+        (True, 2, True),
+        (False, 3, True),
+    ],
+)
+def test_importer_overdraw_reconciliation_distinguishes_observations_from_hard_bounds(
+    input_reservation_is_explicit: bool,
+    actual_output_tokens: int,
+    expected: bool,
+) -> None:
+    reservation = {
+        "reserved_input_tokens": 59,
+        "reserved_output_tokens": 2,
+        "reserved_cost_usd": Decimal("0.00010000"),
+        "actual_input_tokens": 75,
+        "actual_output_tokens": actual_output_tokens,
+        "actual_cost_usd": Decimal("0.00020000"),
+    }
+
+    assert (
+        import_sqlite_module._reservation_is_overdrawn(
+            reservation,
+            "settled_actual",
+            input_reservation_is_explicit=input_reservation_is_explicit,
+        )
+        is expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -1039,8 +1233,12 @@ def test_copy_snapshot_preserves_all_governance_tables_in_sqlite(tmp_path: Path)
         "0.00000050"
     )
     assert postcommit.rows["audit_events"][0]["payload"] == {
+        "cost_usd": "0.00000050",
         "disposition": "settled_actual",
-        "requests": 1,
+        "input_tokens": 8,
+        "outcome": "succeeded",
+        "output_tokens": 3,
+        "reconciled": False,
     }
     assert len(postcommit.rows["model_credentials"]) == 1
     assert postcommit.rows["model_credentials"][0] == source_snapshot.rows["model_credentials"][0]

@@ -241,6 +241,20 @@ def test_request_log_uses_route_template_instead_of_unmatched_user_path(client, 
     assert "sk-secret-value" not in completion.getMessage()
 
 
+def test_request_log_normalizes_attacker_selected_http_method(client, caplog) -> None:
+    secret_method = "SK-HTTP-METHOD-CANARY"
+    caplog.set_level("INFO", logger="app.main")
+
+    response = client.request(secret_method, "/api/v1/live")
+
+    assert response.status_code == 405
+    completion = next(
+        record for record in reversed(caplog.records) if record.event == "api_request_completed"
+    )
+    assert completion.request_method == "unsupported"
+    assert secret_method not in completion.getMessage()
+
+
 def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(client) -> None:
     empty = client.get("/api/v1/tasks/metrics")
     assert empty.status_code == 200
@@ -261,6 +275,17 @@ def test_task_metrics_are_database_derived_and_do_not_replace_dashboard_metrics(
         "total_attempts": 0,
         "total_failed_attempts": 0,
         "total_dispatches": 0,
+        "worker_expected_processes": 1,
+        "worker_registered_processes": 0,
+        "worker_live_processes": 0,
+        "worker_stalled_processes": 0,
+        "worker_shortfall_processes": 1,
+        "worker_stale_after_seconds": 60.0,
+        "worker_last_seen_at": None,
+        "worker_last_scan_at": None,
+        "worker_last_claim_at": None,
+        "worker_last_progress_at": None,
+        "worker_last_lease_heartbeat_at": None,
     }
     model = client.post(
         "/api/v1/models",

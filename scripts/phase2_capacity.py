@@ -247,8 +247,11 @@ WITH scope_facts AS MATERIALIZED (
     reservation.reserved_cost_usd,
     reservation.actual_input_tokens,
     reservation.actual_output_tokens,
-    reservation.actual_cost_usd
+    reservation.actual_cost_usd,
+    (reservation.run_id IS NULL OR run.input_token_reservation IS NOT NULL)
+      AS input_reservation_is_explicit
   FROM provider_call_reservations AS reservation
+  LEFT JOIN evaluation_runs AS run ON run.id = reservation.run_id
   CROSS JOIN LATERAL (
     VALUES
       (reservation.global_scope_id),
@@ -289,6 +292,8 @@ derived_scopes AS MATERIALIZED (
       state IN ('settled_actual', 'settled_conservative')
       AND (
         (
+          input_reservation_is_explicit
+          AND
           reserved_input_tokens IS NOT NULL
           AND actual_input_tokens IS NOT NULL
           AND actual_input_tokens > reserved_input_tokens
@@ -299,6 +304,8 @@ derived_scopes AS MATERIALIZED (
           AND actual_output_tokens > reserved_output_tokens
         )
         OR (
+          input_reservation_is_explicit
+          AND
           reserved_cost_usd IS NOT NULL
           AND actual_cost_usd IS NOT NULL
           AND actual_cost_usd > reserved_cost_usd
@@ -1079,6 +1086,7 @@ class Phase2Capacity(Phase2Acceptance):
         self.env["LLMBENCHLAB_COMPOSE_WORKER_LEASE_SECONDS"] = str(self.lease_seconds)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_HEARTBEAT_SECONDS"] = str(self.heartbeat_seconds)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_POLL_SECONDS"] = str(self.worker_poll_seconds)
+        self.env["LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES"] = str(self.worker_count)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_MAX_ATTEMPTS"] = str(self.worker_max_attempts)
         self.env["LLMBENCHLAB_COMPOSE_WORKER_RETRY_BACKOFF_BASE_SECONDS"] = str(
             self.retry_backoff_base_seconds

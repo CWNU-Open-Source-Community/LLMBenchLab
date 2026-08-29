@@ -13,7 +13,10 @@ from app.db.session import SessionLocal, engine
 from app.task_queue import create_run_queue
 from app.workers import WorkerService
 
-logger = logging.getLogger(__name__)
+# This module is executed as ``python -m app.worker`` in production, where
+# ``__name__`` is ``__main__``. Keep the registered application logger stable
+# so the final formatter preserves the closed Worker event contract.
+logger = logging.getLogger("app.worker")
 
 
 async def _run_worker() -> int:
@@ -38,11 +41,24 @@ async def _run_worker() -> int:
             continue
         installed_signals.append(signal_name)
     logger.info(
-        "Worker started",
-        extra={"event": "worker_started", "worker_id": service.worker_id},
+        "Worker process is starting",
+        extra={"event": "worker_starting", "worker_id": service.worker_id},
     )
     try:
-        await service.run(stop)
+        try:
+            await service.run(stop)
+        except Exception as exc:
+            logger.error(
+                "Worker main service stopped before a healthy lifecycle completed",
+                extra={
+                    "event": "worker_service_failed",
+                    "error_code": f"worker_service_error:{type(exc).__name__}",
+                    "result": "stopped",
+                },
+            )
+            return_code = 1
+        else:
+            return_code = 0
     finally:
         for signal_name in installed_signals:
             loop.remove_signal_handler(signal_name)
@@ -54,7 +70,7 @@ async def _run_worker() -> int:
         "Worker stopped",
         extra={"event": "worker_stopped", "worker_id": service.worker_id},
     )
-    return 0
+    return return_code
 
 
 def main() -> None:

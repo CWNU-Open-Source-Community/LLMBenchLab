@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.adapters.base import ProviderAttemptDisposition, ProviderAttemptOutcome
 from app.api.v1.models import _active_run_exists
+from app.db.clock import database_utc_now
 from app.db.session import create_database_engine
 from app.governance import (
     AuditIntegrityError,
@@ -44,8 +46,14 @@ from app.models import (
     ProviderType,
     Question,
     RunStatus,
+    WorkerProcess,
 )
 from app.runners.run_leases import CancelDisposition, ResponseDisposition, RunLeaseRepository
+from app.worker_progress import (
+    WorkerProgressEvent,
+    WorkerProgressRecorder,
+    collect_worker_progress,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -71,7 +79,8 @@ def postgres_store():
     with engine.begin() as connection:
         connection.execute(
             text(
-                "TRUNCATE audit_events, provider_call_reservations, question_executions, "
+                "TRUNCATE worker_processes, audit_events, provider_call_reservations, "
+                "question_executions, "
                 "governance_minute_buckets, governance_scopes, evaluation_responses, "
                 "evaluation_runs, questions, benchmarks, models, governance_policies "
                 "RESTART IDENTITY CASCADE"
@@ -124,6 +133,48 @@ def postgres_store():
         yield factory
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_postgres_worker_generations_flush_and_stop_without_cross_talk(
+    postgres_store,
+) -> None:
+    recorders = [
+        WorkerProgressRecorder(
+            postgres_store,
+            worker_id=f"worker-progress-pg-{index}",
+            flush_seconds=60,
+        )
+        for index in range(2)
+    ]
+    await asyncio.gather(*(recorder.start() for recorder in recorders))
+    recorders[0].note(WorkerProgressEvent.SCAN)
+    recorders[1].note(WorkerProgressEvent.PROGRESS)
+    assert await asyncio.gather(*(recorder.flush_now() for recorder in recorders)) == [True, True]
+
+    with postgres_store() as session:
+        now = database_utc_now(session)
+        snapshot = collect_worker_progress(
+            session,
+            now=now,
+            stale_seconds=60,
+            expected=2,
+        )
+        assert snapshot.registered == 2
+        assert snapshot.live == 2
+        assert snapshot.stalled == 0
+        assert snapshot.shortfall == 0
+
+    assert await asyncio.gather(*(recorder.stop() for recorder in recorders)) == [True, True]
+    with postgres_store() as session:
+        assert (
+            session.scalar(
+                select(func.count(WorkerProcess.generation_id)).where(
+                    WorkerProcess.stopped_at.is_not(None)
+                )
+            )
+            == 2
+        )
 
 
 def _response() -> EvaluationResponse:
@@ -235,7 +286,6 @@ def _prepare_atomic_governance_attempts(
             provider_scope=provider_scope_key("mock", None),
             lease_owner=lease.owner,
             lease_token=lease.token,
-            estimated_input_tokens=4,
             reserved_output_tokens=2,
             reserved_cost_usd=Decimal("0.10000000"),
         )
@@ -468,7 +518,6 @@ def test_postgres_governance_concurrency_limits_are_atomic_across_connections(
             provider_scope=provider_scope_key("mock", None),
             lease_owner=lease.owner,
             lease_token=lease.token,
-            estimated_input_tokens=4,
             reserved_output_tokens=2,
             reserved_cost_usd=None,
         )

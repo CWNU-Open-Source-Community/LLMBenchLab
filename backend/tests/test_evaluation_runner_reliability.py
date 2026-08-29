@@ -32,6 +32,7 @@ from app.runners.run_leases import (
     ResponseDisposition,
     RunLease,
 )
+from app.worker_progress import WorkerProgressEvent
 
 
 def _assert_outside_event_loop() -> None:
@@ -126,6 +127,14 @@ class _ClosableAdapter:
 
     async def aclose(self) -> None:
         self.close_calls += 1
+
+
+class _ProgressObserver:
+    def __init__(self) -> None:
+        self.events: list[WorkerProgressEvent] = []
+
+    def note(self, event: WorkerProgressEvent) -> None:
+        self.events.append(event)
 
 
 class _ControlledRunner(EvaluationRunner):
@@ -524,6 +533,27 @@ async def test_cancellation_stops_consumers_before_the_next_question(
 
 
 @pytest.mark.asyncio
+async def test_runner_notes_only_committed_claim_response_and_terminal_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.runners.evaluation_runner.build_adapter", lambda *args, **kwargs: object()
+    )
+    runner = _CancellationRunner(concurrency=1, question_count=1)
+    observer = _ProgressObserver()
+    runner._progress_observer = observer
+    runner.block.set()
+
+    assert await runner.execute("run-controlled") is True
+
+    assert observer.events == [
+        WorkerProgressEvent.CLAIM,
+        WorkerProgressEvent.PROGRESS,
+        WorkerProgressEvent.PROGRESS,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_finish_log_uses_terminal_state_resolved_inside_database_lock(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -610,6 +640,8 @@ async def test_blocking_heartbeat_repository_call_does_not_block_event_loop() ->
     runner = object.__new__(EvaluationRunner)
     runner._lease_repository = repository
     runner._heartbeat_seconds = 0.001
+    observer = _ProgressObserver()
+    runner._progress_observer = observer
     lease = _FakeLeaseRepository().lease
     stop = asyncio.Event()
     lease_lost = asyncio.Event()
@@ -627,6 +659,7 @@ async def test_blocking_heartbeat_repository_call_does_not_block_event_loop() ->
 
     assert repository.entered.is_set()
     assert not lease_lost.is_set()
+    assert observer.events == [WorkerProgressEvent.LEASE_HEARTBEAT]
 
 
 @pytest.mark.asyncio
@@ -883,7 +916,7 @@ async def test_managed_question_uses_frozen_context_and_persists_safe_provider_e
     assert disposition == ResponseDisposition.INSERTED
     context_call = governance_repository.question_context_calls[0]
     assert context_call["provider_scope"] == "a" * 64
-    assert context_call["estimated_input_tokens"] > 0
+    assert "estimated_input_tokens" not in context_call
     assert context_call["reserved_output_tokens"] == 25
     assert context_call["reserved_cost_usd"] == Decimal("0.0003")
     assert adapter.calls[0][2] == {"attempt_context": context}

@@ -10,7 +10,7 @@
 
 - 容量方法和当前 Mock 基线：[PERFORMANCE.md](PERFORMANCE.md)
 - 部署、迁移和凭据：[DEPLOYMENT.md](DEPLOYMENT.md)
-- 数据库治理语义：[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[交付边界 ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md) 和 [pre-send retry generation ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)
+- 数据库治理语义：[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[交付边界 ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[pre-send retry generation ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[可观测性/保留 ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 和 [observational reservation 修正 ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
 - API 字段与错误码：[API.md](API.md)
 - 安全边界：[SECURITY.md](SECURITY.md)
 
@@ -34,6 +34,7 @@ curl -sS http://127.0.0.1:8000/api/v1/ready
 curl -sS http://127.0.0.1:8000/api/v1/governance/policy
 curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
 curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
+curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 ```
 
 ### 2.2 当前 gauges
@@ -46,12 +47,14 @@ curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
 | `running` / `active_provider_attempts` | 当前 Run lease / ledger 中 active attempt | 超过 policy 或租约失效后不下降属于完整性问题 |
 | `governance_delayed` | 并发或 UTC fixed-minute RPM/TPM 暂时背压 | 超过预期窗口仍不恢复时检查 policy、数据库时钟和 Worker |
 | `governance_exhausted` | lifetime request/token/cost、未知上界/价格或 overdrawn 导致终止 | 先核对稳定 reason，再决定新建 Run 或修正未来 policy |
-| `overdrawn_governance_scopes` | Provider actual usage 超过 reservation | 非零立即停止扩大负载并核对真实账单/Token 上界 |
+| `overdrawn_governance_scopes` | Provider actual usage 超过显式 hard reservation | 非零立即停止扩大负载并核对显式 input/output 上界、由上界和价格计算的 reserved cost 与真实账单；无显式 input bound 的观测估算偏差不应计入 |
 | `expired_running` | lease 已按数据库时间过期 | 短暂出现可由 reaper 接管；持续非零说明恢复失败 |
 | `retry_scheduled` / `total_failed_attempts` | Run 级失败等待 / 累计失败预算 | 观察增量，不能用 `attempt_count` 代替失败数 |
 | `dead_lettered` | 失败预算耗尽的 Run | 任一新增都应检查 Run audit 和已有 Response |
 | `runs_with_queue_notification_error` | 曾发生 Redis publish 失败的 Run | 可由 DB reconciliation 完成，但应检查 Redis 和延迟 |
 | `total_dispatches` / `total_attempts` | cooperative slice / lease acquisition 累计 | 用历史增量判断调度活动，不是错误计数 |
+| `worker_live_processes` / `worker_shortfall_processes` | DB UTC 下仍有真实进展的 Worker / 相对显式 expected minimum 的缺口 | shortfall 持续非零说明主循环停滞、进程退出或部署 expected 配置错误 |
+| `worker_last_scan_at` / `worker_last_claim_at` / `worker_last_progress_at` / `worker_last_lease_heartbeat_at` | 未停止 generation 的最近聚合事实 | 空值表示尚无该类事实；时间陈旧不能由 dependency probe 的成功覆盖 |
 
 ### 2.3 历史 counters、延迟和单 Run audit
 
@@ -59,14 +62,86 @@ curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
 
 `GET /api/v1/runs/{run_id}/audit?offset=0&limit=100` 按 `(occurred_at,id)` 稳定分页。审计是应用 append-only，不是密码学不可篡改或 WORM；数据库管理员仍能修改它。operational 事件至少保留 90 天，security/credential 事件至少 365 天。清理不在请求链路自动执行：必须先归档、核验并生成所需 rollup，再由明确维护操作清理。
 
-建议外部监控至少实现以下症状规则，具体数值要根据目标环境基线设定：
+`GET /api/v1/metrics/prometheus` 提供固定低基数 Prometheus text exposition。它不接受查询参数；每个 API 进程只允许一笔 collection in flight，重叠抓取返回 `429`。数据库、Run/governance、15 分钟 typed-audit window、1 小时 Run latency 与 Worker aggregate 使用同一数据库快照和 DB UTC；Redis 仅为快照外的非权威 availability observation。任一 retained audit 损坏使整次抓取 fail closed，不返回部分指标。所有 series 都是 gauge；rolling-window count 不是 counter，不得对它使用 `rate()` 或 `increase()`。
+
+仓库提供 `deploy/observability/prometheus-scrape.example.yml` 和 `deploy/observability/prometheus-alerts.json`，但不部署 Prometheus、Alertmanager 或通知发送器。推荐 scrape interval 为 60 秒且不得低于 30 秒。告警规则固定为下节八条；不要把一次 `/ready=200`、一次 exporter scrape 成功或任意 peer 的 progress 当作当前 Worker 主循环仍在推进的证明。
+
+额外的运维观察仍应包括：
 
 - 立即告警：数据库不可用、schema 非 head、`overdrawn_governance_scopes>0`、`governance_integrity_error` 新增、审计/ledger 唯一性或 reserved 对账漂移。
 - 高优先级：dead-letter 新增、`expired_running` 持续、settlement unknown/保守结算异常增加、真实 Provider 账单超出本地 consumed 上界预期。
 - 持续性告警：`managed_backlog`/`due_pending` 多个观察窗口单调增长，`governance_delayed` 跨越应有 fixed-minute 窗口，queue lag/PEL 不下降，p95/p99 明显偏离同硬件基线。
 - 容量预警：数据库连接池等待、deadlock/conflict/temp file、Redis 内存/Stream 长度或 Worker CPU/内存逼近环境阈值。
 
-仓库不包含告警发送器或 Prometheus exporter；必须由部署环境轮询 API/数据库并负责通知。不要把“一次 `/ready=200`”当作 Worker 主循环仍在推进的证明。
+告警发送、路由、值班升级和长期存储仍由部署环境负责。
+
+### 2.4 固定告警响应
+
+下列 Runbook 与 `deploy/observability/prometheus-alerts.json` 一一对应。响应时先保存告警名称、UTC 起止时间、当前 revision、固定指标快照和相关 Run audit；不得把 archive/raw payload、凭据、DSN、内部 URL 或异常原文贴入工单。静默必须使用窄 job/instance matcher，并记录 owner、ticket 与明确到期时间；禁止全局 silence。
+
+<a id="alert-exporter-unavailable"></a>
+#### Exporter unavailable
+
+- **响应**：确认 API 进程、`/ready` 的 database/schema 分量和 `/api/v1/metrics/prometheus` 状态；`429` 表示已有 collection，`500` 表示 audit integrity，`503` 表示数据库或 observation cap，不要只重启 Prometheus。
+- **证据**：保存固定错误码、DB/head 状态、API 资源与抓取持续时间；不得保存响应中的未知正文或服务配置。
+- **恢复**：先恢复 PostgreSQL/head 或处置损坏 retained event；确认一次完整抓取成功且没有并发 collection 后再关闭事故。
+- **静默**：仅受控维护可按 job/instance 静默，最长 4 小时；不得掩盖 audit integrity 或数据库不可用。
+
+<a id="alert-backlog-persistent"></a>
+#### Backlog persistent
+
+- **响应**：按第 4.1 节检查 Worker DB-time progress、due/deferred、lease、Provider 和连接池，不通过删除队列或手改 Run 解堵。
+- **证据**：保存 backlog/due/running/shortfall、最近 scan/claim/progress、policy hash 与固定窗口 history。
+- **恢复**：停止扩大 admission，恢复 Worker/数据库/Provider 后确认 due backlog 连续下降并最终收敛。
+- **静默**：只允许已批准容量维护的窄 job matcher，最长 4 小时。
+
+<a id="alert-dead-letter"></a>
+#### Dead letter
+
+- **响应**：立即执行第 4.3 节，读取 Run、Response 和完整分页 audit；不重置失败计数或重新使用旧 operation key。
+- **证据**：保存稳定 reason、failed/max attempts、policy version/hash、已有 Response 数和新建替代 Run 的关联。
+- **恢复**：修复根因后创建新 Run，并确认没有新增 dead-letter；旧事实必须保留。
+- **静默**：捕获证据后才可按 job 短暂静默，最长 1 小时。
+
+<a id="alert-governance-integrity"></a>
+#### Governance integrity
+
+- **响应**：停止新 admission 和相关 Worker 外发，保存数据库快照；从 never-delete ledger 重算 scope/minute projection，禁止直接 UPDATE counter。
+- **证据**：保存固定 integrity reason、revision、policy hash、漂移字段类别与 reservation 状态计数，不复制 payload 或凭据。
+- **恢复**：只能通过经评审的事实修复/恢复路径并重跑完整性测试；确认新 reserve 在重算后成功且旧漂移仍可审计。
+- **静默**：不作常规静默；只有事故负责人明确控制影响时才使用最窄 matcher 和最短期限。
+
+<a id="alert-governance-overdraw"></a>
+#### Governance overdraw
+
+- **响应**：停止扩大真实 Provider 流量，核对 actual usage、Run 的显式 `input_token_reservation`、显式 `max_tokens`、价格和 Provider 账单；不要把 actual 改回 reservation。若历史事实只有输入估算且 Run 没有显式 input bound，应先核对数据库是否仍停在 `0006`，不要手改 scope flag。
+- **证据**：保存 scope 类型、非秘密 consumed/reserved 汇总、policy/Run override hash 和外部账单关联编号。
+- **恢复**：真实 hard overdraw 应修正未来 Run 的显式 Token/cost bound 或 policy，并保留旧事实。旧 `0006` observational input 误判必须在无 active reservation 的维护窗口升级到 `0007`，由 migration 重算 materialized flag；ledger、actual usage、Response 与旧 Run 终态不改写。
+- **静默**：不作常规静默；告警消失也不能替代账单对账。
+
+<a id="alert-queue-degraded"></a>
+#### Queue degraded
+
+- **响应**：先确认 PostgreSQL 正常，再按第 7 节检查 Redis、Stream、consumer group、lag/PEL 和 Worker DB scan。
+- **证据**：保存 queue configured/available、DB pending/due 与固定的 queue notification error 计数；不保存 Redis URL/密码。
+- **恢复**：恢复 Redis 后验证新通知、DB reconciliation 与 PEL/lag 收敛；不得通过删除 Stream/consumer group 伪造恢复。
+- **静默**：受控 Redis 维护可按 job 静默，最长 4 小时。
+
+<a id="alert-worker-stalled"></a>
+#### Worker stalled
+
+- **响应**：核对部署的 expected minimum、未停止 generation 的 DB UTC last_seen/scan/claim/progress/heartbeat 与进程状态；dependency-only probe 不能否定此告警。
+- **证据**：保存 expected/registered/live/stalled/shortfall 和五类聚合时间，不导出 worker/generation ID。
+- **恢复**：优先 graceful restart/scale，等待旧 lease 自然过期并核对 fencing、Response 唯一性和 reservation reconciliation。
+- **静默**：仅明确缩扩容维护可按 job/instance 静默，最长 1 小时；维护时 expected minimum 必须与目标规模一致。
+
+<a id="alert-lease-recovery-slow"></a>
+#### Lease recovery slow
+
+- **响应**：按第 6.2 节检查 DB 时钟、reaper scan、Worker shortfall、retry backoff 和旧 token ledger，不手工抢占或释放 `send_started`。
+- **证据**：保存 expired-running 数、oldest age、恢复阈值、最近 scan/claim/progress 和固定的 lease/audit 状态。
+- **恢复**：确认 token 递增、旧写入被 fence、reservation 恰好收敛且 Run 进入可解释终态。
+- **静默**：只有已建立恢复 owner 后才可窄静默，最长 15 分钟。
 
 ## 3. 限流和预算
 
@@ -91,7 +166,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
 - 必须有显式有限 `max_tokens`；`null` 的 Provider default 在 hard Token/cost 下会以 `governance_unbounded_output` fail closed。
 - cost budget 还要求 USD input/output price；缺失以 `governance_pricing_unknown` fail closed。
 - policy 与 Run override 的 USD 有效范围是 `0..10000000.00000000`、最多 8 位小数；API 响应以 JSON string 保留 Decimal。PostgreSQL 使用精确 `NUMERIC(20,8)`；该公开上限使 SQLite 浮点间距低于半个 `1e-8` 存储量化单位，不应绕过 API 直接写入更大金额。
-- actual usage 超出 reservation 时保存 actual、scope 标记 overdrawn 并阻止后续 attempt；已发生的远端消费无法撤销。
+- actual usage 始终按 Provider 返回值保存。只有 actual 超过显式 input/output reservation，或超过由完整显式上界与冻结价格计算的 reserved cost 时，scope 才标记 overdrawn 并阻止后续 attempt；无显式 input reservation 时，输入估算不写入 attempt hard reservation，也不参与 reserved cost 或 input/cost overdraw。显式 `max_tokens` 形成的 output reservation 仍独立生效。
 - usage 缺失或远端是否处理不确定时按完整 reservation 保守结算，不按零释放。
 
 `governance_scopes` 和 `provider_call_reservations` 是预算/attempt 事实，`audit_events` 只作历史观察。API 目前没有“剩余预算”端点；如需告警百分比，应由只读运维任务根据 active policy、Run override 及 scope 的 `reserved_* + consumed_*` 计算，并与 Provider 账单独立对账。不要直接更新物化 counter。
@@ -129,7 +204,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
 
 - `*_request_budget_exhausted` / `*_token_budget_exhausted` / `*_cost_budget_exhausted`：核对冻结 policy/Run override 和 consumed/reserved。
 - `governance_input_bound_unknown` / `governance_unbounded_output` / `governance_pricing_unknown`：修正未来 Run 的显式上界或价格；旧 Run 快照不应静默修改。
-- `*_overdrawn`：停止扩大真实流量，核对 Provider actual usage 和账单。
+- `*_overdrawn`：停止扩大真实流量，核对 Provider actual usage、显式 Run input/output reservation、冻结价格、派生 reserved cost 和账单。当前 `0007` 不会把无显式 input bound 的观测估算偏差解释成 overdraw。
 - `governance_provider_retry_exhausted`：同一 question execution generation 的 HTTP ordinal 已耗尽，不得通过 yield/restart 重置。
 
 已有 Response 会先聚合进 failed Run，仍可用于诊断，但不能作为 completed 正式比较。
@@ -181,16 +256,18 @@ Run 终态、defer 或 exhaust 转换会先在短事务中提交，再做 lease 
 Compose 扩到两个 Worker：
 
 ```bash
-docker compose up -d --no-deps --scale worker=2 worker
+LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES=2 \
+  docker compose up -d --no-deps --scale worker=2 worker
 ```
 
 缩到一个 Worker：
 
 ```bash
-docker compose up -d --no-deps --scale worker=1 worker
+LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES=1 \
+  docker compose up -d --no-deps --scale worker=1 worker
 ```
 
-缩容依赖 SIGTERM grace。先观察活动 Run，等待被停止 Worker 排空；若 grace 耗尽，未完成 lease 留到数据库自然过期，由 peer 以递增 token 接管。缩容后检查 Worker health、`running/expired_running/retry_scheduled`、active reservations 和 Response 唯一性。
+`LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` 是部署声明，不从历史进程行猜测；规模与 expected 不一致会产生有意的 shortfall。缩容依赖 SIGTERM grace。先观察活动 Run，等待被停止 Worker 排空；若 grace 耗尽，未完成 lease 留到数据库自然过期，由 peer 以递增 token 接管。缩容后检查 Worker health、DB-time registered/live/stalled、`running/expired_running/retry_scheduled`、active reservations 和 Response 唯一性。
 
 ### 6.2 Worker crash/lease expiry
 
@@ -254,7 +331,66 @@ PostgreSQL 不可用时没有可替代事实源。API 不应接受新 Run，Work
 
 若恢复点早于某些 Provider 外发，数据库无法知道备份之后的远端消费；必须以 Provider 账单和 request ID 独立核对。Redis 可以重建通知，不能用来补造丢失的数据库事实。
 
-## 9. 0004 安全回滚
+### 8.1 本地开发 SQLite 恢复边界
+
+个人本地 SQLite 恢复不等同 P2-07 的 PostgreSQL/keyring 灾难恢复认证。恢复前必须停止 `make dev`、CLI 和任何直接连接者，并确认默认库没有进程占用或 WAL/SHM/journal sidecar。候选备份应按逻辑表计数、`PRAGMA quick_check`、外键、Alembic revision 和内容摘要选择，不能按文件体积猜测；含大量 freelist 的大文件可能在逻辑上为空。保留原候选不变，只在 staging 副本上执行受支持的 migration preflight/upgrade/check；迁移后数据摘要一致才可替换默认库。替换前另存并验证当前库，stored credential 还必须配对恢复数据库外 keyring，且核验过程不得输出 Key、ciphertext、nonce 或 keyring 内容。
+
+## 9. Audit archive、核验与保留
+
+`audit_events.expires_at` 表示行已达到最低保留期，不表示可由请求链路自动删除。Operational/security 事件仍分别至少保留 90/365 天；维护流程必须严格执行 **archive → offline verify → reconcile → maintenance-window delete**。Archive 是含内部 ID 的敏感运维文件，hash 只用于误改检测和精确文件确认，不是签名、认证、WORM 或不可篡改证明。
+
+先创建由当前维护用户拥有、不可被 group/other 写的目录；建议 `0700`：
+
+```bash
+install -d -m 0700 /approved/internal/audit-archives
+llmbenchlab-audit-retention archive \
+  --output /approved/internal/audit-archives/audit-2026-08-28.jsonl
+llmbenchlab-audit-retention verify \
+  --archive /approved/internal/audit-archives/audit-2026-08-28.jsonl
+```
+
+工具拒绝 symlink、非当前用户所有或权限宽于 `0600` 的输入；输出使用同目录 `0600` 临时文件、no-follow/no-replace 安装和 fsync。单批最多 10,000 条、文件最多 128 MiB；`has_more_eligible=true` 时以新的目标文件重复 archive，不能覆盖既有文件。CLI 成功只输出固定 status/count/SHA-256，不输出路径、event ID 或 payload；不要把 archive、raw child output 或命令中的本地路径复制到共享工单。
+
+`verify` 是完全离线操作，不读取数据库配置、不创建 engine，也不访问 Redis。它校验 canonical JSONL、完整 event 存储事实、source revision、排序、rollup、content/file digest 和 payload contract。完成离线核验后，在 API/Worker/audit writers 已停止的维护窗口，用 verify 输出的精确文件 SHA 执行：
+
+```bash
+llmbenchlab-audit-retention reconcile \
+  --archive /approved/internal/audit-archives/audit-2026-08-28.jsonl \
+  --confirm-sha256 <exact-file-sha256>
+llmbenchlab-audit-retention delete \
+  --archive /approved/internal/audit-archives/audit-2026-08-28.jsonl \
+  --confirm-sha256 <exact-file-sha256>
+```
+
+`delete` 只逐条删除已经核验且与数据库完整事实精确相等的 ID/event-key 集合，绝不执行宽泛 cutoff delete；任一缺失、额外或字段漂移会整体拒绝。`restore` 使用同一精确比较和确认 digest，只恢复缺失且无冲突的行：
+
+```bash
+llmbenchlab-audit-retention restore \
+  --archive /approved/internal/audit-archives/audit-2026-08-28.jsonl \
+  --confirm-sha256 <exact-file-sha256>
+```
+
+退出码 `0` 表示已确认成功，`2` 表示在提交前安全失败，`3` 表示提交已成功但后验核验失败，`4` 表示 commit outcome unknown。遇到 `3` 或 `4` 不得盲目重跑 mutation：保留 archive/count/digest，先执行只读 `reconcile` 判定数据库与 archive 的精确关系，再由操作者决定恢复或删除。Archive 与数据库/keyring 备份是不同资产；archive 不含 credential ciphertext/nonce/keyring，也不能单独恢复 stored Provider Key。
+
+## 10. 0007、0006、0005 与 0004 安全回滚
+
+### 10.1 Observational overdraw 数据修复 0007
+
+当前 head `20260830_0007` 不新增表、字段或索引，也不修改 never-delete reservation、Provider actual usage、Response、audit 或 Run 终态。它只关联 managed reservation 对应的 `evaluation_runs.input_token_reservation`，按以下规则重算每个 `governance_scopes.overdrawn`：input/cost 维度只有在 Run 冻结了显式 input reservation 时参与；显式 `max_tokens` 形成的 output reservation 独立参与；没有关联 Run 的内部 synthetic reservation 继续把调用者提供的值视为显式。
+
+`0006 -> 0007` 和 `0007 -> 0006` 都会在任何 materialized 更新前拒绝仍为 `reserved` 或 `send_started` 的 attempt。标准维护流程是停止 API/Worker/CLI writer，确认 active reservation 为零并创建一致性备份，再由唯一 migration owner 执行 `make migrate`。直接 `UPDATE governance_scopes`、删除 ledger 或裁剪 actual usage 均不受支持。降级到 `0006` 只按旧谓词重算 flag，让旧应用看到与旧 runtime 一致的 projection；它不会恢复旧代码、删除事实或把历史失败 Run 改成成功。
+
+### 10.2 Governance index compatibility repair 0006
+
+revision `20260829_0006` 不增加新的业务字段或表，只为曾执行早期 `0004` 变体的数据库条件补齐 `ix_evaluation_runs_started_at_id`、`ix_evaluation_runs_finished_at_id` 与 `uq_governance_policies_single_active`。`make migrate` 只在 revision fingerprint 为 canonical，或缺失项是这三个索引的非空子集时放行，并先创建 SQLite 一致性备份；这允许在 SQLite repair DDL 部分完成但 marker 仍为 `0005` 时安全重入。PostgreSQL `0005` 也必须通过 metadata drift 校验。若有多条 active policy、错误的同名索引或任何额外 drift，必须人工核对，工具不会自动停用 policy。`0006 -> 0005` 保留这三个 canonical `0004` 索引，因此是有意的 no-op downgrade。
+
+### 10.3 Worker progress / retention revision 0005
+
+revision `20260828_0005` 增加 `worker_processes` 和 audit retention/exporter 扫描索引。`0005 -> 0004` 在第一条 DDL 前检查 Worker process facts；只要表中存在任何 generation 行就拒绝，以免静默丢失注册、进展或 graceful-stop 证据。安全降级必须先停止 Worker、归档需要保留的 process facts，并由明确的数据生命周期审批清空；正常代码回滚应保留 0005 schema 并优先向前修复。
+
+正式迁移验收同时保留两层独立门禁：populated 0005 数据库拒绝跨过 Worker progress revision且 revision/核心事实不变；隔离空库允许 `0005 -> 0004 -> 0005`。这不会替代下节已有的 populated 0004 governance 拒绝与空库 `0004 -> 0003 -> 0004` 往返。
+
+### 10.4 Governance/audit revision 0004
 
 revision `20260827_0004` 增加 policy、scope、minute bucket、question execution、Provider attempt ledger、typed audit、Run governance/fairness 字段及 Response Provider metadata。downgrade guard 在第一条 DDL 前检查数据损失风险。
 
@@ -278,7 +414,7 @@ revision `20260827_0004` 增加 policy、scope、minute bucket、question execut
 
 隔离空数据库允许 `0004 -> 0003 -> 0004` 往返；真实验收同时证明 populated 数据库 downgrade 被拒绝且 revision/core protocol hash 不变。详见 [PERFORMANCE.md](PERFORMANCE.md) 和 Phase 2 acceptance evidence。schema downgrade 不是 PostgreSQL→SQLite 回迁。
 
-## 10. 事故收尾清单
+## 11. 事故收尾清单
 
 - [ ] Run/Response 状态只由 PostgreSQL事实解释，没有手工覆盖。
 - [ ] Redis PEL/lag 已观察，未通过删除权威数据“修复”。
@@ -288,5 +424,8 @@ revision `20260827_0004` 增加 policy、scope、minute bucket、question execut
 - [ ] dead-letter、conservative settlement、failed attempt 和 Provider 账单已关联。
 - [ ] policy version/hash、Run frozen snapshot 和协议/data hash 已记录。
 - [ ] 日志、工单和 evidence 不含 Key、DSN、keyring、密文或原始 Provider body。
+- [ ] Worker expected minimum 与实际部署规模一致；registered/live/stalled/last-progress 使用同一 DB UTC 解释，dependency probe 未被当作主循环进展。
+- [ ] Prometheus rolling-window gauge 未被当作 counter；告警 Runbook、owner/ticket/expiry 和窄 silence 均有记录。
+- [ ] 过期 audit 已先 archive、离线 verify 并按精确 digest/reconcile 操作；没有 cutoff 宽泛删除，commit unknown 未被盲目重试。
 - [ ] 修复后重跑目标测试、真实 Compose acceptance 和同硬件容量基线。
 - [ ] 清理只作用于明确的隔离测试 project；生产 evidence/backup 按保留策略归档。

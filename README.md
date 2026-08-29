@@ -6,7 +6,7 @@ GitHub：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open
 
 LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测工作台。它把模型注册、版本化 Benchmark、后台评测、逐题证据、汇总指标和排行榜放进一条可审计的本地流程，并以“默认离线、严格评分、结果可复现”为首要约束。
 
-当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理候选：PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger 与 typed audit 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。
+当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理候选；P2-06 可观测性/审计保留切片已完成实现、clean evidence 与 evidence-doc 精确 SHA CI，状态为 `completed`。PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger、typed audit 与 Worker progress 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。
 
 ## 当前状态
 
@@ -15,9 +15,12 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - Phase 0（治理、需求、架构和协议）已完成。
 - Phase 1 MVP 已具备完整垂直链路：注册模型、载入/导入 Benchmark、创建 Run、逐题持久化、结果聚合和前端展示。
 - Phase 2 候选已通过真实 PostgreSQL/Redis 和进程故障验证：除租约、心跳、fencing、幂等 Response 与数据库恢复外，Web/API managed Run 还具有 global/provider/model/run 四层数据库 admission、fixed-minute RPM/TPM、lifetime request/Token/cost budget、有限 backlog、公平 slice、逐 attempt reservation/settlement、typed audit 和历史延迟。
+- 当前 Alembic head 为 data-only `20260830_0007`：没有显式 `input_token_reservation` 时，输入 Token 估算只用于观测，不再写成 hard reservation 或参与 cost/overdraw 裁决；Provider actual usage 仍完整保存。显式 input/output 预留及由完整上界和价格计算的 reserved cost 超额仍按原规则 fail closed。
 - 可信本地 CLI 已提供 MMLU-Pro 与 GPQA-Diamond 的固定来源转换、真实 OpenAI-compatible 预检、可恢复执行和完整报告导出；这是 Phase 3 的客观题垂直切片，不代表 Phase 2 或 Phase 3 已完成。
 - 自动化、CI、Compose 故障验收和容量演练的模型执行都只使用 Mock；根据层级使用临时 SQLite 或隔离 PostgreSQL 16/Redis 7，不访问真实模型服务，也不产生模型费用。
-- Phase 2 仍为 `in_progress`，但 P2-01 已完整交付：`P2-local-control-plane-v2` 在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 次 warm-up + 5 次 measured trial，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；该实现的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run 33150080341](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。该结论仅限固定 Mock-only 单机控制面，不是生产或真实 Provider SLA；下一任务为 P2-06/P2-07 的 Worker 主循环 progress/liveness、exporter/告警、保留期归档、backup/restore 和剩余恢复矩阵。Phase 3 只交付上述客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
+- Phase 2 仍为 `in_progress`。P2-01 已完整交付：`P2-local-control-plane-v2` 在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 次 warm-up + 5 次 measured trial，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；该实现的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run 33150080341](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
+- P2-06 状态为 `completed`。实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已 push 到当前分支并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 [GitHub Actions run 33164609388](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 成功。绑定同一 clean SHA 的 Compose acceptance 9/9 通过，evidence 为 `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-92e173eeee28/evidence.json`（SHA-256 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`），Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0` 且 cleanup C/V/N 全空；clean capacity evidence 为 `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-ca5673061b0f/evidence.json`（SHA-256 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`），1W/2W/burst QPS=`7.267474/12.962228/9.333604`、wall=`8.255963/4.628834/6.428385s`，最终 18 Runs/270 Responses/270 QuestionExecutions/271 reservations/1230 audit，0 question error/drift/duplicate/PEL/lag，Worker expected=2、shortfall=0，cleanup C/V/N/image 全零且 image counters=`1/1/0/0`。这是 Mock-only 单机观测，不是生产或真实 Provider SLO；此前 dirty evidence 继续保留为历史，不替代该 clean-SHA 结果。Evidence-doc commit [`ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6) 已 push，其精确 SHA 的 [run 33165775037](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 4/4 成功，完成 P2-06 仓库级收尾。
+- P2-07 状态为 `planned`，ADR-0016、独立计划和工作日志已建立，但功能尚未实现；后续才开始数据库/keyring 配对 backup/restore、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵，因此 Phase 2 仍为 `in_progress`。Phase 3 也只交付客观数据垂直切片，其余 Phase 3–6 能力仍未完成。
 
 最新、可复核的完成状态与测试证据以 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) 和 [`docs/worklogs/`](docs/worklogs/) 为准；Roadmap 中的计划能力不等于已交付能力。
 
@@ -32,9 +35,9 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - **可解释指标**：严格总分 `score`、完成率 `completion_rate` 和已回答准确率 `answered_accuracy` 分开呈现，避免把缺失回答隐藏在成功样本中。
 - **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复；大快照加载移出事件循环，已领取 Run 在物化题目时仍可续租。
 - **幂等与恢复**：同一 Run/Question 只有一条计分证据；租约心跳、有限 attempt、退避、取消、过期接管和 dead-letter 都由数据库裁决，Redis 不是状态数据库。
-- **数据库权威治理**：Web/API admission 把版本化完整 policy 冻结进 Run；global/provider/model/run 四层并发、RPM/TPM 和累计预算在固定锁序中共同裁决，backlog 满时在提交前稳定拒绝，Token/cost hard limit 缺少显式上界或价格时 fail closed。
+- **数据库权威治理**：Web/API admission 把版本化完整 policy 冻结进 Run；global/provider/model/run 四层并发、RPM/TPM 和累计预算在固定锁序中共同裁决，backlog 满时在提交前稳定拒绝，Token/cost hard limit 缺少显式上界或价格时 fail closed。非显式输入估算不会冒充 hard reservation；actual usage 仍保留，只有实际用量超过显式预留才触发对应 overdraw。
 - **逐 Provider attempt 账本与公平调度**：每次 HTTP attempt 先 reserve、再持久化 `send_started`、最后 actual/conservative settlement；可证明未发送的 release 保留终态 ledger，另起 generation 并重试当前未发送 ordinal，不重置之前已发送的 HTTP retry。Worker 每个 lease 只新增有界 question quantum，按最久未获服务顺序 cooperative yield，不把让出误计为失败。
-- **可审计观测**：typed、应用 append-only audit 以稳定 event key 去重；`/tasks/history` 在同一读取快照中校验 retained audit 后给出 counters（pending/running cancel 都计 `run_cancel_requested`，dead-letter 单列 `run_dead_lettered`）与 Run queue/execution/end-to-end p50/p95/p99；Run created/finished 和 credential audit 统一取数据库 UTC。逐题保存经过安全归一化的 Provider request/model/fingerprint/finish/attempt 元数据，credential 生命周期写入不含 Key/origin/envelope 的 security audit。
+- **可审计观测与受控保留**：typed、应用 append-only audit 以稳定 event key 去重；`/tasks/history` 在同一读取快照中校验 retained audit 后给出 counters 与 Run latency，`/metrics/prometheus` 用固定 gauge/enum label、硬样本上限和进程内 single-flight 暴露同源快照。Worker generation 只在真实 scan/claim/lease-heartbeat/progress 后按数据库 UTC 合并刷新，dependency probe 仍明确不检查主循环。八条 Prometheus 规则附固定 Runbook；`llmbenchlab-audit-retention` 提供 canonical JSONL archive、离线 verify、reconcile、精确 restore/delete，默认不删除且不把普通 hash 冒充 WORM。Run created/finished、credential audit 和逐题 Provider 元数据继续遵守非秘密边界。
 - **可复现记录**：持久化模型参数、Prompt、Benchmark Hash、协议版本、代码 commit（可用时）、raw response、parsed answer、参考答案快照和逐题评分。
 - **七个前端页面**：Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail 和 Leaderboard；评测记录页可找回全部状态的 Run，详情证据按 100 条分页。Run Detail 会明确区分 `managed`、`delayed`、`exhausted` 和 `legacy_unmanaged`，对可公开的稳定 reason 给出中文说明并以 UTC 显示最早重调度时间；未知 reason 不原样反射。
 - **Web 只写凭据**：用户可在 Models 表单直接粘贴 API Key；API 不把凭据流中的原值复制到公开 Model/Run-model 字段，数据库只保存由独立 keyring 加密的 AES-GCM 密文。旧 `api_key_env` 模型仍兼容；Provider 返回证据会递归检查对象键/JSON 标量，当前 Key 的精确回显会在进入 Runner/持久化前替换为 `[REDACTED]`。这不是对无关 Benchmark/Question 内容的全局字面扫描。
@@ -75,7 +78,7 @@ flowchart LR
     WorkerEnv[Worker 环境变量 / 旧配置] -.->|兼容读取| Adapters
 ```
 
-API 创建 managed Run 时先在数据库锁内检查 backlog、冻结 active policy 与 Run override，再提交数据库、best-effort 发送 Redis 通知并返回 `202`；通知失败不回滚数据库事实。Worker 优先从数据库对账，并可消费重复 Redis 消息；每次写入都校验当前租约 owner/token，每个 Provider HTTP attempt 由数据库 ledger 单独 admission/结算，恢复时跳过已有 Response。数据库因此是唯一事实来源，Redis、日志、指标和 Worker 内存都不能覆盖 Run 状态。前端轮询 Run，进入 `completed`、`failed` 或 `cancelled` 终态后停止。详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，治理语义见 [`ADR-0009`](docs/decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、交付边界修正 [`ADR-0010`](docs/decisions/ADR-0010-phase-2-governance-delivery-boundaries.md) 和 pre-send retry generation 修正 [`ADR-0011`](docs/decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)，评分语义见 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)。
+API 创建 managed Run 时先在数据库锁内检查 backlog、冻结 active policy 与 Run override，再提交数据库、best-effort 发送 Redis 通知并返回 `202`；通知失败不回滚数据库事实。Worker 优先从数据库对账，并可消费重复 Redis 消息；每次写入都校验当前租约 owner/token，每个 Provider HTTP attempt 由数据库 ledger 单独 admission/结算，恢复时跳过已有 Response。数据库因此是唯一事实来源，Redis、日志、指标和 Worker 内存都不能覆盖 Run 状态。前端轮询 Run，进入 `completed`、`failed` 或 `cancelled` 终态后停止。详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，治理语义见 [`ADR-0009`](docs/decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、交付边界修正 [`ADR-0010`](docs/decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、pre-send retry generation 修正 [`ADR-0011`](docs/decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md) 和 observational reservation 修正 [`ADR-0018`](docs/decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)，评分语义见 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)。
 
 任务投递是 at-least-once，本地 Response、ledger 状态转换和聚合是幂等的；这不等于 Provider exactly-once。若 Worker 在 `send_started` 后崩溃，本地会保守结算并最终释放 admission permit，但远端幽灵请求可能仍在运行；若 Provider 已响应而本地 Response 尚未提交，接管 Worker 还可能再次调用并产生额外费用。本地 consumed 数是保守预算证据，不是 Provider 账单真值。
 
@@ -133,7 +136,7 @@ make setup
 make dev
 ```
 
-`make setup` 会让 `uv` 显式选择 CPython，按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，`Ctrl-C` 会一起停止。
+`make setup` 会让 `uv` 显式选择 CPython，按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，控制台只显示地址与日志位置；三个服务的详细输出分别追加到 Git 忽略的 `artifacts/dev-logs/api.log`、`worker.log` 和 `frontend.log`，`Ctrl-C` 会一起停止。
 
 默认地址：
 
@@ -149,13 +152,14 @@ curl -sS http://127.0.0.1:8000/api/v1/health
 curl -sS http://127.0.0.1:8000/api/v1/ready
 curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
 curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
+curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 ```
 
-`/live` 不访问外部依赖，`/health` 仅检查数据库，`/ready` 检查数据库、Alembic head 和 Redis。Redis 不可用时 `/ready` 返回 `503/degraded`，但数据库可用时 API 仍可提交 Run，Worker 也可仅靠数据库对账恢复。`/ready` 对 `asyncio.to_thread` 的等待超时不会取消已进入线程的同步数据库驱动调用，真正资源上界仍由驱动/连接池 timeout 约束。`/tasks/metrics` 是数据库当前 gauges；`/tasks/history` 从 retained typed audit 和 Run 时间字段聚合历史 counters/延迟，单 Run audit 由 `/runs/{id}/audit` 稳定分页。它们都不是 Prometheus exporter、告警发送器或 WORM 证据。
+`/live` 不访问外部依赖，`/health` 仅检查数据库，`/ready` 检查数据库、Alembic head 和 Redis。Redis 不可用时 `/ready` 返回 `503/degraded`，但数据库可用时 API 仍可提交 Run，Worker 也可仅靠数据库对账恢复。`/ready` 对 `asyncio.to_thread` 的等待超时不会取消已进入线程的同步数据库驱动调用，真正资源上界仍由驱动/连接池 timeout 约束。`/tasks/metrics` 是数据库当前 gauges，并包括 Worker expected/registered/live/stalled/shortfall 和最近活动时间；`/tasks/history` 从 retained typed audit 和 Run 时间字段聚合历史 counters/延迟，单 Run audit 由 `/runs/{id}/audit` 稳定分页。`/metrics/prometheus` 固定输出 Prometheus text `0.0.4` gauge：同一 DB-time 快照、有界 15 分钟 audit/1 小时 latency 窗口、固定 enum label 和每 API 进程 single-flight；它不是状态数据库、告警发送器或 WORM 证据。
 
-API 为每个请求自行生成 `X-Request-ID` 并在响应中返回，不信任或回显客户端提供的同名 header。LLMBenchLab **应用 logger** 使用字段白名单的脱敏 JSON，关联 request/run/question/worker/attempt/lease 事件；这一保证不涵盖所有 Uvicorn 或 access log handler，因此凭据和敏感内容仍绝不得放在 URL、header 或请求路径中。
+API 为每个请求自行生成 `X-Request-ID` 并在响应中返回，不信任或回显客户端提供的同名 header。LLMBenchLab 生产日志调用只允许无格式参数的字面量消息；结构化 extra 除字段白名单外还逐字段执行固定枚举、UUID/Redis stream ID 与有限数值规范化，非法 ID 被省略，未知 method/code 只输出固定 `unsupported`。Redis Run 通知本身也只接受 canonical UUID。外部 logger 的动态消息不进入 JSON，原始 Uvicorn access handler 关闭。凭据和敏感内容仍绝不得放在 URL、header、请求路径或日志字段中。
 
-如需分别观察日志，可在三个终端运行 `make backend`、`make worker` 和 `make frontend`。只启动 API 时，新 Run 会持久化为 `pending`，但不会在 API 进程内执行。本地 SQLite 只支持一个 Worker；Redis URL 可留空，Worker 将使用数据库对账。所有命令可通过 `make help` 查看；更完整的环境变量、迁移和排障说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
+需要跟踪组合启动日志时可运行 `tail -f artifacts/dev-logs/api.log artifacts/dev-logs/worker.log artifacts/dev-logs/frontend.log`；需要在前台分别观察时，可在三个终端运行 `make backend`、`make worker` 和 `make frontend`。只启动 API 时，新 Run 会持久化为 `pending`，但不会在 API 进程内执行。本地 SQLite 只支持一个 Worker；Redis URL 可留空，Worker 将使用数据库对账。所有命令可通过 `make help` 查看；更完整的环境变量、迁移和排障说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 ## Mock Demo：完整离线流程
 
@@ -331,7 +335,7 @@ make docker-up
 - Web（Nginx 同源代理 `/api/`）：`http://127.0.0.1:8080`
 - API 就绪检查：`http://127.0.0.1:8000/api/v1/ready`
 
-API 和 frontend 的 host ports 明确绑定 loopback，PostgreSQL/Redis 不发布 host port。Worker 容器的 healthcheck 是**依赖能力探针**：数据库或 schema 失败时不健康，Redis 失败时报告 degraded 但仍退出 0，因为数据库对账可用。它不检查 Worker 主循环是否活着，不能当作 event-loop liveness 证明。
+API 和 frontend 的 host ports 明确绑定 loopback，PostgreSQL/Redis 不发布 host port。Worker 容器的 healthcheck 是**依赖能力探针**：数据库或 schema 失败时不健康，Redis 失败时报告 degraded 但仍退出 0，因为数据库对账可用。它不检查 Worker 主循环是否活着，不能当作 event-loop liveness 证明；主循环 scan/claim/lease-heartbeat/progress 由 `worker_processes` 的 DB-time generation 事实和 metrics/exporter 聚合另行观测。
 
 停止服务并保留数据：
 
@@ -349,7 +353,7 @@ docker compose config
 
 ## SQLite → PostgreSQL 显式导入
 
-导入器只支持一次性、单向迁移，不是在线复制。必须先停止 SQLite 源的 API/Worker 和新 Run 创建，排空、取消或终结所有 `pending/running` Run，并准备一个已迁移到当前 Alembic head 的**空、离线 PostgreSQL 目标**。导入器以 SQLite read-only URI 读源，检查 integrity/FK/head/active Run，并拒绝 active reservation 以及 ledger 重算后任一 scope/minute 物化计数的高、低漂移；目标使用 advisory lock、`ACCESS EXCLUSIVE` table locks 和一个事务复制 12 张核心/治理表，包括加密凭据、policy/scope/bucket、question execution、attempt ledger、typed audit 和 Provider metadata。
+导入器只支持一次性、单向迁移，不是在线复制。必须先停止 SQLite 源的 API/Worker 和新 Run 创建，排空、取消或终结所有 `pending/running` Run，并准备一个已迁移到当前 Alembic head 的**空、离线 PostgreSQL 目标**。导入器以 SQLite read-only URI 读源，检查 integrity/FK/head/active Run，并拒绝 active reservation、仍 live 的 Worker generation，以及 ledger 重算后任一 scope/minute 物化计数的高、低漂移；目标使用 advisory lock、`ACCESS EXCLUSIVE` table locks 和一个事务复制 13 张核心/治理/运维事实表，包括加密凭据、policy/scope/bucket、question execution、attempt ledger、typed audit、Provider metadata 与 stopped/stale Worker progress。
 
 带凭据的 PostgreSQL DSN 必须通过受控环境变量提供，不得放入命令行：
 
@@ -370,7 +374,22 @@ uv run python -m app.db.import_sqlite \
 | `3` | `committed_but_verification_failed` | 目标已提交完整 precommit 快照，但 postcommit 验证或报告失败；停止服务并独立对账 |
 | `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 |
 
-退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、12 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。正常使用后的 `20260827_0004` 也不能原地降级丢弃 ledger/audit；guard 会在 DDL 前拒绝，只有隔离空库用于 `0004 → 0003 → 0004` 往返，完整处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、13 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。当前 head `20260830_0007` 降到 `0006` 会按旧谓词重算 `governance_scopes.overdrawn`，不删除 ledger 或 actual usage；`0006 → 0005` 不删除索引对象。继续跨过 `20260828_0005` 时，只要 `worker_processes` 有事实就会拒绝。先停止 Worker、保存必要事实并显式清空该表后，才能进入 `0005 → 0004`，而 `0004` 原有 ledger/audit downgrade guard 仍继续生效。只有隔离空库用于完整降级/升级往返，处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+
+## Audit retention 维护
+
+`llmbenchlab-audit-retention` 只处理已达到数据库 `expires_at` 的 typed audit；archive 默认不删除。文件是权限不宽于 `0600` 的 canonical JSONL，带完整 rollup、内容 hash 与整文件 SHA-256，但不是签名或 WORM。推荐顺序固定为 archive → 离线 verify → 维护窗口内 delete：
+
+```bash
+cd backend
+uv run llmbenchlab-audit-retention archive --output /secure/existing-dir/audit.jsonl
+uv run llmbenchlab-audit-retention verify --archive /secure/existing-dir/audit.jsonl
+uv run llmbenchlab-audit-retention delete \
+  --archive /secure/existing-dir/audit.jsonl \
+  --confirm-sha256 <verify 输出的 archive_sha256>
+```
+
+`verify` 不创建数据库 engine，也不需要有效 DSN；`reconcile` 用于 delete/restore 的只读精确对账，`restore` 只接受同一已确认 digest。退出码 `3`（提交后验证失败）或 `4`（commit outcome unknown）都禁止盲目重跑，先用同一 archive/digest 执行 `reconcile`。archive 含内部 ID，必须按敏感运维文件保护；完整路径与恢复流程见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
 ## Roadmap
 
@@ -378,7 +397,7 @@ uv run python -m app.db.import_sqlite \
 | --- | --- | --- |
 | Phase 0 | 项目治理、需求、架构、协议 | 已完成 |
 | Phase 1 | FastAPI + React + SQLite 的 MVP 垂直链路 | 已完成 |
-| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：P2-01 的 Mock-only 单机 v2 资格、治理/审计、9/9 Compose acceptance 与精确 SHA CI 已通过；Worker progress/liveness、告警/归档、backup/restore 和剩余恢复矩阵仍待收尾 |
+| Phase 2 | PostgreSQL、Redis、独立 Worker、治理、恢复与可观测性 | `in_progress`：P2-01 已闭环；P2-06 实现与 evidence-doc 精确 SHA CI 均全绿，状态为 `completed`；P2-07 工作包已建立，状态为 `planned`，功能尚未实现 |
 | Phase 3 | 合规标准 Benchmark 与隔离代码评测 | MMLU-Pro/GPQA 客观数据切片已交付；IFEval、沙箱及其余验收未完成 |
 | Phase 4 | LLM Judge、人工校准与 Arena | 计划中 |
 | Phase 5 | Agent、工具调用与 Live Benchmark | 计划中 |
@@ -413,9 +432,9 @@ uv run python -m app.db.import_sqlite \
 - `direct`/`official_cot`、任何 group/limit、GPQA shuffle seed、源 revision、转换器版本或 Dataset Hash 不同的结果都不能直接比较；公共题目污染和供应商同名模型滚动更新仍会限制结论。
 - 评分仅含三个确定性客观 Evaluator；没有 LLM Judge、人工评审、Arena、Agent 或 Live Benchmark。
 - Dataset Hash 用于一致性检查，不是发布者签名，也不能证明数据没有污染。
-- `/tasks/metrics`、retained `/tasks/history` 与单 Run typed audit 已实现，但没有 Prometheus exporter、告警发送器、trace、WORM/数据库管理员防篡改或自动保留期清理；`resume` 的新 canary 仍不会追加独立事件。
+- `/tasks/metrics`、retained `/tasks/history`、单 Run typed audit、固定 Prometheus exporter、八条规则和显式 audit retention CLI 已实现；仓库仍不部署 Prometheus/Alertmanager、告警发送器或 trace，也不提供 WORM/数据库管理员防篡改、自动请求链路清理或对象存储上传。`resume` 的新 canary 仍不会追加独立事件。
 - 逐题 Provider request ID、returned model、system fingerprint、finish reason 和 HTTP attempt count 已按字符/长度/秘密规则 fail closed 持久化并可导出；它们是关联证据，不是供应商真实性或账单证明。
-- 已保留 dirty-worktree 增强前基线、clean `665244e…` 容量候选和永久 `unqualified` 的 v1 资格历史；clean `b6a35fe…` 的 v2 `qualified` 结果也只证明固定 Mock 配置下的单机本地控制面，不是真实 Provider、生产 SLO/SLA、HA 或灾难恢复证明。仍无 SBOM 和生产部署支持。
+- 已保留 dirty-worktree 增强前基线、P2-06 dirty acceptance/capacity 历史、clean `665244e…` 容量候选和永久 `unqualified` 的 v1 资格历史；clean `b6a35fe…` 的 v2 `qualified` 与 clean `9a20676…` 的 P2-06 acceptance/capacity 结果都只证明各自固定 Mock 配置下的单机本地控制面，不是真实 Provider、生产 SLO/SLA、HA 或灾难恢复证明。仍无 SBOM 和生产部署支持。
 
 ## 贡献
 

@@ -1,6 +1,6 @@
 # LLMBenchLab 架构
 
-本文描述 LLMBenchLab 当前 Phase 1 产品边界、Phase 2 可靠执行与治理工作树，以及可信本地 MMLU-Pro/GPQA-Diamond 真实评测垂直切片。前端仍通过 REST API 操作同一组领域对象，但 API 不执行评测：PostgreSQL/数据库是任务、四层治理、逐 Provider attempt ledger、typed audit 与评分证据的唯一事实来源，Redis Streams 是非权威的 at-least-once 通知层，独立 Worker 或受信本地 CLI 用数据库租约、心跳与 fencing 执行同一 Runner。SQLite 保留为单 Worker 本地兼容路径。Phase 2/3 总状态没有因此完成，这不是公网、HA、生产架构或 SLA 声明。
+本文描述 LLMBenchLab 当前 Phase 1 产品边界、Phase 2 可靠执行/治理/可观测性工作树，以及可信本地 MMLU-Pro/GPQA-Diamond 真实评测垂直切片。前端仍通过 REST API 操作同一组领域对象，但 API 不执行评测：PostgreSQL/数据库是任务、四层治理、逐 Provider attempt ledger、typed audit、Worker progress 与评分证据的唯一事实来源，Redis Streams 是非权威的 at-least-once 通知层，独立 Worker 或受信本地 CLI 用数据库租约、心跳与 fencing 执行同一 Runner。SQLite 保留为单 Worker 本地兼容路径。Exporter、告警和普通文件 archive 都是数据库事实的受控投影，不是第二状态机。Phase 2/3 总状态没有因此完成，这不是公网、HA、生产架构或 SLA 声明。
 
 ## 架构目标与原则
 
@@ -9,7 +9,7 @@
 - **可复现**：Run 保存模型、数据集、Evaluator、Prompt、生成参数、并发和重试策略的快照。
 - **失败隔离**：单题失败被持久化并计 0 分，不中断其余题目。
 - **秘密最小化**：Web Key 只以 AES-GCM authenticated ciphertext 持久化，部署 keyring 与数据库分离；兼容模式只保存环境变量名。API/Run/Response 不返回 Key 或 envelope，上游成功内容和相关标识在进入持久化边界前检查当前 Key 的精确反射。
-- **事实单一**：Run 状态、取消意图、attempt、租约、Response、聚合、错误、dead-letter、治理 policy/scope/minute bucket、逐调用 reservation/settlement 与 typed audit 只由数据库裁决；Redis、日志、指标和内存不是事实来源。
+- **事实单一**：Run 状态、取消意图、attempt、租约、Response、聚合、错误、dead-letter、治理 policy/scope/minute bucket、逐调用 reservation/settlement、typed audit 与 Worker progress 只由数据库裁决；Redis、日志、Prometheus、告警、archive manifest 和内存不是第二事实来源。
 - **at-least-once 与幂等**：通知可重复，逐题写入以 `(run_id, question_id)` 唯一并由当前 lease token fencing；不声称 Provider 调用或计费 exactly-once。
 - **本地 admission，不冒充账单**：managed Web/API Run 在数据库中执行 global/provider/model/run 四层限流、预算与背压；它限制本地开始新 attempt 的许可，不会取消崩溃后仍在 Provider 运行的幽灵请求，也不把本地保守 consumed 伪装成 Provider 账单真值。
 - **边界稳定**：Adapter、Evaluator、Dataset Loader 和 Runner 通过明确接口解耦，便于后续替换实现。
@@ -176,7 +176,7 @@ Model 的凭据来源是显式状态，而不是从 nullable 字段猜测：`moc
 
 Governance policy 是不可变、内容寻址且只有一个 active version 的数据库事实。初始化前 `GET /api/v1/governance/policy` 是纯读取，返回 `404 governance_policy_not_initialized`，不会借查询偷偷 bootstrap。`PUT /api/v1/governance/policy` 是 full-document apply：所有字段都必填，不具备 PATCH 语义；相同内容幂等返回现有版本，重新提交历史内容会重新激活原 ID/version 并追加 activation audit。`policy_hash` 覆盖全部 20 个规范化限制字段，读取和每次 attempt admission 都重算校验。managed Run 创建会在没有 policy 时原子 bootstrap 确定性默认版本，然后在 global admission 锁内检查有限 backlog，把全量 policy、ID/hash、opaque provider scope、`question_quantum` 与恰好四个 Run override（input reservation 及 request/Token/USD lifetime budget）冻结到 execution snapshot；后续 policy 变更不追溯改写已提交 Run。外发前还会比较冻结 override 与 Run 列，防止任一一侧被篡改后绕过硬边界。
 
-policy 的 `null` 表示关闭该维限制，`0` 表示立即拒绝新 admission。四层 global/provider/model/run 限额全部满足才允许一次 attempt；hard TPM/Token budget 必须同时有显式 `input_token_reservation` 与有限 `max_tokens`，hard cost budget 还必须有冻结 USD 单价，否则在任何 Provider 外发前分别以稳定治理错误 fail closed。治理 USD 公开上限为 `10000000.00000000`，API 用 JSON string 返回 Decimal；PostgreSQL 使用精确 `NUMERIC(20,8)`，该更低的公开上限使 SQLite IEEE-754 相邻间距低于半个 `1e-8` 存储量化单位，保留兼容路径的 8 位往返。完整字段与状态码见 [`API.md`](./API.md)，操作与恢复见 [`OPERATIONS.md`](./OPERATIONS.md)。
+policy 的 `null` 表示关闭该维限制，`0` 表示立即拒绝新 admission。四层 global/provider/model/run 限额全部满足才允许一次 attempt；hard TPM/Token budget 必须同时有显式 `input_token_reservation` 与有限 `max_tokens`，hard cost budget 还必须有冻结 USD 单价，否则在任何 Provider 外发前分别以稳定治理错误 fail closed。未显式提供 input reservation 时，Runner 不把 UTF-8/tokenizer 估算写入 `reserved_input_tokens`，也不据此生成 reserved cost；Provider actual input 仍按原值保存。input/cost overdraw 只由显式 Run input reservation 派生，显式 `max_tokens` 形成的 output reservation 则独立生效。治理 USD 公开上限为 `10000000.00000000`，API 用 JSON string 返回 Decimal；PostgreSQL 使用精确 `NUMERIC(20,8)`，该更低的公开上限使 SQLite IEEE-754 相邻间距低于半个 `1e-8` 存储量化单位，保留兼容路径的 8 位往返。完整字段与状态码见 [`API.md`](./API.md)，操作与恢复见 [`OPERATIONS.md`](./OPERATIONS.md)，修正依据见 [`ADR-0018`](./decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)。
 
 ### 创建并执行 Run
 
@@ -545,7 +545,7 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 - `(benchmark_id, external_id)` 唯一；一个 Run 对同一 Question 最多一条 EvaluationResponse。
 - 导入 Benchmark 使用整体事务；逐题结果和进度使用短事务，避免把网络请求包在数据库事务中。
 - 只有 owner/token 匹配、租约未过期的 Worker 能写 Response、进度、费用、retry 或终态；唯一约束是最后的竞态防线，不替代 fencing。
-- attempt ledger never-delete 且状态单向；四层 scope/minute materialization 必须能由 ledger 重算，检测到高或低漂移时 fail closed 并由对外边界尽力写固定、无损坏值的完整性 audit，不静默修补后继续外发。
+- attempt ledger never-delete 且状态单向；四层 scope/minute materialization 必须能由 ledger 重算，检测到高或低漂移时 fail closed 并由对外边界尽力写固定、无损坏值的完整性 audit，不静默修补后继续外发。历史 managed ledger 的 input/cost overdraw 重算通过 `evaluation_runs.input_token_reservation` 判断预留是否显式；没有关联 Run 的内部 synthetic reservation 仍把调用者提供的值视为显式。
 - audit event 的 `event_key` 唯一，同 key 重放必须匹配 event type 与 payload hash；operational/security 默认分别至少保留 90/365 天。append-only 是应用约束，不是密码学 WORM 或数据库管理员防篡改。
 - 聚合从已持久化的 Responses 计算，并在 completed、cancelled 或 dead-letter 终态更新前写回 Run。报告仍防御性地从计划题与 Responses 重算唯一主指标，并只用 `metrics_provenance` 标注 Run 字段漂移，保证 summary/groups/responses 不互相矛盾。
 
@@ -554,13 +554,13 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 数据库平台迁移是 stopped-source/offline-empty-target 操作，不是双写或在线复制：
 
 1. 停止 SQLite 源的 API/Worker 和新 Run 创建，确认无 `pending/running` Run。导入器使用 read-only URI，校验 integrity、foreign keys 和 Alembic head，不修改源文件。
-2. PostgreSQL 目标必须已在 head，12 张核心/治理表必须为空且不可对外服务；源库不得含 active reservation，并必须在连接目标前用全部 reservation ledger 重算每个 scope/minute 物化值，任何高、低漂移或缺 bucket 都拒绝导入。事务级 advisory lock 在空库检查之前串行化竞争导入，随后对 `alembic_version` 和核心表取 `ACCESS EXCLUSIVE` 锁。
-3. `governance_policies → models → model_credentials → benchmarks → questions → governance_scopes → evaluation_runs → evaluation_responses → governance_minute_buckets → question_executions → provider_call_reservations → audit_events` 在一个目标事务中按依赖顺序复制，包括 encrypted credential envelope、ledger/audit 与 typed Provider metadata，但不解密或输出秘密列值。源、precommit target 都只输出 row count、主键集 digest 和 canonical row digest；任一 precommit 失配/复制失败都整体 rollback，CLI 退出 `2`。
+2. PostgreSQL 目标必须已在 head，13 张核心/治理表必须为空且不可对外服务；源库不得含 active reservation 或按同一 DB UTC cutoff 仍 live 的 Worker generation，并必须在连接目标前用全部 reservation ledger 重算每个 scope/minute 物化值，任何高、低漂移或缺 bucket 都拒绝导入。事务级 advisory lock 在空库检查之前串行化竞争导入，随后对 `alembic_version` 和核心表取 `ACCESS EXCLUSIVE` 锁。
+3. `governance_policies → models → model_credentials → benchmarks → questions → governance_scopes → evaluation_runs → evaluation_responses → governance_minute_buckets → question_executions → provider_call_reservations → audit_events → worker_processes` 在一个目标事务中按依赖顺序复制，包括 encrypted credential envelope、ledger/audit、stopped/stale Worker facts 与 typed Provider metadata，但不解密或输出秘密列值。源、precommit target 都只输出 row count、主键集 digest 和 canonical row digest；任一 precommit 失配/复制失败都整体 rollback，CLI 退出 `2`。
 4. COMMIT 确认后，工具在独立的只读 `REPEATABLE READ` 事务中取稳定 postcommit snapshot，再对账并输出第三组摘要。全部完成才退出 `0`。
 
 带凭据的目标 DSN 必须通过 `--target-env` 从受控环境读取；`--target` 拒绝 URL password 和 password query。COMMIT 未获得 PostgreSQL 确认时退出 `4`/`commit_outcome_unknown`；由于事务原子性，目标可能为空，也可能是完整的 precommit 快照。COMMIT 已确认但连接收尾、postcommit 快照/对账或报告失败时退出 `3`/`committed_but_verification_failed`；这时目标已提交完整 precommit 快照，不会自动回滚。两种结果都禁止盲目重试，必须保持目标离线，按已输出摘要独立检查目标是空还是完整提交。非空目标会拒绝再次导入，工具也不提供 PostgreSQL 到 SQLite 的反向同步。
 
-Alembic `20260827_0004` 引入上述治理/审计表与 Run/Response 字段。downgrade guard 会在第一条 DDL 前拒绝任何可能丢失的 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 事实；正常 bootstrap 后的数据库因此不能把 `0004 → 0003` 当普通代码回滚。隔离空数据库可验证 `0004 → 0003 → 0004`，已使用环境应优先向前修复，或恢复经核验的 pre-0004 备份并单独保留 post-0004 ledger/audit 归档。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
+Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`20260828_0005` 增加 `worker_processes` 与 audit retention/exporter 扫描索引；schema-equivalent `20260829_0006` 只条件补齐早期 `0004` 变体缺少的三个 canonical 索引；当前 data-only head `20260830_0007` 不改 schema、ledger 或 actual usage，只按显式 hard reservation 语义重算 `governance_scopes.overdrawn`。`0007` upgrade/downgrade 均在任何更新前拒绝 `reserved/send_started` active reservation；downgrade 只恢复旧派生谓词。兼容 preflight 仍以精确 fingerprint、integrity/FK、索引定义和 single-active 数据约束 fail closed。`0006 → 0005` 不删除 canonical 对象；后续两个 downgrade guard 都在第一条有损 DDL 前拒绝可能丢失的事实：0005 拒绝任意 Worker generation，0004 拒绝 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 证据。隔离空数据库分别验证 `0005 ↔ 0004` 与 `0004 ↔ 0003`；已使用环境应优先向前修复，或恢复经核验的旧备份并单独保留新 schema 证据。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
 
 ## 错误处理与可观察性
 
@@ -581,12 +581,12 @@ Alembic `20260827_0004` 引入上述治理/审计表与 Run/Response 字段。do
 可观测基础包含：
 
 - API 忽略客户端传入的 `X-Request-ID`，为每个请求始终生成全新的 server-side UUID 并在响应中回传。CORS 请求 header allowlist 不含 `X-Request-ID`，但会向浏览器暴露响应中的该 header，避免客户端把 write-only Key 复制到 correlation ID 后迫使服务反射或记录。新 Run 使用 run ID 作为稳定 correlation ID，通知、Worker、Runner 和 Question 事件继承该链路。
-- LLMBenchLab **应用 logger** 使用字段白名单的 JSON formatter，记录 request route template、run/question/worker、attempt、lease token、message ID 和结果；不记录请求体、header、原始回答或异常文本，只可记异常类型。这一保证不涵盖所有 Uvicorn/access log handler，所以秘密不得出现在 URL、query 或 path。持久 typed audit 与 logger 分离，前者是应用 append-only、event-key 幂等且受 retention 管理的历史事实，但仍不是不可篡改/WORM 日志。
+- LLMBenchLab 配置的已登记应用 logger 与进程内 Uvicorn/SQLAlchemy client logger 统一通过 JSON sanitizer；消息必须是 literal，structured extra 先按字段白名单，再按固定 enum、canonical UUID/Redis stream ID 和有限数值合同规范化，非法 ID 省略，未知字符串只投影固定 `unsupported`。Redis Run 通知在进入 Worker 前同样要求 Run/correlation canonical UUID；Uvicorn access log 默认关闭。Alembic migration CLI 使用独立 `fileConfig`/console 输出，不经过应用 sanitizer；该边界也不治理反向代理、PostgreSQL、Redis server、Docker daemon 或崩溃转储，所以秘密仍不得出现在 URL、query、path、argv 或迁移诊断。持久 typed audit 与 logger 分离，前者是应用 append-only、event-key 幂等且受 retention 管理的历史事实，但仍不是不可篡改/WORM 日志。
 - `/live` 是纯进程存活检查，不访问 DB/Redis/Provider；`/health` 保持 DB-only 兼容语义；`/ready` 并行检查 DB 连接/Alembic head 与 Redis，不探测 Provider。Redis 失败时返回 `503/degraded`，但 DB/head 可用时 `accepting_runs=true` 且对账可用；DB/head 失败时 `not_ready` 且不接收任务。
 - `/ready` 将同步 DB 探测放入 `asyncio.to_thread` 并限制 HTTP 等待时间。async timeout 不会取消已进入线程的驱动调用；后台资源的真正上界仍依赖数据库 driver/connect/pool timeout。
-- `/tasks/metrics` 通过三组有界 DB 聚合查询派生任务、governance backlog/delay/exhaustion、active Provider attempt、overdrawn scope、attempt/failure/dispatch 等当前 gauges；它不是单次查询，也不是历史 counter。`/tasks/history?window_hours=1..2160` 在一个 PostgreSQL `REPEATABLE READ READ ONLY`/显式 SQLite 读快照内确定 DB UTC 窗口，逐条验证 retained audit 的 contract/hash/identity/retention 后聚合任务 counters，再从同一快照的 Run 时间字段计算 queue/execution/end-to-end p50/p95/p99；损坏 audit 使整个响应 fail closed，不返回部分结果。pending/running cancel 都写 `run_cancel_requested`，dead-letter 使用专用 `run_dead_lettered` counter 而不混入一般 terminal 原因。每组 latency 最多读取 10,000 个样本并显式返回 `truncated`。`/runs/{id}/audit` 按 `(occurred_at,id)` 稳定分页并在读取时复核 allowlist/payload hash。
-- 每题 Provider request ID、返回模型名、system fingerprint、finish reason 和 HTTP attempt count 已作为安全归一化 typed 字段写入 EvaluationResponse、读取 API 与报告。凭据变更/拒绝/解密失败另写 security-retention audit。可信本地初次 canary 仍只固化在 Run snapshot，`resume` canary 尚无独立追加事件；也没有 Prometheus exporter、自动告警、tracing 或管理员不可篡改证明。
-- Worker 容器探针检查 DB/head 和 Redis 能力。DB/head 失败退出 1；Redis 失败输出 degraded 但退出 0，因为 DB reconciliation 仍可用。它是 dependency/capability readiness，不是 Worker 主循环或 event-loop liveness。
+- `/tasks/metrics` 派生任务/governance 与匿名 Worker expected/registered/live/stalled/shortfall、最近聚合进展；`/tasks/history?window_hours=1..2160` 在一个 PostgreSQL `REPEATABLE READ READ ONLY`/显式 SQLite 读快照内逐条验证 retained audit 后聚合任务 counters 与 Run p50/p95/p99。`/metrics/prometheus` 复用同一 collector，在固定 15 分钟 audit/1 小时 latency window、hard row cap 和 per-process single-flight 下输出全部 gauge 的固定低基数 exposition。Redis availability 是快照外观察，不改变 DB 事实。损坏 audit 使 history/exporter 整体 fail closed，不返回部分结果；`/runs/{id}/audit` 仍按 `(occurred_at,id)` 稳定分页。
+- 每个长运行 Worker 注册唯一 generation；scan/claim/progress/lease-heartbeat 只置固定 bit，由 event-loop recorder 每 5 秒最多一笔短事务用同一 DB UTC 合并。无事件零写，故 timer 不能在主循环卡死后制造 keepalive；crash generation 保持 active 后自然派生为 stale。JSON 公开 active generation 时间的 `MAX`，Prometheus oldest age 使用 `MIN`，两者都不输出 Worker/generation ID。dependency probe 明确 `main_loop_progress=not_checked`。
+- 每题 Provider metadata 已安全归一化写入 Response/API/报告；凭据变更/拒绝/解密失败另写 security-retention audit。`llmbenchlab-audit-retention` 提供权限收紧的 canonical JSONL、完全离线 verify、精确 reconcile/restore/delete；archive 保存完整内部事实，hash 不是签名/WORM。仓库交付八条 Prometheus 规则与 Runbook，但不部署告警发送器、Dashboard、tracing 或管理员不可篡改存储。
 
 ## 部署拓扑与安全边界
 
@@ -600,13 +600,13 @@ Alembic `20260827_0004` 引入上述治理/审计表与 Run/Response 字段。do
 
 v2 aggregate schema 为 `llmbenchlab-phase2-slo-evidence-v2`。aggregate 与 raw child evidence 都位于 Git 忽略目录；aggregate 只含 commit/source hash、稳定指纹、child 相对路径/hash、匿名参与计数、脱敏统计/判定、容量模型和 cleanup 摘要的 allowlist，不复制 raw identity、stdout/log、DSN/URL、环境变量、题目、Prompt/Response 或秘密材料。公开状态可以给出 Git 忽略的外层 aggregate 相对路径和内容 SHA；raw child、aggregate 内嵌 child 路径与环境/配置明细仍是内部证据，只摘录人工复核的 commit 与匿名结果。child 使用独立进程组，超时/中断后给 scoped cleanup 420 秒。
 
-历史 v1 在 clean `dfa67abb1a9a0418a7e3337c179f816e3c69f121` 上为 15/18，保持 `unqualified`。v2 已在 clean `b6a35fef1dd069ebb54b69955058915c722aa34d` 上从零完成 1+5，23/23 项 SLO、每轮 hard invariant 和 cleanup 全部通过，aggregate 内容 SHA-256 为 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`；同一实现 SHA 的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 必需 job 成功。该架构把正确性硬门禁、统计资格和证据最小化分层；结果只描述被记录的固定单机 Mock 硬件、配置和 commit，不是 Provider 性能、生产 SLO/SLA、HA、无限扩展或 Phase 2 整体完成证明。GitHub-hosted CI 只验证 validator、统计和失败路径，不承担绝对性能门禁。基线解释见 [`PERFORMANCE.md`](./PERFORMANCE.md)，扩缩容、预算/背压、settlement unknown、DB/Redis/lease 恢复与 0004 安全回滚见 [`OPERATIONS.md`](./OPERATIONS.md)。
+历史 v1 在 clean `dfa67abb1a9a0418a7e3337c179f816e3c69f121` 上为 15/18，保持 `unqualified`。v2 已在 clean `b6a35fef1dd069ebb54b69955058915c722aa34d` 上从零完成 1+5，23/23 项 SLO、每轮 hard invariant 和 cleanup 全部通过，aggregate 内容 SHA-256 为 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`；同一实现 SHA 的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 必需 job 成功。该架构把正确性硬门禁、统计资格和证据最小化分层；结果只描述被记录的固定单机 Mock 硬件、配置和 commit，不是 Provider 性能、生产 SLO/SLA、HA、无限扩展或 Phase 2 整体完成证明。GitHub-hosted CI 只验证 validator、统计和失败路径，不承担绝对性能门禁。基线解释见 [`PERFORMANCE.md`](./PERFORMANCE.md)，扩缩容、预算/背压、settlement unknown、DB/Redis/lease 恢复与 0005/0004 安全回滚见 [`OPERATIONS.md`](./OPERATIONS.md)。
 
 ## 当前限制
 
 - PostgreSQL 租约已支持受限多 Worker 协调；SQLite 仍只适合单 Worker、单机低并发。这不是无限水平扩展或 HA 保证。
 - managed Web/API Run 已实现数据库权威四层限流/预算/背压与公平调度；默认 policy 可关闭限制，`legacy_unmanaged` CLI 不覆盖，当前 global scope 锁会串行化新 admission，Mock 容量基线也不是生产调优结论。
-- typed audit/history 与逐题 Provider metadata 已实现，但 append-only 不是 WORM；尚无 exporter、自动告警、tracing/监控面板、`resume` canary 独立事件或公网对象级访问控制。
+- typed audit/history/archive、低基数 exporter、八条规则、Worker DB-time progress 与逐题 Provider metadata 已实现，但 append-only/普通文件 hash 不是 WORM；尚无告警发送器、tracing/认证监控面板、`resume` canary 独立事件或公网对象级访问控制。
 - at-least-once 不能防止 `send_started` 后崩溃留下 Provider 幽灵请求，或 Provider 响应到本地 COMMIT 之间的重复远程调用/费用；本地 ledger 幂等和保守结算都不是远端 exactly-once/账单真值。
 - 上游是否真正遵守 `seed`、temperature 等参数由供应商决定；同配置不保证逐 token 完全确定。
 - 仅支持客观的 exact match、multiple choice、numeric；不执行代码，不提供 LLM Judge、Arena、Agent 或长上下文专用协议。
@@ -618,7 +618,7 @@ v2 aggregate schema 为 `llmbenchlab-phase2-slo-evidence-v2`。aggregate 与 raw
 
 ## 后续扩展方式
 
-1. **生产治理与观测收口**：在已有 DB governance、attempt ledger、typed audit/history 与 Mock 容量基线上增加认证/租户 policy、exporter/告警/tracing、审计归档/WORM 选项，并在目标硬件与精确提交上重新校准容量。
+1. **生产治理与观测收口**：在已有 DB governance、attempt ledger、typed audit/archive、Worker progress、exporter/规则与 Mock 容量基线上增加认证/租户 policy、告警发送/认证 Dashboard/tracing、签名/WORM 审计选项，并在目标硬件与精确提交上重新校准容量。
 2. **数据集插件**：在已有固定 MMLU-Pro/GPQA 转换器上增加通用注册、签名、分片和更多 dataset plugin；继续把原始来源版本与转换器版本纳入 Hash 元数据。
 3. **Evaluator 插件**：以版本化 Registry 增加 IFEval、代码沙箱、LLM Judge 和 Pairwise Judge；任何评分语义变化必须升级 protocol version。
 4. **Adapter 扩展**：实现新的供应商 Adapter，而不是在 Runner 中添加条件分支；能力声明用于标识 seed、usage、工具调用和上下文窗口支持。

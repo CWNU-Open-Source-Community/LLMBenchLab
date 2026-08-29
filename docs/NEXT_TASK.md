@@ -1,126 +1,67 @@
-# 下一任务：Phase 2 可观测性、保留与恢复闭环
+# 下一任务（当前修复完成后）：实施 P2-07 最小恢复验证切片
 
-> 状态：`ready`；治理/审计与 P2-01 已交付，Phase 2 仍保持 `in_progress`，现在可以开始 P2-06/P2-07
+> 状态：`planned`；P2-07 独立计划、工作日志与 ADR-0016 已建立，功能实现尚未开始
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
-> 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[ADR-0012](decisions/ADR-0012-single-host-slo-capacity-qualification.md)、[ADR-0013](decisions/ADR-0013-stable-image-content-fingerprint.md)、[ADR-0014](decisions/ADR-0014-dual-backlog-slo-profile.md)
+> 当前计划：[Phase 2 恢复与运维闭环](plans/2026-08-28-phase-2-recovery-operations.md)
+> 当前日志：[2026-08-28 P2-07 工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)
+> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)，exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
+> 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md)
 
-## 现在从哪里继续
+## 当前事实
 
-Phase 2 治理/审计垂直切片已经作为实现 SHA `665244e095905083b606b8e98e946ed1a02dc0fc` 提交并 push：Alembic `20260827_0004`、六类治理/审计表与 12 表 importer、global/provider/model/run 四层 per-attempt 治理、固定窗口 RPM/TPM 和 lifetime request/Token/USD budget、policy/hash 与 Run override 冻结、materialized counter/ledger 漂移 fail-closed、confirmed pre-send retry generation、有限 question quantum/backlog、公平排序、typed audit/history、Provider metadata、credential audit、前端治理状态与真实 PostgreSQL 竞争测试。P2-01 随后在独立实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 交付 ADR-0012～0014、v2 四 cell 多轮资格、恢复/连接模型和 exact-project cleanup。
+P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成：implementation SHA `9a20676dcf545040782f04c166205d0043345753` 的 clean-SHA capacity/9/9 acceptance 与 [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 通过；evidence-doc commit `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 也精确 4/4 通过。
 
-治理 SHA 的增强 capacity evidence SHA-256 为 `40deadebc357bbb24a07c91b05eb39f3d2fb7de11a28da9a7f95871c7acd0588`；完整 acceptance 9/9，evidence SHA-256 为 `ab311665ff0cb834efdd648cd634f943a4cbc5b8b00728ac8597a288a877ddec`。P2-01 冻结树的本地门禁为后端 `829 passed, 29 skipped`、前端 `38 passed`，lint、Mock smoke、前端 build、Alembic 与 Compose config 均通过；`P2-local-control-plane-v2` 在 clean SHA 上完成 1 warm-up + 恰好 5 measured、23/23 SLO 和逐轮 hard invariant/cleanup，aggregate SHA-256 为 `a76d167bb664e2ee3ee7514c39ac738b76cef37776d7b66e1175a8596329d0d9`。GitHub Actions [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 对同一实现 SHA 4/4 成功；证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 也已 push，[run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 对该精确 SHA 4/4 成功。P2-01 已完成，现在直接继续 P2-06/P2-07；不得重复候选或资格工作，也不得跳到 Phase 3。
+当前 P2-06 已按 [ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 实现：
 
-## 已完成的候选门禁合同
+- P2-06 的 `20260828_0005` 新增 `worker_processes` 和 bounded audit scan indexes；`20260829_0006` 仅修复早期 `0004` 三索引缺口。当前应用 head `20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn，不改变 13 表 schema/importer/archive 合同、never-delete ledger 或 actual usage。SQLite→PostgreSQL importer 继续做 13 表精确 digest，拒绝 live generation 并复制 stopped/stale facts；表非空时 `0005 -> 0004` 在 DDL 前拒绝。
+- 长运行 Worker 注册唯一 generation，只在真实 scan/claim/lease-heartbeat/progress 后按 DB UTC 合并刷新；`/tasks/metrics` 和 exporter 只公开 expected/registered/live/stalled/shortfall 与聚合时间。dependency probe 固定声明不检查 main-loop progress。
+- `GET /api/v1/metrics/prometheus` 输出固定 Prometheus text `0.0.4` gauge，使用一个 DB-time 快照、有界 15 分钟 audit 与 1 小时 latency 窗口、固定 enum label、整次 fail-closed 和每 API 进程 single-flight。
+- `deploy/observability/` 提供固定八条告警规则、抓取示例与对应 Operations Runbook；仓库不部署 Prometheus、Alertmanager、OTel 或通知发送器。
+- `llmbenchlab-audit-retention archive|verify|reconcile|restore|delete` 提供 canonical JSONL v1、严格文件/权限/大小/schema/hash/rollup 校验、真正离线 verify、精确 digest 绑定、默认不删除和 commit-outcome 分类。它不提供签名/WORM，也不替代整库+keyring backup。
+- 全生产日志调用受字面量/无格式参数静态门禁；第三方动态消息固定化、结构化数值有限化，raw Uvicorn access handler 关闭。
 
-以下合同已在 `665244e…` 上满足，保留作为后续修改必须重跑的回归基线。
+`0006` 兼容修复已完成本地 migration/full test/lint/Mock smoke、真实失败备份副本升级和当前重建库 startup/check；实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 已 push，[run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 4/4 成功，因此该维护任务为 `completed`，不改变 P2-07 的 `planned` 状态或范围。
 
-### 1. 保护工作树并做定向回归
+2026-08-30 的个人本地维护又从最新逻辑非空的 SQLite 一致性备份在 staging 中前进迁移并恢复 Demo 数据，同时让 `make dev` 默认把 API/Worker/Vite 详细输出分流到私有 Git 忽略日志。实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 的 [run `33265171953`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33265171953) 4/4 成功；该维护只处理默认本地开发库和启动体验，不提供 PostgreSQL+keyring backup/restore、Redis rebuild 或告警演练，因而不算 P2-07 功能实现；本文件的下一切片保持不变。
 
-- 阅读 README、AGENTS、本文件、PROJECT_STATUS、ROADMAP、Phase 2、计划/工作日志及 ADR-0009/0010/0011。
-- 运行 `git status --short --branch`，确认没有与用户工作重叠；不得回滚或格式化无关改动。
-- 先运行治理 repository、Adapter、Runner、API/audit、credential、migration/importer、capacity-script 单测。
-- 特别确认：scope/minute materialized counter 高报与低报均 fail closed；policy/hash 与 Run override 漂移不能绕过限额；`max_retries=0` 的 confirmed pre-send release 仍从未发送 ordinal 恢复。
+同日又把 `artifacts/benchmarks/` 中已存在的 GPQA-Diamond 与两种 MMLU-Pro profile 通过正式导入 API 加载到默认个人 SQLite，当前为 `4` 个 Benchmark、`24,277` 题，原 Model/Run/Response 保持且没有 Provider 调用。记录 commit `0163b67c00eb59ae59db5f3adb679ad85c799142` 已 push，其精确 SHA run `33266167547` 4/4 成功；该本地数据操作不提交第三方题目、不改变产品实现或路线图，P2-07 的下一任务仍保持不变。
 
-### 2. 真实 PostgreSQL integration
+当前必须先完成 [observational Token overdraw 修复](plans/2026-08-30-fix-observational-token-overdraw.md)。ADR-0018 已把非显式 input 估算与 hard reservation 分离，并把 data-only head 定为 `20260830_0007`；该 revision 只重算 `governance_scopes.overdrawn`，upgrade/downgrade 均拒绝 active reservation，历史 ledger/actual/Response/Run 终态保持。本地完整验证和当前个人 SQLite 迁移已通过；此维护仍为 `in_progress`，commit/push 与 exact-SHA CI 待完成。在其仓库级闭环前不要启动 P2-07 实施。
 
-在隔离 PostgreSQL 运行全部 integration marker，至少实际覆盖并记录：
+P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；随后的兼容修复已在自动备份后将当时重建库前进到 `0006` 并通过 startup/check。
 
-- global/provider/model/run concurrency 竞争；
-- 四层 RPM/TPM 原子限制；
-- global/run lifetime request、Token、USD budget；
-- 并发 backlog 精确 admission 数和 typed `run_backlog_full`；
-- finish settlement 与 lease reconciliation 竞争只有一个终态事实；
-- audit replay 幂等、同 key 不同 payload fail closed；
-- active policy 并发切换、Run 创建/Model 敏感更新锁序；
-- `0004` PostgreSQL upgrade/check/downgrade guard/upgrade 和 12 表 importer 对账。
+## 已完成：建立 P2-07 工作包
 
-不得用 SQLite 单测替代上述真实 PostgreSQL 证据；所有 Provider 行为仍只用 Mock/Stub。
+1. 已按 AGENTS/PLANS 新建独立执行计划与工作日志，记录目标、非目标、验收、风险和实施步骤。
+2. 已勘察 PostgreSQL backup/restore、keyring、Redis consumer group、告警 Runbook 与 Compose/CI 边界，并以 ADR-0016 冻结关键取舍。
+3. 已把后续工作拆成 verifier、Redis/Worker、rules/recovery harness 和最终门禁；本轮按用户要求停止，没有实施代码或脚本。
+4. 后续自动化仍只能使用 Mock/Stub；任何数据库/volume/keyring 删除或替换必须使用隔离、精确目标和 fail-closed guard，不触碰默认用户数据。
 
-### 3. 增强 capacity 与 acceptance
+## P2-07：下一独立切片
 
-在同一个冻结候选 commit 上运行增强 `make phase2-capacity`：
+P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最小只读 verifier 切片开始，之后才依次完成：
 
-- policy read-back 的所有 concurrency/RPM/TPM/lifetime 数值必须有限；
-- Run input reservation、output limit、Token/cost budget 必须有显式上界；
-- question quantum 必须小于 15 题 Demo Run，并由 durable audit 证明 cooperative yield；
-- 停止 Worker 后并发提交必须得到精确 backlog-limit 个 `202` 和其余 typed `429`，随后恢复 Worker 并 drain 到零；
-- 高流量 Model 持续竞争时，低流量 Model 必须在高流量 backlog 排空前取得 claim/slice；
-- 比较一/二 Worker 的吞吐与 p50/p95/p99，并验证 Worker loss、Redis interruption、ledger/audit/counter 对账和完整清理；
-- evidence 必须记录候选 commit SHA、脚本 SHA-256、环境、配置、原始脱敏计数和限制说明，不得冒充生产 SLA。
-
-`phase2_acceptance.py` 的脚本单测为 `19 passed`，完整 `make phase2-acceptance` 已在冻结候选上验证以下三条确定性数据库 seam injection 与真实 Worker/Redis 恢复：
-
-1. reservation 已提交、`send_started` 尚未提交：接管只能 `released_pre_send`，不得消耗未发送 retry；
-2. `send_started` 已提交、settlement 尚未提交：接管必须 conservative settlement，释放并发但不按零退回预算；
-3. Provider response 已返回、Response/settlement 本地 commit 尚未确认：本地唯一事实不得 double-count，并明确外部调用/费用可能重复的 at-least-once 边界。
-
-这些场景明确是 deterministic database seam injection，不宣称 `SIGKILL` 精确命中亚毫秒边界；一般的“Worker 在若干 Response 后 SIGKILL”也不能替代它们。任一完整 Compose 场景失败或未运行都必须保留为未通过/遗留，Phase 2 继续 `in_progress`。
-
-### 4. 全量门禁、commit、push 与精确 SHA CI（已完成）
-
-至少运行并记录：
-
-```bash
-make lint
-make test
-make smoke
-make phase2-capacity
-make phase2-acceptance
-(cd backend && uv run alembic upgrade head)
-(cd backend && uv run alembic check)
-docker compose config --quiet
-git diff --check
-```
-
-- 检查 staged diff、调试残留、生成物、真实密钥/Authorization/Cookie、审计 payload 和文档虚假完成标记。
-- 形成一个独立、可审查的 Phase 2 候选 commit，push 到 `origin/codex/complete-evaluation-workflow`，继续使用当前 PR #2；禁止 force push。
-- 等待该精确 commit SHA 的四个 GitHub Actions 必需 job 全部成功。任何失败都读取日志、修复、创建新 commit、push 并等待新 SHA；不能用本地通过替代远程绿色。
-- commit/SHA、branch、Actions URL、job 结论、capacity/acceptance artifact path 与 SHA-256、命令计数和清理结果已补入 Changelog、Project Status、Phase 2、计划与工作日志。
-
-### 5. P2-01 单机控制面资格（已完成）
-
-- 历史 v1 clean-SHA 1+5 aggregate 只通过 15/18，继续永久记录为 `failed/not_qualified`；未删除 measured-02，也未只重跑失败 cell。
-- ADR-0014 在任何 v2 样本前冻结 warmed `3/5/8s` 与 cold `6/8/10s` 两个 AND backlog 门禁、两个 distinct validated Worker、22/330/330/331 对账和 project-image cleanup。
-- clean SHA `b6a35fe…` 的全新 v2 invocation 保留 1 warm-up + 5 measured，23/23 SLO 全部通过，容量模型为 `qualified`。该结论只适用于 evidence 记录的 Mock-only 单机 profile，不是生产、真实 Provider、HA、费用或 exactly-once 证明。
-
-## 当前工程任务：Phase 2 正式闭环
-
-治理切片与 P2-01 已交付，证据文档 commit `875f13a…` 的精确 SHA CI 也已 4/4 成功。现在按 P2-06、P2-07 推进；下列范围全部完成后，Phase 2 才能评估是否改为 `completed`。
-
-### P2-06：Exporter、告警、retention 与 Worker progress
-
-- 为现有 DB gauges、typed counters 和 latency 提供受控 exporter；定义 label cardinality、抓取失败、数据库压力和脱敏边界。
-- 为 backlog、dead-letter、governance integrity、overdraw、queue degraded、Worker stalled 和恢复时长定义告警规则、持续时间、严重度、静默与 Runbook 链接。
-- 增加 Worker 主循环 progress/liveness 事实，例如最后 scan/claim/heartbeat/progress 的 DB-time 证据；不能继续把 dependency probe 冒充 Worker 正在推进。
-- 定义 audit retention class 的实际保留、archive、删除/校验、恢复与失败语义；archive 不得含 Key、ciphertext、nonce、URL、题目/prompt/response正文，且不能宣称不可篡改存储。
-- 若加入 resume canary 独立事件，先用固定安全 enum/bitset 设计 schema；不得写 Provider 控制文本。
-
-### P2-07：备份/恢复与完整运维演练
-
-- 演练 PostgreSQL backup→空目标 restore→Alembic head→12 表 count/PK/content fingerprint→managed Run/ledger/audit 可读。
-- 数据库和 keyring 必须独立备份/恢复；既要验证匹配 keyring 可解密，也要验证缺失/错误 keyring fail closed，日志和证据不得回显 Key 或 envelope。
-- 演练 audit archive restore、Redis 重建/consumer group 恢复、Worker 扩缩、dead-letter、commit outcome unknown 和治理完整性告警处置。
-- 补齐尚未覆盖的取消/重试/租约/预算/崩溃组合矩阵，并在真实 PostgreSQL/Redis 下执行。
+- PostgreSQL backup → 空目标 restore → Alembic `20260830_0007` exact head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
+- 数据库与数据库外 keyring 独立备份/恢复：匹配 keyring 能解密，缺失/错误 keyring fail closed；日志/证据不得回显 Key 或 envelope。
+- Redis 重建/consumer group 恢复、Worker 扩缩、八条告警响应、dead-letter、commit outcome unknown、governance integrity 与 remaining cancel/retry/lease/budget crash matrix 的真实 PostgreSQL/Redis 演练。
+- audit archive 作为数据库恢复后的精确校验/补回工具参与演练，但不得把 archive 自身 restore 冒充整库、PITR、RPO/RTO 或 WORM 认证。
 
 ## 不变量与非目标
 
 - 不改变 `llmbenchlab-protocol-v1` 的评分、分母、完成率、answered accuracy、排行榜隔离或不可变历史快照。
-- 不调用真实或付费 Provider；自动化只使用 Mock、MockTransport、stub 和故障注入。
-- API/Worker managed Run 受 `0004` 治理；可信本地 CLI 按 ADR-0010 继续 `legacy_unmanaged`，操作者必须独占数据库且没有全局 RPM/TPM/USD 硬保证。
-- Provider 调用不是 exactly-once；本地幂等、ledger 和保守结算不能证明外部调用/账单恰好一次。
-- 不把 Redis、进程内计数或 materialized counter 当成第二事实来源；ledger/DB truth 漂移必须 fail closed。
-- 不把审计称为 WORM；数据库管理员仍可修改数据，读取完整性检查只提供应用层 fail-closed。
-- 不移除 write-only Key、AES-GCM credential、数据库外 keyring、legacy environment、真 SSE、严格 `[DONE]`、nullable `max_tokens` 或既有安全限制。
-- 不新增 Phase 3 Benchmark、代码沙箱、Judge、Arena、Agent、认证、多租户、公共部署或 Kubernetes。
+- API/Worker managed Run 继续以数据库/ledger 为事实来源；Redis、Prometheus、告警、日志、进程内 gate 和 materialized counter 都不是第二状态机。
+- Provider 调用不是 exactly-once；本地幂等、ledger 和保守结算不能证明外部调用或账单恰好一次。
+- 保留 write-only Key、AES-GCM credential、数据库外 keyring、legacy environment、真 SSE、严格 `[DONE]`、nullable `max_tokens` 和既有安全限制。
+- 不新增 Phase 3 Benchmark、代码沙箱、Judge、Arena、Agent、认证、多租户、公共部署、Kubernetes 或生产 HA 声明。
 
 ## Definition of Done
 
-- 已完成切片：治理/审计与 P2-01 已交付；P2-01 已有独立实现 commit、实际 evidence、secret/diff/cleanup 审计和实现 SHA 4/4 CI，证据文档 commit `875f13a…` 自身的精确 SHA CI 也已 4/4 成功；v1 失败与 v2 通过事实同时保留。
-- Phase 2 整体：除上述切片外，Exporter/告警、audit retention archive、Worker progress/liveness、备份恢复和剩余故障矩阵均实现并验证；所有 Phase 2 验收项有可复核证据。
-- 任一关键项未运行或失败时，Phase 2 必须保持 `in_progress`，不得宣称生产 HA、完整可观测性、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+- P2-06 已完成，不再重复其资格或证据门禁。
+- P2-07：backup/restore、Redis 重建、告警处置与约定故障矩阵必须有隔离真实 PostgreSQL/Redis、Mock-only Compose、秘密审查、独立 commit/push 和精确 SHA CI 证据，才能标记 completed。
+- Phase 2：只有 P2-07 也完成后才可评估 `completed`；在此之前保持 `in_progress`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展、WORM 或 Provider exactly-once。
 
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-请执行 docs/NEXT_TASK.md 的“Phase 2 可观测性、保留与恢复闭环”。治理/审计候选 `665244e095905083b606b8e98e946ed1a02dc0fc`、P2-01 v2 实现 `b6a35fef1dd069ebb54b69955058915c722aa34d` 与证据文档 `875f13a253c40b7573d45c6287385e60f2bb8f04` 的实际 evidence 和精确 SHA CI 已完成，不要重复实现、重跑碰绿或改写 v1/v2 证据。建立新的工作日志与执行计划，交付受控 exporter/告警、低基数标签、Worker DB-time progress/liveness、audit retention archive/restore；再演练 PostgreSQL 与数据库外 keyring 配对 backup/restore、Redis 重建和剩余故障矩阵。自动化只能用 Mock/Stub，不得调用真实 Provider；保持 protocol-v1、ledger/DB truth、write-only Key 和 fail-closed 边界。每个独立切片都须测试、提交、push 并等待精确 SHA CI；正式闭环未全部满足前 Phase 2 保持 in_progress，不得跳到 Phase 3 或宣称生产 HA/Provider exactly-once。
+确认 observational Token overdraw 修复已完成本地/远程门禁且当前应用 head 为 20260830_0007 后，再继续执行 docs/NEXT_TASK.md。P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
 ```
