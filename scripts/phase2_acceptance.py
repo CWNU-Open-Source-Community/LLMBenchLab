@@ -300,6 +300,17 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def conservative_settlement_matches_reserved_bounds(
+    reservation: dict[str, Any],
+) -> bool:
+    """Return whether conservative settlement copied every configured bound."""
+
+    return all(
+        reservation[f"actual_{dimension}"] == reservation[f"reserved_{dimension}"]
+        for dimension in ("input_tokens", "output_tokens", "cost_usd")
+    )
+
+
 def redact_text(value: str) -> str:
     redacted = value.replace(LOCAL_PASSWORD, "<redacted>")
     redacted = re.sub(
@@ -1959,14 +1970,7 @@ WHERE r.id = '{}';
                 send_started,
             )
             self.require(
-                send_started["actual_input_tokens"] == send_started["reserved_input_tokens"]
-                and send_started["actual_output_tokens"] == send_started["reserved_output_tokens"]
-                and math.isclose(
-                    float(send_started["actual_cost_usd"]),
-                    float(send_started["reserved_cost_usd"]),
-                    rel_tol=0,
-                    abs_tol=1e-12,
-                ),
+                conservative_settlement_matches_reserved_bounds(send_started),
                 "conservative settlement did not consume the reserved bounds",
                 send_started,
             )

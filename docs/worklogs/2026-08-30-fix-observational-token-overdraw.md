@@ -55,7 +55,7 @@
 2. [completed] 建立 ADR-0018、执行计划与本日志。
 3. [completed] 实现代码、迁移与回归测试，并完成本地完整与真实基础设施验证。
 4. [completed] 执行当前数据库维护迁移和只读事实验证。
-5. [pending] 文档收尾、审查、commit/push/exact-SHA CI。
+5. [in_progress] 文档收尾、审查、修正 commit/push/exact-SHA CI。
 
 ## 已确认事实
 
@@ -83,8 +83,10 @@
 - 真实 PostgreSQL 16 + Redis 7 integration：`33 passed`；PostgreSQL migration upgrade/downgrade/upgrade/check 通过。
 - Frontend：`39 passed`；production build 通过；仅保留既有 662.40 kB chunk warning。
 - Mock smoke：`1 passed`；`docker compose config` 通过。
+- 首个实现 commit `c6212db2376ffc6b5f32c46b000aad8e7faf9b1f` 已普通 push。其精确 SHA GitHub Actions [run `33270167616`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33270167616) 中 backend、真实 PostgreSQL/Redis integration、frontend 三个 job 成功；real-Compose job 在 `deterministic_database_seam_provider_and_response_commit_recovery` 失败。下载的 evidence 精确定位为 acceptance harness 对合法的 `actual_cost_usd=null` 执行 `float(None)`；生产治理和所有 Run 均正常完成。
+- 已将 conservative settlement 验收改为逐维精确比较 nullable/numeric reserved→actual，并加入 null、numeric、mismatch 回归。目标脚本测试 `16 passed`；完整 `make phase2-acceptance` 为 `9/9 passed`，此前失败场景通过，最终 cleanup 的 container/volume/network 均为空。第一次本地尝试在业务场景前被 Docker Hub 镜像代理 `docker.1panel.live` 的 403 阻断；随后仅使用临时匿名 Docker 配置与公共缓存补齐本机基础镜像，不修改全局 Docker 配置，实际验收成功。
 - 当前个人 SQLite 已由一致性备份 `backend/data/llmbenchlab-pre-0007-20260830.db`（SHA-256 `3fcf7f4980e935a78a3d7b66351cb3556f6cbba5e37d348a82d9252d4d962792`）和 migration 入口自动备份共同保护后迁移到 `20260830_0007`；两份备份均收紧为 `0600`。四层 `overdrawn` scope 从 4 降为 0，旧 Run 仍为 `failed/exhausted`，7 Responses、7 ledger、407 input/599 output 全部保留，13 张业务表行数迁移前后一致，`quick_check=ok`、foreign-key violation=0。
 - 开发 API/Worker/Web 已重新启动；`/api/v1/health` 为 `ok`，任务 metrics 为 active Provider attempt `0`、overdrawn scope `0`、live Worker `1`。真实 PostgreSQL/Redis 回归使用的两个精确临时容器已停止并由 `--rm` 清除。
-- 未调用真实 Provider；尚未形成 commit/push/exact-SHA GitHub Actions 证据，因此任务仍为 `in_progress`，最后一项验收保持未勾选。
+- 未调用真实 Provider。首个实现 SHA 的远程门禁如实保留为 3/4；nullable acceptance 修正尚待形成新 commit/push 并取得新的 exact-SHA 4/4 证据，因此任务仍为 `in_progress`，最后一项验收保持未勾选。
 
 最终独立审查未发现 Blocker/High/Medium。剩余 Low 覆盖缺口是：seeded historical overdraw 与 active-reservation rollback 的长期自动回归目前在 SQLite，真实 PostgreSQL 已执行空库双方言 SQL 往返但未持久化同构数据 fixture；importer/capacity 的 provenance wiring 也分别由 helper/SQL 文本目标测试覆盖，尚无另一个端到端 historical row 场景。这些不改变当前修复结论，后续若扩充集成门禁可合并为一个串行 PostgreSQL fixture。

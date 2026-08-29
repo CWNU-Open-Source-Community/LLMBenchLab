@@ -339,6 +339,46 @@ def test_database_crash_seam_snapshot_hashes_only_allowlisted_projection() -> No
     assert result == {**projection, "sha256": script.canonical_hash(projection)}
 
 
+@pytest.mark.parametrize(
+    "reservation",
+    [
+        {
+            "reserved_input_tokens": None,
+            "reserved_output_tokens": 64,
+            "reserved_cost_usd": None,
+            "actual_input_tokens": None,
+            "actual_output_tokens": 64,
+            "actual_cost_usd": None,
+        },
+        {
+            "reserved_input_tokens": 8,
+            "reserved_output_tokens": 64,
+            "reserved_cost_usd": 0.25,
+            "actual_input_tokens": 8,
+            "actual_output_tokens": 64,
+            "actual_cost_usd": 0.25,
+        },
+    ],
+)
+def test_conservative_settlement_accepts_nullable_or_numeric_reserved_bounds(
+    reservation: dict[str, object],
+) -> None:
+    assert script.conservative_settlement_matches_reserved_bounds(reservation) is True
+
+
+def test_conservative_settlement_rejects_usage_that_differs_from_reserved_bounds() -> None:
+    reservation = {
+        "reserved_input_tokens": None,
+        "reserved_output_tokens": 64,
+        "reserved_cost_usd": None,
+        "actual_input_tokens": None,
+        "actual_output_tokens": 63,
+        "actual_cost_usd": None,
+    }
+
+    assert script.conservative_settlement_matches_reserved_bounds(reservation) is False
+
+
 def test_run_all_includes_database_seams_before_outage_and_migration() -> None:
     harness = object.__new__(script.Phase2Acceptance)
     harness.evidence = {"status": "initializing"}
