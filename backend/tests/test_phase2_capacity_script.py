@@ -1253,6 +1253,8 @@ def test_formal_run_all_appends_fixed_warmed_then_cold_bursts() -> None:
 def test_governance_reconciliation_sql_independently_rebuilds_both_projections() -> None:
     sql = script.GOVERNANCE_RECONCILIATION_SQL
 
+    assert "LEFT JOIN evaluation_runs AS run ON run.id = reservation.run_id" in sql
+    assert "input_reservation_is_explicit" in sql
     for scope_reference in (
         "reservation.global_scope_id",
         "reservation.provider_scope_id",
@@ -1974,7 +1976,7 @@ def test_acceptance_requires_both_populated_guards_and_empty_round_trips() -> No
     assert 'PRE_GOVERNANCE_REVISION = "20260827_0003"' in source
     assert 'GOVERNANCE_REVISION = "20260827_0004"' in source
     assert 'WORKER_PROGRESS_REVISION = "20260828_0005"' in source
-    assert 'DATABASE_HEAD_REVISION = "20260829_0006"' in source
+    assert 'DATABASE_HEAD_REVISION = "20260830_0007"' in source
     assert "application_worker_progress_0005_to_0004_guard" in source
     assert "isolated_governance_0004_to_0003_guard" in source
     assert "worker_progress_0005_to_0004_round_trip" in source

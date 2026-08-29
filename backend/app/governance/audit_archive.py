@@ -34,6 +34,7 @@ ARCHIVE_V1_COMPATIBLE_ALEMBIC_HEADS = frozenset(
     {
         "20260828_0005",
         "20260829_0006",
+        "20260830_0007",
     }
 )
 ARCHIVE_V1_RETENTION_VALUES = ("operational", "security")

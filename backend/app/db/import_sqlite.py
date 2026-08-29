@@ -311,14 +311,21 @@ def _ledger_timestamp(value: Any) -> datetime:
     return value.astimezone(UTC)
 
 
-def _reservation_is_overdrawn(reservation: Mapping[str, Any], state: str) -> bool:
+def _reservation_is_overdrawn(
+    reservation: Mapping[str, Any],
+    state: str,
+    *,
+    input_reservation_is_explicit: bool,
+) -> bool:
     if state not in _SETTLED_RESERVATION_STATES:
         return False
-    for reserved_name, actual_name in (
-        ("reserved_input_tokens", "actual_input_tokens"),
-        ("reserved_output_tokens", "actual_output_tokens"),
-        ("reserved_cost_usd", "actual_cost_usd"),
+    for reserved_name, actual_name, requires_explicit_input in (
+        ("reserved_input_tokens", "actual_input_tokens", True),
+        ("reserved_output_tokens", "actual_output_tokens", False),
+        ("reserved_cost_usd", "actual_cost_usd", True),
     ):
+        if requires_explicit_input and not input_reservation_is_explicit:
+            continue
         reserved = reservation[reserved_name]
         actual = reservation[actual_name]
         if (
@@ -335,6 +342,7 @@ def _accumulate_scope_ledger(
     reservation: Mapping[str, Any],
     *,
     state: str,
+    input_reservation_is_explicit: bool,
 ) -> None:
     if state in _ACTIVE_RESERVATION_STATES:
         counters.active_reservations += 1
@@ -352,6 +360,7 @@ def _accumulate_scope_ledger(
         counters.overdrawn = counters.overdrawn or _reservation_is_overdrawn(
             reservation,
             state,
+            input_reservation_is_explicit=input_reservation_is_explicit,
         )
 
 
@@ -379,11 +388,16 @@ def _validate_governance_materializations(connection: Connection) -> None:
     scopes = Base.metadata.tables["governance_scopes"]
     buckets = Base.metadata.tables["governance_minute_buckets"]
     reservations = Base.metadata.tables["provider_call_reservations"]
+    runs = Base.metadata.tables["evaluation_runs"]
     scope_rows = tuple(connection.execute(sa.select(scopes).order_by(scopes.c.id)).mappings())
     bucket_rows = tuple(connection.execute(sa.select(buckets).order_by(buckets.c.id)).mappings())
     reservation_rows = tuple(
         connection.execute(sa.select(reservations).order_by(reservations.c.id)).mappings()
     )
+    run_input_reservations = {
+        str(row.id): row.input_token_reservation
+        for row in connection.execute(sa.select(runs.c.id, runs.c.input_token_reservation))
+    }
 
     scopes_by_id = {str(row["id"]): row for row in scope_rows}
     expected_scopes = {scope_id: _ScopeLedgerCounters() for scope_id in scopes_by_id}
@@ -400,6 +414,11 @@ def _validate_governance_materializations(connection: Connection) -> None:
 
     for reservation in reservation_rows:
         state = _enum_text(reservation["state"])
+        run_id = reservation["run_id"]
+        input_reservation_is_explicit = run_id is None or (
+            str(run_id) in run_input_reservations
+            and run_input_reservations[str(run_id)] is not None
+        )
         for reference_name, expected_scope_type in _SCOPE_REFERENCE_TYPES:
             raw_scope_id = reservation[reference_name]
             if raw_scope_id is None and reference_name == "run_scope_id":
@@ -416,6 +435,7 @@ def _validate_governance_materializations(connection: Connection) -> None:
                 expected_scopes[scope_id],
                 reservation,
                 state=state,
+                input_reservation_is_explicit=input_reservation_is_explicit,
             )
             bucket_key = (
                 scope_id,

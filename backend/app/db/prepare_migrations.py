@@ -32,6 +32,7 @@ RELIABILITY_REVISION = "20260825_0002"
 CREDENTIAL_REVISION = "20260827_0003"
 GOVERNANCE_REVISION = "20260827_0004"
 WORKER_PROGRESS_REVISION = "20260828_0005"
+INDEX_REPAIR_REVISION = "20260829_0006"
 
 _WORKER_PROGRESS_TABLES = {"worker_processes"}
 _WORKER_PROGRESS_INDEXES = {
@@ -872,6 +873,7 @@ def prepare_database(
             CREDENTIAL_REVISION,
             GOVERNANCE_REVISION,
             WORKER_PROGRESS_REVISION,
+            INDEX_REPAIR_REVISION,
         )
         historical_heads = {(revision,) for revision in historical_revisions}
 
@@ -919,7 +921,10 @@ def prepare_database(
         source_revision: str
         if current_heads in historical_heads:
             source_revision = current_heads[0]
-            if not sqlite_locked and source_revision != WORKER_PROGRESS_REVISION:
+            if not sqlite_locked and source_revision not in {
+                WORKER_PROGRESS_REVISION,
+                INDEX_REPAIR_REVISION,
+            }:
                 return PreparationResult(action="versioned")
             expected_differences = {
                 LEGACY_REVISION: _LEGACY_DIFFERENCES,
@@ -928,6 +933,7 @@ def prepare_database(
                 CREDENTIAL_REVISION: _CREDENTIAL_DIFFERENCES,
                 GOVERNANCE_REVISION: _WORKER_PROGRESS_DIFFERENCES,
                 WORKER_PROGRESS_REVISION: (),
+                INDEX_REPAIR_REVISION: (),
             }[source_revision]
             differences = _schema_differences(connection)
             expected_missing_index_names: frozenset[str] = frozenset()
@@ -975,6 +981,7 @@ def prepare_database(
                 CREDENTIAL_REVISION: "versioned_credentials",
                 GOVERNANCE_REVISION: "versioned_governance",
                 WORKER_PROGRESS_REVISION: "versioned_worker_progress",
+                INDEX_REPAIR_REVISION: "versioned_index_repair",
             }[source_revision]
         else:
             if not sqlite_locked:
@@ -984,9 +991,9 @@ def prepare_database(
                 )
             differences = _schema_differences(connection)
             if not differences:
-                target_revision = "head"
-                action = "stamped_current"
-                source_revision = head_revision
+                target_revision = INDEX_REPAIR_REVISION
+                action = "stamped_index_repair"
+                source_revision = INDEX_REPAIR_REVISION
             elif differences == _PHASE_1_DIFFERENCES:
                 target_revision = PHASE_1_REVISION
                 action = "stamped_phase1"
@@ -1066,9 +1073,9 @@ def main() -> int:
             "Adopted a verified Web-credential SQLite schema at "
             f"{result.stamped_revision}; backup: {result.backup_path}"
         )
-    elif result.action == "stamped_current":
+    elif result.action == "stamped_index_repair":
         print(
-            "Adopted a verified current SQLite schema at "
+            "Adopted a verified current SQLite schema before the overdraw data repair at "
             f"{result.stamped_revision}; backup: {result.backup_path}"
         )
     elif result.action == "stamped_governance":
@@ -1104,6 +1111,11 @@ def main() -> int:
     elif result.action == "versioned_worker_progress":
         print(
             "Verified a versioned Worker-progress SQLite schema before upgrade; "
+            f"backup: {result.backup_path}"
+        )
+    elif result.action == "versioned_index_repair":
+        print(
+            "Verified a versioned index-repair SQLite schema before upgrade; "
             f"backup: {result.backup_path}"
         )
     return 0

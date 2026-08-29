@@ -16,6 +16,7 @@ from app.db.base import Base
 from app.db.prepare_migrations import (
     CREDENTIAL_REVISION,
     GOVERNANCE_REVISION,
+    INDEX_REPAIR_REVISION,
     LEGACY_REVISION,
     PHASE_1_REVISION,
     WORKER_PROGRESS_REVISION,
@@ -28,7 +29,7 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260829_0006"
+HEAD_REVISION = "20260830_0007"
 WEB_CREDENTIAL_REVISION = CREDENTIAL_REVISION
 RELIABILITY_REVISION = "20260825_0002"
 
@@ -150,10 +151,138 @@ def _insert_active_policy(
     )
 
 
-def _mock_postgresql_0005_preflight(
+def _insert_overdraw_repair_fixture(
+    database_path: Path,
+    *,
+    input_token_reservation: int | None,
+    reserved_input_tokens: int,
+    reserved_output_tokens: int,
+    reserved_cost_usd: str,
+    actual_input_tokens: int,
+    actual_output_tokens: int,
+    actual_cost_usd: str,
+    state: str = "settled_actual",
+) -> None:
+    """Insert one old-semantics ledger projection at revision 0006."""
+
+    if state not in {"settled_actual", "send_started"}:
+        raise ValueError("unsupported overdraw repair fixture state")
+    active = state == "send_started"
+    settled_actual_input = None if active else actual_input_tokens
+    settled_actual_output = None if active else actual_output_tokens
+    settled_actual_cost = None if active else actual_cost_usd
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            "INSERT INTO governance_policies ("
+            "id, version, policy_hash, is_active, backlog_limit, question_quantum, "
+            "activated_at, created_at) VALUES ("
+            "'policy-overdraw-repair', 1, ?, 1, 10, 2, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            ("a" * 64,),
+        )
+        scope_rows = (
+            ("scope-overdraw-global", "global", "global"),
+            ("scope-overdraw-provider", "provider", "b" * 64),
+            ("scope-overdraw-model", "model", "model-1"),
+            ("scope-overdraw-run", "run", "run-1"),
+        )
+        for scope_id, scope_type, scope_key in scope_rows:
+            connection.execute(
+                "INSERT INTO governance_scopes ("
+                "id, scope_type, scope_key, active_reservations, reserved_requests, "
+                "reserved_input_tokens, reserved_output_tokens, reserved_cost_usd, "
+                "consumed_requests, consumed_input_tokens, consumed_output_tokens, "
+                "consumed_cost_usd, overdrawn, created_at, updated_at) VALUES ("
+                "?, ?, ?, ?, 0, ?, ?, ?, 1, ?, ?, ?, 1, "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (
+                    scope_id,
+                    scope_type,
+                    scope_key,
+                    int(active),
+                    reserved_input_tokens if active else 0,
+                    reserved_output_tokens if active else 0,
+                    reserved_cost_usd if active else "0",
+                    settled_actual_input or 0,
+                    settled_actual_output or 0,
+                    settled_actual_cost or "0",
+                ),
+            )
+            connection.execute(
+                "INSERT INTO governance_minute_buckets ("
+                "id, scope_id, policy_id, window_start, reserved_requests, "
+                "reserved_input_tokens, reserved_output_tokens, consumed_requests, "
+                "consumed_input_tokens, consumed_output_tokens, created_at, updated_at) "
+                "VALUES (?, ?, 'policy-overdraw-repair', '2026-08-30 00:00:00', "
+                "0, ?, ?, 1, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (
+                    f"bucket-{scope_type}-overdraw-repair",
+                    scope_id,
+                    reserved_input_tokens if active else 0,
+                    reserved_output_tokens if active else 0,
+                    settled_actual_input or 0,
+                    settled_actual_output or 0,
+                ),
+            )
+        connection.execute(
+            "UPDATE evaluation_runs SET governance_policy_id = 'policy-overdraw-repair', "
+            "governance_status = 'managed', input_token_reservation = ? WHERE id = 'run-1'",
+            (input_token_reservation,),
+        )
+        connection.execute(
+            "INSERT INTO question_executions ("
+            "id, run_id, question_id, execution_generation, next_provider_attempt, "
+            "created_at, updated_at) VALUES ("
+            "'execution-overdraw-repair', 'run-1', 'question-1', 0, 2, "
+            "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO provider_call_reservations ("
+            "id, operation_key, policy_id, question_execution_id, run_id, question_id, "
+            "model_id, global_scope_id, provider_scope_id, model_scope_id, run_scope_id, "
+            "execution_generation, provider_attempt, lease_owner, lease_token, state, "
+            "window_start, reserved_input_tokens, reserved_output_tokens, reserved_cost_usd, "
+            "actual_input_tokens, actual_output_tokens, actual_cost_usd, outcome_code, "
+            "send_started_at, settled_at, created_at, updated_at) VALUES ("
+            "'reservation-overdraw-repair', 'run-1:question-1:0:1', "
+            "'policy-overdraw-repair', 'execution-overdraw-repair', 'run-1', 'question-1', "
+            "'model-1', 'scope-overdraw-global', 'scope-overdraw-provider', "
+            "'scope-overdraw-model', 'scope-overdraw-run', 0, 1, 'worker-overdraw-repair', "
+            "1, ?, '2026-08-30 00:00:00', ?, ?, ?, ?, ?, ?, ?, "
+            "'2026-08-30 00:00:01', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+            (
+                state,
+                reserved_input_tokens,
+                reserved_output_tokens,
+                reserved_cost_usd,
+                settled_actual_input,
+                settled_actual_output,
+                settled_actual_cost,
+                None if active else "succeeded",
+                None if active else "2026-08-30 00:00:02",
+            ),
+        )
+
+
+def _overdraw_repair_ledger_snapshot(database_path: Path) -> tuple[object, ...]:
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT id, operation_key, state, reserved_input_tokens, "
+            "reserved_output_tokens, reserved_cost_usd, actual_input_tokens, "
+            "actual_output_tokens, actual_cost_usd, outcome_code, send_started_at, "
+            "settled_at, created_at, updated_at FROM provider_call_reservations "
+            "WHERE id = 'reservation-overdraw-repair'"
+        ).fetchone()
+    assert row is not None
+    return row
+
+
+def _mock_postgresql_historical_preflight(
     monkeypatch: pytest.MonkeyPatch,
     *,
     differences: tuple[str, ...],
+    source_revision: str = WORKER_PROGRESS_REVISION,
 ) -> tuple[Mock, Mock, list[object]]:
     connection = Mock()
     connection.dialect.name = "postgresql"
@@ -173,7 +302,7 @@ def _mock_postgresql_0005_preflight(
     monkeypatch.setattr(
         prepare_migrations_module,
         "database_heads",
-        lambda _connection: (WORKER_PROGRESS_REVISION,),
+        lambda _connection: (source_revision,),
     )
     monkeypatch.setattr(
         prepare_migrations_module,
@@ -366,9 +495,11 @@ def test_prepare_adopts_current_unversioned_schema(tmp_path: Path) -> None:
 
     result = prepare_database(_database_url(database_path))
 
-    assert result.action == "stamped_current"
-    assert result.stamped_revision == HEAD_REVISION
+    assert result.action == "stamped_index_repair"
+    assert result.stamped_revision == INDEX_REPAIR_REVISION
     assert result.backup_path is not None and result.backup_path.is_file()
+    assert _read_heads(database_path) == (INDEX_REPAIR_REVISION,)
+    _run_alembic(database_path, "upgrade", "head")
     assert _read_heads(database_path) == (HEAD_REVISION,)
 
 
@@ -641,6 +772,182 @@ def test_known_governance_index_gap_resumes_after_partial_0006_ddl(tmp_path: Pat
     _run_alembic(database_path, "check")
 
 
+def test_observational_overdraw_repair_preserves_ledger_and_is_reversible(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "observational-overdraw-repair.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", INDEX_REPAIR_REVISION)
+    _insert_overdraw_repair_fixture(
+        database_path,
+        input_token_reservation=None,
+        reserved_input_tokens=59,
+        reserved_output_tokens=128,
+        reserved_cost_usd="0.00010000",
+        actual_input_tokens=75,
+        actual_output_tokens=64,
+        actual_cost_usd="0.00020000",
+    )
+    ledger_before = _overdraw_repair_ledger_snapshot(database_path)
+    with sqlite3.connect(database_path) as connection:
+        counters_before = connection.execute(
+            "SELECT active_reservations, reserved_requests, reserved_input_tokens, "
+            "reserved_output_tokens, reserved_cost_usd, consumed_requests, "
+            "consumed_input_tokens, consumed_output_tokens, consumed_cost_usd "
+            "FROM governance_scopes ORDER BY id"
+        ).fetchall()
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 4
+        )
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 0
+        )
+        assert (
+            connection.execute(
+                "SELECT active_reservations, reserved_requests, reserved_input_tokens, "
+                "reserved_output_tokens, reserved_cost_usd, consumed_requests, "
+                "consumed_input_tokens, consumed_output_tokens, consumed_cost_usd "
+                "FROM governance_scopes ORDER BY id"
+            ).fetchall()
+            == counters_before
+        )
+
+    _run_alembic(database_path, "downgrade", INDEX_REPAIR_REVISION)
+
+    assert _read_heads(database_path) == (INDEX_REPAIR_REVISION,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 4
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "case_name",
+        "input_token_reservation",
+        "reserved_input_tokens",
+        "reserved_output_tokens",
+        "reserved_cost_usd",
+        "actual_input_tokens",
+        "actual_output_tokens",
+        "actual_cost_usd",
+    ),
+    [
+        ("input", 59, 59, 128, "0.00020000", 75, 64, "0.00010000"),
+        ("output", None, 59, 4, "0.00020000", 40, 5, "0.00010000"),
+        ("cost", 128, 128, 128, "0.00010000", 40, 64, "0.00020000"),
+    ],
+)
+def test_overdraw_repair_preserves_explicit_hard_bound_overdraw(
+    tmp_path: Path,
+    case_name: str,
+    input_token_reservation: int | None,
+    reserved_input_tokens: int,
+    reserved_output_tokens: int,
+    reserved_cost_usd: str,
+    actual_input_tokens: int,
+    actual_output_tokens: int,
+    actual_cost_usd: str,
+) -> None:
+    database_path = tmp_path / f"explicit-{case_name}-overdraw-repair.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", INDEX_REPAIR_REVISION)
+    _insert_overdraw_repair_fixture(
+        database_path,
+        input_token_reservation=input_token_reservation,
+        reserved_input_tokens=reserved_input_tokens,
+        reserved_output_tokens=reserved_output_tokens,
+        reserved_cost_usd=reserved_cost_usd,
+        actual_input_tokens=actual_input_tokens,
+        actual_output_tokens=actual_output_tokens,
+        actual_cost_usd=actual_cost_usd,
+    )
+    ledger_before = _overdraw_repair_ledger_snapshot(database_path)
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute("SELECT COUNT(*) FROM governance_scopes WHERE overdrawn").fetchone()[
+                0
+            ]
+            == 4
+        )
+
+
+@pytest.mark.parametrize(
+    ("start_revision", "direction", "target_revision"),
+    [
+        (INDEX_REPAIR_REVISION, "upgrade", "head"),
+        (HEAD_REVISION, "downgrade", INDEX_REPAIR_REVISION),
+    ],
+)
+def test_overdraw_repair_refuses_active_reservations_before_mutation(
+    tmp_path: Path,
+    start_revision: str,
+    direction: str,
+    target_revision: str,
+) -> None:
+    database_path = tmp_path / f"active-overdraw-{direction}.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", start_revision)
+    _insert_overdraw_repair_fixture(
+        database_path,
+        input_token_reservation=None,
+        reserved_input_tokens=59,
+        reserved_output_tokens=128,
+        reserved_cost_usd="0.00010000",
+        actual_input_tokens=75,
+        actual_output_tokens=64,
+        actual_cost_usd="0.00020000",
+        state="send_started",
+    )
+    ledger_before = _overdraw_repair_ledger_snapshot(database_path)
+    with sqlite3.connect(database_path) as connection:
+        scope_rows_before = connection.execute(
+            "SELECT id, active_reservations, reserved_input_tokens, "
+            "reserved_output_tokens, reserved_cost_usd, overdrawn "
+            "FROM governance_scopes ORDER BY id"
+        ).fetchall()
+
+    failed = _invoke_alembic(database_path, direction, target_revision)
+
+    assert failed.returncode != 0
+    assert "Provider reservations are active" in failed.stderr
+    assert _read_heads(database_path) == (start_revision,)
+    assert _overdraw_repair_ledger_snapshot(database_path) == ledger_before
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT id, active_reservations, reserved_input_tokens, "
+                "reserved_output_tokens, reserved_cost_usd, overdrawn "
+                "FROM governance_scopes ORDER BY id"
+            ).fetchall()
+            == scope_rows_before
+        )
+
+
 @pytest.mark.parametrize(
     ("differences", "expected_row_guard_calls"),
     [
@@ -667,7 +974,7 @@ def test_prepare_postgresql_0005_accepts_only_canonical_or_known_index_gap(
     differences: tuple[str, ...],
     expected_row_guard_calls: int,
 ) -> None:
-    engine, connection, metadata_calls = _mock_postgresql_0005_preflight(
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
         monkeypatch,
         differences=differences,
     )
@@ -684,12 +991,48 @@ def test_prepare_postgresql_0005_accepts_only_canonical_or_known_index_gap(
 def test_prepare_postgresql_0005_rejects_unknown_drift_with_known_index_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    engine, connection, metadata_calls = _mock_postgresql_0005_preflight(
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
         monkeypatch,
         differences=(
             "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
             "add_index:models.ix_models_enabled",
         ),
+    )
+
+    with pytest.raises(SchemaPreparationError, match="historical database"):
+        prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert metadata_calls == [connection]
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_prepare_postgresql_0006_checks_canonical_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
+        monkeypatch,
+        differences=(),
+        source_revision=INDEX_REPAIR_REVISION,
+    )
+
+    result = prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert result.action == "versioned"
+    assert metadata_calls == [connection]
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
+def test_prepare_postgresql_0006_rejects_metadata_drift(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
+        monkeypatch,
+        differences=("add_index:models.ix_models_enabled",),
+        source_revision=INDEX_REPAIR_REVISION,
     )
 
     with pytest.raises(SchemaPreparationError, match="historical database"):

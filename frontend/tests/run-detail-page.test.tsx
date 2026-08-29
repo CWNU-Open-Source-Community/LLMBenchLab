@@ -168,6 +168,21 @@ describe("RunDetailPage", () => {
     expect(screen.queryByText("governance_provider_rpm")).not.toBeInTheDocument();
   });
 
+  it("describes overdraw as actual usage exceeding an explicit reservation", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      status: "failed",
+      governance_status: "exhausted",
+      governance_reason: "governance_global_overdrawn",
+      error_message: null,
+    }));
+
+    renderPage();
+
+    expect(await screen.findByText("治理硬边界已终止 Run")).toBeInTheDocument();
+    expect(screen.getByText(/全局实际用量曾被判定超过预留/)).toBeInTheDocument();
+    expect(screen.queryByText(/保守结算超额/)).not.toBeInTheDocument();
+  });
+
   it("explains exhausted and legacy-unmanaged boundaries without reflecting unknown reasons", async () => {
     const unsafeReason = "untrusted-reason-that-must-not-be-reflected";
     apiMocks.run.mockResolvedValueOnce(runFixture({

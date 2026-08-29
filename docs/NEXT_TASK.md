@@ -1,10 +1,10 @@
-# 下一任务：实施 P2-07 最小恢复验证切片
+# 下一任务（当前修复完成后）：实施 P2-07 最小恢复验证切片
 
 > 状态：`planned`；P2-07 独立计划、工作日志与 ADR-0016 已建立，功能实现尚未开始
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 当前计划：[Phase 2 恢复与运维闭环](plans/2026-08-28-phase-2-recovery-operations.md)
 > 当前日志：[2026-08-28 P2-07 工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)
-> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)，exact-head amendment [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md)
+> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)，exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
 > 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md)
 
 ## 当前事实
@@ -13,7 +13,7 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 当前 P2-06 已按 [ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 实现：
 
-- P2-06 的 `20260828_0005` 新增 `worker_processes` 和 bounded audit scan indexes；当前维护 head `20260829_0006` 仅修复早期 `0004` 三索引缺口，不改变 13 表/importer/archive 语义。SQLite→PostgreSQL importer 继续做 13 表精确 digest，拒绝 live generation 并复制 stopped/stale facts；表非空时 `0005 -> 0004` 在 DDL 前拒绝。
+- P2-06 的 `20260828_0005` 新增 `worker_processes` 和 bounded audit scan indexes；`20260829_0006` 仅修复早期 `0004` 三索引缺口。当前应用 head `20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn，不改变 13 表 schema/importer/archive 合同、never-delete ledger 或 actual usage。SQLite→PostgreSQL importer 继续做 13 表精确 digest，拒绝 live generation 并复制 stopped/stale facts；表非空时 `0005 -> 0004` 在 DDL 前拒绝。
 - 长运行 Worker 注册唯一 generation，只在真实 scan/claim/lease-heartbeat/progress 后按 DB UTC 合并刷新；`/tasks/metrics` 和 exporter 只公开 expected/registered/live/stalled/shortfall 与聚合时间。dependency probe 固定声明不检查 main-loop progress。
 - `GET /api/v1/metrics/prometheus` 输出固定 Prometheus text `0.0.4` gauge，使用一个 DB-time 快照、有界 15 分钟 audit 与 1 小时 latency 窗口、固定 enum label、整次 fail-closed 和每 API 进程 single-flight。
 - `deploy/observability/` 提供固定八条告警规则、抓取示例与对应 Operations Runbook；仓库不部署 Prometheus、Alertmanager、OTel 或通知发送器。
@@ -26,7 +26,9 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 同日又把 `artifacts/benchmarks/` 中已存在的 GPQA-Diamond 与两种 MMLU-Pro profile 通过正式导入 API 加载到默认个人 SQLite，当前为 `4` 个 Benchmark、`24,277` 题，原 Model/Run/Response 保持且没有 Provider 调用。记录 commit `0163b67c00eb59ae59db5f3adb679ad85c799142` 已 push，其精确 SHA run `33266167547` 4/4 成功；该本地数据操作不提交第三方题目、不改变产品实现或路线图，P2-07 的下一任务仍保持不变。
 
-P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；本次兼容修复已在自动备份后将当前重建库前进到 `0006` 并通过 startup/check。
+当前必须先完成 [observational Token overdraw 修复](plans/2026-08-30-fix-observational-token-overdraw.md)。ADR-0018 已把非显式 input 估算与 hard reservation 分离，并把 data-only head 定为 `20260830_0007`；该 revision 只重算 `governance_scopes.overdrawn`，upgrade/downgrade 均拒绝 active reservation，历史 ledger/actual/Response/Run 终态保持。本地完整验证和当前个人 SQLite 迁移已通过；此维护仍为 `in_progress`，commit/push 与 exact-SHA CI 待完成。在其仓库级闭环前不要启动 P2-07 实施。
+
+P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；随后的兼容修复已在自动备份后将当时重建库前进到 `0006` 并通过 startup/check。
 
 ## 已完成：建立 P2-07 工作包
 
@@ -39,7 +41,7 @@ P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/te
 
 P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最小只读 verifier 切片开始，之后才依次完成：
 
-- PostgreSQL backup → 空目标 restore → Alembic `20260829_0006` head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
+- PostgreSQL backup → 空目标 restore → Alembic `20260830_0007` exact head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
 - 数据库与数据库外 keyring 独立备份/恢复：匹配 keyring 能解密，缺失/错误 keyring fail closed；日志/证据不得回显 Key 或 envelope。
 - Redis 重建/consumer group 恢复、Worker 扩缩、八条告警响应、dead-letter、commit outcome unknown、governance integrity 与 remaining cancel/retry/lease/budget crash matrix 的真实 PostgreSQL/Redis 演练。
 - audit archive 作为数据库恢复后的精确校验/补回工具参与演练，但不得把 archive 自身 restore 冒充整库、PITR、RPO/RTO 或 WORM 认证。
@@ -61,5 +63,5 @@ P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最�
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-继续执行 docs/NEXT_TASK.md。P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
+确认 observational Token overdraw 修复已完成本地/远程门禁且当前应用 head 为 20260830_0007 后，再继续执行 docs/NEXT_TASK.md。P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
 ```

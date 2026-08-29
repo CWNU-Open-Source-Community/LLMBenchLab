@@ -218,6 +218,7 @@ OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把
 - API 只在数据库 commit 后 best-effort 发布通知；commit 失败不 publish，Redis 发布失败仍保留可由数据库 reconciliation 找回的 pending Run。
 - policy GET 初始化前返回无副作用 `404 governance_policy_not_initialized`；PUT 要求全部 20 个字段，相同内容幂等、历史内容重激活原版本。Run admission 原子检查 backlog，并冻结 policy ID/version、完整 policy hash、opaque provider scope、question quantum，以及 `input_token_reservation` 和 lifetime request/Token/USD 四项 override；active attempt 必须使用这份 Run 快照，不能切换到后来激活的 policy。
 - global/provider/model/run 四层按固定锁序共同裁决 concurrency/fixed-minute request+Token/lifetime budget；hard Token/TPM 缺 input reservation 或有限 `max_tokens`、hard cost 缺价格时在 Provider 外发前 fail closed。每次 reserve/send-start/finish/reconcile/lease renew 都从完整 ledger 重算四层 scope 与 minute bucket，任何高报、低报或缺 bucket 漂移都回滚并另写最小 `governance_integrity_error`，失败事务不留下部分 reservation/counter。
+- observational reservation 回归必须分别覆盖：Run 没有显式 input bound 时，attempt 的 `reserved_input_tokens/reserved_cost_usd` 为 `null`，actual input/cost 原样保存、四层 scope 不 overdraw 且下一次 reserve 可继续；显式 input、显式 output，以及由完整上界和冻结价格派生的 reserved cost 各自超额时仍把四层 scope 标记为 overdraw 并拒绝后续 admission。
 - attempt ledger 覆盖 `reserved → send_started → settled_actual|settled_conservative` 与 retained `released_pre_send`。pre-send 重试递增 QuestionExecution generation 并保留当前尚未外发的 provider ordinal；已经到达 `send_started` 的较小 ordinal 仍被消费，不能因接管重置。HTTP retry、lease takeover、取消、重复投递和 commit-unknown 重放不 double-count，失租 `send_started` 只保守结算一次。
 - Run 终态/defer/exhaust 等状态先提交，再 reconcile active ledger；reconcile 完整性失败必须保留已提交 Run 状态、向调用方失败并写独立 integrity event。过期租约接管若旧 ledger reconcile 失败，必须撤销新 lease 并把 Run 收敛到 failed/exhausted（有取消意图时为 cancelled），且不得外发 Provider 请求。
 - backlog 满稳定 429；rate/concurrency defer 不生成 0 分 Response；每个 lease 只新增 frozen question quantum，cooperative yield 不增加 `failed_attempt_count`，最久未获服务 Run 优先再调度。
@@ -262,7 +263,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 
 `backend/tests/test_migrations.py` 使用独立临时 SQLite 和 Alembic 子进程验证：
 
-- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260829_0006` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束、两个 bounded audit scan indexes，以及早期 `0004/0005` 三索引缺口、repair DDL 部分完成后的重入和 PostgreSQL `0005` metadata 白名单/额外 drift 拒绝控制流（Mock）。
+- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260830_0007` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束、两个 bounded audit scan indexes，以及早期 `0004/0005` 三索引缺口、repair DDL 部分完成后的重入和 PostgreSQL `0005/0006` metadata 白名单/额外 drift 拒绝控制流（Mock）。
 - 有模型、Benchmark、题目、Run 与 Response 的 legacy schema 被一致性备份、严格识别并无损升级；题目按原插入顺序回填 0-based `position`。
 - 与当前 metadata 一致但没有版本标记的库可安全收养，已有 head 重复 preflight 不生成多余备份。
 - 部分表、server default/CHECK 内容或重名、PK/UNIQUE/FK/index/partial index、trigger、SQLite conflict policy/generated column、`STRICT`/`WITHOUT ROWID` 等未知 drift 在创建版本标记和备份前被拒绝；已在 head 的库同样验证。
@@ -271,6 +272,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - `0002 -> 0003` 会把旧 OpenAI-compatible Model 回填为 `environment`、Mock 回填为 `none`；只要凭据表有任意行，credential downgrade 在 DDL 前拒绝并保留二进制内容。
 - `0003 -> 0004` 把既有 Run 标为 `legacy_unmanaged` 并保留 protocol-v1 证据；任意 policy/scope/bucket/question execution/attempt ledger/audit、新 Run fairness/governance 字段或 Response Provider metadata 存在时，`0004 -> 0003` 必须在第一条 DDL 前拒绝。只有隔离空库用于 `0004 -> 0003 -> 0004` roundtrip。
 - `0004 -> 0005` 不回填虚构 Worker generation；任意 `worker_processes` 行都使 `0005 -> 0004` 在第一条 DDL 前拒绝。只有显式清空 process facts 或隔离空库才能往返，进入 `0004` 后原 governance/audit downgrade guard 继续生效。
+- `0006 -> 0007` 不改 schema 或历史 ledger/actual/Response，只重算 scope `overdrawn`：无显式 Run input bound 的 historical observational input/cost 超额被清除，显式 input/output 超额与由完整显式上界和价格派生的 cost 超额保留；`0007 -> 0006` 恢复旧派生结果。两个方向在任何更新前都拒绝 `reserved/send_started` active reservation。
 - 应用启动 revision 门禁拒绝未迁移库；测试夹具中的 `create_all` 仅用于隔离临时库，并显式 stamp 到与 metadata 对应的 head，不是运行时建表路径。
 
 目标化运行：
@@ -280,7 +282,7 @@ cd backend
 uv run pytest tests/test_migrations.py
 ```
 
-真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline 并停止 API/Worker 后，从 head `0006` 发起 downgrade；`0006 -> 0005` 为 no-op，随后 populated `0005 -> 0004` 在任何有损 DDL 前拒绝。另建隔离空 PostgreSQL 跨过 `0005 -> 0004 -> 0005`，最终 `upgrade head` 回到 `0006` 并 check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
+真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline并停止 API/Worker 后，从 head `0007` 发起 downgrade；`0007 -> 0006` 只恢复旧 overdraw 派生谓词，`0006 -> 0005` 为 schema no-op，随后 populated `0005 -> 0004` 在任何有损 DDL 前拒绝。另建隔离空 PostgreSQL 跨过 `0005 -> 0004 -> 0005`，最终 `upgrade head` 回到 `0007` 并 check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
 
 ### 6.3 SQLite→PostgreSQL 导入
 
@@ -575,7 +577,7 @@ make phase2-acceptance
 6. Redis 完全 stop/start；`live`/`health` 保持可用、`ready` 降级，API 仍以 `202` 提交数据库事实，Worker 仅靠 DB reconciliation 完成；Redis 恢复后新消息正常 ACK。
 7. Worker 停止时取消 pending Run；Worker 恢复消费旧通知后终态和 0 Response 不漂移。
 8. 运行中取消并再次 XADD 同一 Run；Response 数在取消后冻结，重复投递被 ACK 且 canonical snapshot 不变。
-9. 停止 API/Worker 后从 current head `20260829_0006` 尝试 downgrade 到 `0004`：schema-no-op `0006 -> 0005` 后，Worker progress rows 存在时必须在 `0005 -> 0004` 第一条有损 DDL 前拒绝，13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005`，最终回到 `0006` 并 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
+9. 停止 API/Worker 后从 current head `20260830_0007` 尝试 downgrade 到 `0004`：data-only `0007 -> 0006` 只按旧谓词重算 overdrawn，schema-no-op `0006 -> 0005` 后，Worker progress rows 存在时必须在 `0005 -> 0004` 第一条有损 DDL 前拒绝，13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005`，最终回到 `0007` 并 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
 
 任何一个场景失败、未运行、使用真实 Provider、最终 PEL/lag 非零或清理不完整，都不能把可靠执行基础写成通过。`--self-check-only` 只验证 Docker/Compose、隔离和清理 guard，不执行九场景，不能替代正式命令。精确 SHA `665244e…` 的最终本地运行已 9/9 通过；artifact 与 hash 见第 10.1 节。
 

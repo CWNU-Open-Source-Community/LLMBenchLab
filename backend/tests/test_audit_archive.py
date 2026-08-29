@@ -282,15 +282,16 @@ def test_archive_v1_rejects_unsupported_source_revision_on_write_and_read(tmp_pa
         verify_archive(path)
 
 
-def test_archive_v1_accepts_schema_equivalent_repair_revision() -> None:
+@pytest.mark.parametrize("source_revision", ["20260829_0006", "20260830_0007"])
+def test_archive_v1_accepts_compatible_repair_revision(source_revision: str) -> None:
     data, _digest = build_archive_bytes(
         (),
         cutoff_at=datetime(2026, 1, 1, tzinfo=UTC),
-        source_alembic_head="20260829_0006",
+        source_alembic_head=source_revision,
         has_more_eligible=False,
     )
 
-    assert b'"source_alembic_head":"20260829_0006"' in data
+    assert f'"source_alembic_head":"{source_revision}"'.encode() in data
 
 
 def test_frozen_archive_v1_fixture_remains_verifiable(tmp_path) -> None:

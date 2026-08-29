@@ -15,6 +15,7 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - Phase 0（治理、需求、架构和协议）已完成。
 - Phase 1 MVP 已具备完整垂直链路：注册模型、载入/导入 Benchmark、创建 Run、逐题持久化、结果聚合和前端展示。
 - Phase 2 候选已通过真实 PostgreSQL/Redis 和进程故障验证：除租约、心跳、fencing、幂等 Response 与数据库恢复外，Web/API managed Run 还具有 global/provider/model/run 四层数据库 admission、fixed-minute RPM/TPM、lifetime request/Token/cost budget、有限 backlog、公平 slice、逐 attempt reservation/settlement、typed audit 和历史延迟。
+- 当前 Alembic head 为 data-only `20260830_0007`：没有显式 `input_token_reservation` 时，输入 Token 估算只用于观测，不再写成 hard reservation 或参与 cost/overdraw 裁决；Provider actual usage 仍完整保存。显式 input/output 预留及由完整上界和价格计算的 reserved cost 超额仍按原规则 fail closed。
 - 可信本地 CLI 已提供 MMLU-Pro 与 GPQA-Diamond 的固定来源转换、真实 OpenAI-compatible 预检、可恢复执行和完整报告导出；这是 Phase 3 的客观题垂直切片，不代表 Phase 2 或 Phase 3 已完成。
 - 自动化、CI、Compose 故障验收和容量演练的模型执行都只使用 Mock；根据层级使用临时 SQLite 或隔离 PostgreSQL 16/Redis 7，不访问真实模型服务，也不产生模型费用。
 - Phase 2 仍为 `in_progress`。P2-01 已完整交付：`P2-local-control-plane-v2` 在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 次 warm-up + 5 次 measured trial，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；该实现的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run 33150080341](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
@@ -34,7 +35,7 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - **可解释指标**：严格总分 `score`、完成率 `completion_rate` 和已回答准确率 `answered_accuracy` 分开呈现，避免把缺失回答隐藏在成功样本中。
 - **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复；大快照加载移出事件循环，已领取 Run 在物化题目时仍可续租。
 - **幂等与恢复**：同一 Run/Question 只有一条计分证据；租约心跳、有限 attempt、退避、取消、过期接管和 dead-letter 都由数据库裁决，Redis 不是状态数据库。
-- **数据库权威治理**：Web/API admission 把版本化完整 policy 冻结进 Run；global/provider/model/run 四层并发、RPM/TPM 和累计预算在固定锁序中共同裁决，backlog 满时在提交前稳定拒绝，Token/cost hard limit 缺少显式上界或价格时 fail closed。
+- **数据库权威治理**：Web/API admission 把版本化完整 policy 冻结进 Run；global/provider/model/run 四层并发、RPM/TPM 和累计预算在固定锁序中共同裁决，backlog 满时在提交前稳定拒绝，Token/cost hard limit 缺少显式上界或价格时 fail closed。非显式输入估算不会冒充 hard reservation；actual usage 仍保留，只有实际用量超过显式预留才触发对应 overdraw。
 - **逐 Provider attempt 账本与公平调度**：每次 HTTP attempt 先 reserve、再持久化 `send_started`、最后 actual/conservative settlement；可证明未发送的 release 保留终态 ledger，另起 generation 并重试当前未发送 ordinal，不重置之前已发送的 HTTP retry。Worker 每个 lease 只新增有界 question quantum，按最久未获服务顺序 cooperative yield，不把让出误计为失败。
 - **可审计观测与受控保留**：typed、应用 append-only audit 以稳定 event key 去重；`/tasks/history` 在同一读取快照中校验 retained audit 后给出 counters 与 Run latency，`/metrics/prometheus` 用固定 gauge/enum label、硬样本上限和进程内 single-flight 暴露同源快照。Worker generation 只在真实 scan/claim/lease-heartbeat/progress 后按数据库 UTC 合并刷新，dependency probe 仍明确不检查主循环。八条 Prometheus 规则附固定 Runbook；`llmbenchlab-audit-retention` 提供 canonical JSONL archive、离线 verify、reconcile、精确 restore/delete，默认不删除且不把普通 hash 冒充 WORM。Run created/finished、credential audit 和逐题 Provider 元数据继续遵守非秘密边界。
 - **可复现记录**：持久化模型参数、Prompt、Benchmark Hash、协议版本、代码 commit（可用时）、raw response、parsed answer、参考答案快照和逐题评分。
@@ -77,7 +78,7 @@ flowchart LR
     WorkerEnv[Worker 环境变量 / 旧配置] -.->|兼容读取| Adapters
 ```
 
-API 创建 managed Run 时先在数据库锁内检查 backlog、冻结 active policy 与 Run override，再提交数据库、best-effort 发送 Redis 通知并返回 `202`；通知失败不回滚数据库事实。Worker 优先从数据库对账，并可消费重复 Redis 消息；每次写入都校验当前租约 owner/token，每个 Provider HTTP attempt 由数据库 ledger 单独 admission/结算，恢复时跳过已有 Response。数据库因此是唯一事实来源，Redis、日志、指标和 Worker 内存都不能覆盖 Run 状态。前端轮询 Run，进入 `completed`、`failed` 或 `cancelled` 终态后停止。详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，治理语义见 [`ADR-0009`](docs/decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、交付边界修正 [`ADR-0010`](docs/decisions/ADR-0010-phase-2-governance-delivery-boundaries.md) 和 pre-send retry generation 修正 [`ADR-0011`](docs/decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)，评分语义见 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)。
+API 创建 managed Run 时先在数据库锁内检查 backlog、冻结 active policy 与 Run override，再提交数据库、best-effort 发送 Redis 通知并返回 `202`；通知失败不回滚数据库事实。Worker 优先从数据库对账，并可消费重复 Redis 消息；每次写入都校验当前租约 owner/token，每个 Provider HTTP attempt 由数据库 ledger 单独 admission/结算，恢复时跳过已有 Response。数据库因此是唯一事实来源，Redis、日志、指标和 Worker 内存都不能覆盖 Run 状态。前端轮询 Run，进入 `completed`、`failed` 或 `cancelled` 终态后停止。详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，治理语义见 [`ADR-0009`](docs/decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、交付边界修正 [`ADR-0010`](docs/decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、pre-send retry generation 修正 [`ADR-0011`](docs/decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md) 和 observational reservation 修正 [`ADR-0018`](docs/decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)，评分语义见 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)。
 
 任务投递是 at-least-once，本地 Response、ledger 状态转换和聚合是幂等的；这不等于 Provider exactly-once。若 Worker 在 `send_started` 后崩溃，本地会保守结算并最终释放 admission permit，但远端幽灵请求可能仍在运行；若 Provider 已响应而本地 Response 尚未提交，接管 Worker 还可能再次调用并产生额外费用。本地 consumed 数是保守预算证据，不是 Provider 账单真值。
 
@@ -373,7 +374,7 @@ uv run python -m app.db.import_sqlite \
 | `3` | `committed_but_verification_failed` | 目标已提交完整 precommit 快照，但 postcommit 验证或报告失败；停止服务并独立对账 |
 | `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 |
 
-退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、13 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。当前 repair head `20260829_0006` 降到 `0005` 不删除对象；继续跨过 `20260828_0005` 时，只要 `worker_processes` 有事实就会拒绝。先停止 Worker、保存必要事实并显式清空该表后，才能进入 `0005 → 0004`，而 `0004` 原有 ledger/audit downgrade guard 仍继续生效。只有隔离空库用于完整降级/升级往返，处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、13 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。当前 head `20260830_0007` 降到 `0006` 会按旧谓词重算 `governance_scopes.overdrawn`，不删除 ledger 或 actual usage；`0006 → 0005` 不删除索引对象。继续跨过 `20260828_0005` 时，只要 `worker_processes` 有事实就会拒绝。先停止 Worker、保存必要事实并显式清空该表后，才能进入 `0005 → 0004`，而 `0004` 原有 ledger/audit downgrade guard 仍继续生效。只有隔离空库用于完整降级/升级往返，处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
 ## Audit retention 维护
 

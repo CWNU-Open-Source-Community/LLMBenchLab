@@ -35,7 +35,7 @@ const governanceLimitLabels = {
   concurrency: "并发额度暂时占满",
   rpm: "每分钟请求额度暂时占满",
   tpm: "每分钟 Token 额度暂时占满",
-  overdrawn: "已发生保守结算超额",
+  overdrawn: "实际用量曾被判定超过预留",
   request_budget_exhausted: "累计请求硬预算已耗尽",
   token_budget_exhausted: "累计 Token 硬预算已耗尽",
   cost_budget_exhausted: "累计费用硬预算已耗尽",

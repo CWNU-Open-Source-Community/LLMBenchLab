@@ -5,7 +5,7 @@
 - **Deciders**: LLMBenchLab maintainers
 - **Scope**: Phase 2 P2-06 metrics exporter、告警、Worker 主循环进展与 audit retention
 - **Amends**: [ADR-0005](ADR-0005-durable-task-execution.md) 的任务可观测性、[ADR-0009](ADR-0009-database-governance-audit-fair-scheduling.md) 的 typed audit 保留流程，以及 [ADR-0010](ADR-0010-phase-2-governance-delivery-boundaries.md) 的恢复指标边界
-- **Amended by**: [ADR-0017](ADR-0017-schema-equivalent-governance-index-repair.md) 将 schema-equivalent `0006` 加入 archive-v1 compatible-head allowlist
+- **Amended by**: [ADR-0017](ADR-0017-schema-equivalent-governance-index-repair.md) 将 schema-equivalent `0006` 加入 archive-v1 compatible-head allowlist；[ADR-0018](ADR-0018-observational-token-estimates-are-not-hard-reservations.md) 将 data-only `0007` 加入同一 allowlist
 - **Preserves**: PostgreSQL/数据库事实来源、Redis 非权威通知、`llmbenchlab-protocol-v1`、write-only Provider Key、Mock-only 自动化和可信 loopback 部署边界
 
 ## Context
@@ -221,7 +221,7 @@ Dead-letter 与 integrity 是 15 分钟 rolling symptom；Prometheus 整个窗�
 - cutoff 不由用户任意传入；空集合也生成有效 archive。
 - archive 默认绝不删除；运维顺序固定为 archive -> offline verify -> maintenance-window delete。
 
-单文件 canonical JSONL schema 为 `llmbenchlab-audit-archive-v1`：一行 header、零至一万行 `audit_event`、唯一末行 manifest。V1 的 event/payload/retention contract 与 compatible Alembic head allowlist 独立冻结；compatible heads 为 `20260828_0005` 与 schema-equivalent repair head `20260829_0006`。后者只恢复 canonical `0004` 的三个索引，不改变 archive event、字段或保留语义。`source_alembic_head` 不是装饰性字符串：write/verify/restore/delete/reconcile 都拒绝未列入 allowlist 的旧版、分支或未来 head；未来 schema 只有在证明 V1 全字段语义仍兼容后才能显式扩充 allowlist，否则必须提升 archive schema 并保留 V1 reader。Event 保存完整恢复事实：
+单文件 canonical JSONL schema 为 `llmbenchlab-audit-archive-v1`：一行 header、零至一万行 `audit_event`、唯一末行 manifest。V1 的 event/payload/retention contract 与 compatible Alembic head allowlist 独立冻结；compatible heads 为 `20260828_0005`、schema-equivalent repair head `20260829_0006` 与 data-only repair head `20260830_0007`。`0006` 只恢复 canonical `0004` 的三个索引；`0007` 只按显式 hard reservation 语义重算 `governance_scopes.overdrawn`，两者都不改变 archive event、字段或保留语义。`source_alembic_head` 不是装饰性字符串：write/verify/restore/delete/reconcile 都拒绝未列入 allowlist 的旧版、分支或未来 head；未来 schema 只有在证明 V1 全字段语义仍兼容后才能显式扩充 allowlist，否则必须提升 archive schema 并保留 V1 reader。Event 保存完整恢复事实：
 
 ```text
 id, event_key, event_type, payload_hash, payload, retention_class,
@@ -279,7 +279,7 @@ Delete 永不执行宽泛 `DELETE WHERE expires_at < cutoff`：
 
 ### 11. Schema、migration 与 importer
 
-Worker progress revision 为 `20260828_0005`；当前 Alembic head `20260829_0006` 是 schema-equivalent index repair。两者都是 archive-v1 compatible source/target head：
+Worker progress revision 为 `20260828_0005`，`20260829_0006` 是 schema-equivalent index repair，当前 Alembic head `20260830_0007` 是 observational-overdraw data repair。三者都是 archive-v1 compatible source/target head；`0007` 不新增表、字段、索引或 archive contract：
 
 - 创建 `worker_processes` 及本文约束/索引；
 - 为 audit archive 扫描增加 `(expires_at,id)` 索引；

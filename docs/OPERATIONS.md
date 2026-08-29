@@ -10,7 +10,7 @@
 
 - 容量方法和当前 Mock 基线：[PERFORMANCE.md](PERFORMANCE.md)
 - 部署、迁移和凭据：[DEPLOYMENT.md](DEPLOYMENT.md)
-- 数据库治理语义：[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[交付边界 ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[pre-send retry generation ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md) 和 [可观测性/保留 ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md)
+- 数据库治理语义：[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[交付边界 ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[pre-send retry generation ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[可观测性/保留 ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 和 [observational reservation 修正 ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
 - API 字段与错误码：[API.md](API.md)
 - 安全边界：[SECURITY.md](SECURITY.md)
 
@@ -47,7 +47,7 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 | `running` / `active_provider_attempts` | 当前 Run lease / ledger 中 active attempt | 超过 policy 或租约失效后不下降属于完整性问题 |
 | `governance_delayed` | 并发或 UTC fixed-minute RPM/TPM 暂时背压 | 超过预期窗口仍不恢复时检查 policy、数据库时钟和 Worker |
 | `governance_exhausted` | lifetime request/token/cost、未知上界/价格或 overdrawn 导致终止 | 先核对稳定 reason，再决定新建 Run 或修正未来 policy |
-| `overdrawn_governance_scopes` | Provider actual usage 超过 reservation | 非零立即停止扩大负载并核对真实账单/Token 上界 |
+| `overdrawn_governance_scopes` | Provider actual usage 超过显式 hard reservation | 非零立即停止扩大负载并核对显式 input/output 上界、由上界和价格计算的 reserved cost 与真实账单；无显式 input bound 的观测估算偏差不应计入 |
 | `expired_running` | lease 已按数据库时间过期 | 短暂出现可由 reaper 接管；持续非零说明恢复失败 |
 | `retry_scheduled` / `total_failed_attempts` | Run 级失败等待 / 累计失败预算 | 观察增量，不能用 `attempt_count` 代替失败数 |
 | `dead_lettered` | 失败预算耗尽的 Run | 任一新增都应检查 Run audit 和已有 Response |
@@ -114,9 +114,9 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 <a id="alert-governance-overdraw"></a>
 #### Governance overdraw
 
-- **响应**：停止扩大真实 Provider 流量，核对 actual usage、reservation 上界、价格和 Provider 账单；不要把 actual 改回 reservation。
+- **响应**：停止扩大真实 Provider 流量，核对 actual usage、Run 的显式 `input_token_reservation`、显式 `max_tokens`、价格和 Provider 账单；不要把 actual 改回 reservation。若历史事实只有输入估算且 Run 没有显式 input bound，应先核对数据库是否仍停在 `0006`，不要手改 scope flag。
 - **证据**：保存 scope 类型、非秘密 consumed/reserved 汇总、policy/Run override hash 和外部账单关联编号。
-- **恢复**：修正未来 Run 的显式 Token/cost bound 或 policy；已 overdrawn 事实保留并由治理规则决定是否允许后续流量。
+- **恢复**：真实 hard overdraw 应修正未来 Run 的显式 Token/cost bound 或 policy，并保留旧事实。旧 `0006` observational input 误判必须在无 active reservation 的维护窗口升级到 `0007`，由 migration 重算 materialized flag；ledger、actual usage、Response 与旧 Run 终态不改写。
 - **静默**：不作常规静默；告警消失也不能替代账单对账。
 
 <a id="alert-queue-degraded"></a>
@@ -166,7 +166,7 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 - 必须有显式有限 `max_tokens`；`null` 的 Provider default 在 hard Token/cost 下会以 `governance_unbounded_output` fail closed。
 - cost budget 还要求 USD input/output price；缺失以 `governance_pricing_unknown` fail closed。
 - policy 与 Run override 的 USD 有效范围是 `0..10000000.00000000`、最多 8 位小数；API 响应以 JSON string 保留 Decimal。PostgreSQL 使用精确 `NUMERIC(20,8)`；该公开上限使 SQLite 浮点间距低于半个 `1e-8` 存储量化单位，不应绕过 API 直接写入更大金额。
-- actual usage 超出 reservation 时保存 actual、scope 标记 overdrawn 并阻止后续 attempt；已发生的远端消费无法撤销。
+- actual usage 始终按 Provider 返回值保存。只有 actual 超过显式 input/output reservation，或超过由完整显式上界与冻结价格计算的 reserved cost 时，scope 才标记 overdrawn 并阻止后续 attempt；无显式 input reservation 时，输入估算不写入 attempt hard reservation，也不参与 reserved cost 或 input/cost overdraw。显式 `max_tokens` 形成的 output reservation 仍独立生效。
 - usage 缺失或远端是否处理不确定时按完整 reservation 保守结算，不按零释放。
 
 `governance_scopes` 和 `provider_call_reservations` 是预算/attempt 事实，`audit_events` 只作历史观察。API 目前没有“剩余预算”端点；如需告警百分比，应由只读运维任务根据 active policy、Run override 及 scope 的 `reserved_* + consumed_*` 计算，并与 Provider 账单独立对账。不要直接更新物化 counter。
@@ -204,7 +204,7 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 
 - `*_request_budget_exhausted` / `*_token_budget_exhausted` / `*_cost_budget_exhausted`：核对冻结 policy/Run override 和 consumed/reserved。
 - `governance_input_bound_unknown` / `governance_unbounded_output` / `governance_pricing_unknown`：修正未来 Run 的显式上界或价格；旧 Run 快照不应静默修改。
-- `*_overdrawn`：停止扩大真实流量，核对 Provider actual usage 和账单。
+- `*_overdrawn`：停止扩大真实流量，核对 Provider actual usage、显式 Run input/output reservation、冻结价格、派生 reserved cost 和账单。当前 `0007` 不会把无显式 input bound 的观测估算偏差解释成 overdraw。
 - `governance_provider_retry_exhausted`：同一 question execution generation 的 HTTP ordinal 已耗尽，不得通过 yield/restart 重置。
 
 已有 Response 会先聚合进 failed Run，仍可用于诊断，但不能作为 completed 正式比较。
@@ -372,19 +372,25 @@ llmbenchlab-audit-retention restore \
 
 退出码 `0` 表示已确认成功，`2` 表示在提交前安全失败，`3` 表示提交已成功但后验核验失败，`4` 表示 commit outcome unknown。遇到 `3` 或 `4` 不得盲目重跑 mutation：保留 archive/count/digest，先执行只读 `reconcile` 判定数据库与 archive 的精确关系，再由操作者决定恢复或删除。Archive 与数据库/keyring 备份是不同资产；archive 不含 credential ciphertext/nonce/keyring，也不能单独恢复 stored Provider Key。
 
-## 10. 0006、0005 与 0004 安全回滚
+## 10. 0007、0006、0005 与 0004 安全回滚
 
-### 10.0 Governance index compatibility repair 0006
+### 10.1 Observational overdraw 数据修复 0007
+
+当前 head `20260830_0007` 不新增表、字段或索引，也不修改 never-delete reservation、Provider actual usage、Response、audit 或 Run 终态。它只关联 managed reservation 对应的 `evaluation_runs.input_token_reservation`，按以下规则重算每个 `governance_scopes.overdrawn`：input/cost 维度只有在 Run 冻结了显式 input reservation 时参与；显式 `max_tokens` 形成的 output reservation 独立参与；没有关联 Run 的内部 synthetic reservation 继续把调用者提供的值视为显式。
+
+`0006 -> 0007` 和 `0007 -> 0006` 都会在任何 materialized 更新前拒绝仍为 `reserved` 或 `send_started` 的 attempt。标准维护流程是停止 API/Worker/CLI writer，确认 active reservation 为零并创建一致性备份，再由唯一 migration owner 执行 `make migrate`。直接 `UPDATE governance_scopes`、删除 ledger 或裁剪 actual usage 均不受支持。降级到 `0006` 只按旧谓词重算 flag，让旧应用看到与旧 runtime 一致的 projection；它不会恢复旧代码、删除事实或把历史失败 Run 改成成功。
+
+### 10.2 Governance index compatibility repair 0006
 
 revision `20260829_0006` 不增加新的业务字段或表，只为曾执行早期 `0004` 变体的数据库条件补齐 `ix_evaluation_runs_started_at_id`、`ix_evaluation_runs_finished_at_id` 与 `uq_governance_policies_single_active`。`make migrate` 只在 revision fingerprint 为 canonical，或缺失项是这三个索引的非空子集时放行，并先创建 SQLite 一致性备份；这允许在 SQLite repair DDL 部分完成但 marker 仍为 `0005` 时安全重入。PostgreSQL `0005` 也必须通过 metadata drift 校验。若有多条 active policy、错误的同名索引或任何额外 drift，必须人工核对，工具不会自动停用 policy。`0006 -> 0005` 保留这三个 canonical `0004` 索引，因此是有意的 no-op downgrade。
 
-### 10.1 Worker progress / retention revision 0005
+### 10.3 Worker progress / retention revision 0005
 
 revision `20260828_0005` 增加 `worker_processes` 和 audit retention/exporter 扫描索引。`0005 -> 0004` 在第一条 DDL 前检查 Worker process facts；只要表中存在任何 generation 行就拒绝，以免静默丢失注册、进展或 graceful-stop 证据。安全降级必须先停止 Worker、归档需要保留的 process facts，并由明确的数据生命周期审批清空；正常代码回滚应保留 0005 schema 并优先向前修复。
 
 正式迁移验收同时保留两层独立门禁：populated 0005 数据库拒绝跨过 Worker progress revision且 revision/核心事实不变；隔离空库允许 `0005 -> 0004 -> 0005`。这不会替代下节已有的 populated 0004 governance 拒绝与空库 `0004 -> 0003 -> 0004` 往返。
 
-### 10.2 Governance/audit revision 0004
+### 10.4 Governance/audit revision 0004
 
 revision `20260827_0004` 增加 policy、scope、minute bucket、question execution、Provider attempt ledger、typed audit、Run governance/fairness 字段及 Response Provider metadata。downgrade guard 在第一条 DDL 前检查数据损失风险。
 

@@ -286,7 +286,6 @@ def _prepare_atomic_governance_attempts(
             provider_scope=provider_scope_key("mock", None),
             lease_owner=lease.owner,
             lease_token=lease.token,
-            estimated_input_tokens=4,
             reserved_output_tokens=2,
             reserved_cost_usd=Decimal("0.10000000"),
         )
@@ -519,7 +518,6 @@ def test_postgres_governance_concurrency_limits_are_atomic_across_connections(
             provider_scope=provider_scope_key("mock", None),
             lease_owner=lease.owner,
             lease_token=lease.token,
-            estimated_input_tokens=4,
             reserved_output_tokens=2,
             reserved_cost_usd=None,
         )

@@ -601,7 +601,6 @@ class GovernanceRepository:
         provider_scope: str,
         lease_owner: str,
         lease_token: int,
-        estimated_input_tokens: int | None,
         reserved_output_tokens: int | None,
         reserved_cost_usd: Decimal | None,
     ) -> ProviderAttemptContext:
@@ -636,11 +635,6 @@ class GovernanceRepository:
             )
             if run is None:
                 raise GovernanceFenceLost("governance_lease_fence_lost")
-            input_reservation = (
-                run.input_token_reservation
-                if run.input_token_reservation is not None
-                else estimated_input_tokens
-            )
             return ProviderAttemptContext(
                 run_id=run_id,
                 question_id=question_id,
@@ -649,13 +643,15 @@ class GovernanceRepository:
                 lease_token=lease_token,
                 execution_generation=execution.execution_generation,
                 next_provider_attempt=execution.next_provider_attempt,
-                reserved_input_tokens=_nonnegative_int("reserved_input_tokens", input_reservation),
+                reserved_input_tokens=_nonnegative_int(
+                    "reserved_input_tokens", run.input_token_reservation
+                ),
                 reserved_output_tokens=_nonnegative_int(
                     "reserved_output_tokens", reserved_output_tokens
                 ),
                 reserved_cost_usd=(
                     _nonnegative_money("reserved_cost_usd", reserved_cost_usd)
-                    if reserved_cost_usd is not None
+                    if run.input_token_reservation is not None and reserved_cost_usd is not None
                     else None
                 ),
             )
@@ -1290,22 +1286,48 @@ class GovernanceRepository:
         """Expand every immutable ledger row into its three or four scope facts."""
 
         reservation = ProviderCallReservation
+        run = EvaluationRun
+        reservation_facts = (
+            select(
+                reservation.global_scope_id.label("global_scope_id"),
+                reservation.provider_scope_id.label("provider_scope_id"),
+                reservation.model_scope_id.label("model_scope_id"),
+                reservation.run_scope_id.label("run_scope_id"),
+                reservation.state.label("state"),
+                reservation.policy_id.label("policy_id"),
+                reservation.window_start.label("window_start"),
+                reservation.reserved_input_tokens.label("reserved_input_tokens"),
+                reservation.reserved_output_tokens.label("reserved_output_tokens"),
+                reservation.reserved_cost_usd.label("reserved_cost_usd"),
+                reservation.actual_input_tokens.label("actual_input_tokens"),
+                reservation.actual_output_tokens.label("actual_output_tokens"),
+                reservation.actual_cost_usd.label("actual_cost_usd"),
+                or_(
+                    reservation.run_id.is_(None),
+                    run.input_token_reservation.is_not(None),
+                ).label("input_reservation_is_explicit"),
+            )
+            .select_from(reservation)
+            .outerjoin(run, run.id == reservation.run_id)
+            .subquery()
+        )
         columns = (
-            reservation.state.label("state"),
-            reservation.policy_id.label("policy_id"),
-            reservation.window_start.label("window_start"),
-            reservation.reserved_input_tokens.label("reserved_input_tokens"),
-            reservation.reserved_output_tokens.label("reserved_output_tokens"),
-            reservation.reserved_cost_usd.label("reserved_cost_usd"),
-            reservation.actual_input_tokens.label("actual_input_tokens"),
-            reservation.actual_output_tokens.label("actual_output_tokens"),
-            reservation.actual_cost_usd.label("actual_cost_usd"),
+            reservation_facts.c.state,
+            reservation_facts.c.policy_id,
+            reservation_facts.c.window_start,
+            reservation_facts.c.reserved_input_tokens,
+            reservation_facts.c.reserved_output_tokens,
+            reservation_facts.c.reserved_cost_usd,
+            reservation_facts.c.actual_input_tokens,
+            reservation_facts.c.actual_output_tokens,
+            reservation_facts.c.actual_cost_usd,
+            reservation_facts.c.input_reservation_is_explicit,
         )
         scope_columns = (
-            reservation.global_scope_id,
-            reservation.provider_scope_id,
-            reservation.model_scope_id,
-            reservation.run_scope_id,
+            reservation_facts.c.global_scope_id,
+            reservation_facts.c.provider_scope_id,
+            reservation_facts.c.model_scope_id,
+            reservation_facts.c.run_scope_id,
         )
         return union_all(
             *(
@@ -1320,6 +1342,7 @@ class GovernanceRepository:
             facts.c.state.in_(_SETTLED_STATES),
             or_(
                 and_(
+                    facts.c.input_reservation_is_explicit,
                     facts.c.reserved_input_tokens.is_not(None),
                     facts.c.actual_input_tokens.is_not(None),
                     facts.c.actual_input_tokens > facts.c.reserved_input_tokens,
@@ -1330,6 +1353,7 @@ class GovernanceRepository:
                     facts.c.actual_output_tokens > facts.c.reserved_output_tokens,
                 ),
                 and_(
+                    facts.c.input_reservation_is_explicit,
                     facts.c.reserved_cost_usd.is_not(None),
                     facts.c.actual_cost_usd.is_not(None),
                     facts.c.actual_cost_usd > facts.c.reserved_cost_usd,
@@ -1777,6 +1801,7 @@ class GovernanceRepository:
         conservative = (
             force_conservative or reconciled or input_tokens is None or output_tokens is None
         )
+        input_reservation_is_explicit = self._input_reservation_is_explicit(session, reservation)
         for scope in scopes:
             scope.active_reservations -= 1
             scope.reserved_input_tokens -= reserved_input
@@ -1787,7 +1812,8 @@ class GovernanceRepository:
             scope.consumed_cost_usd = _money(scope.consumed_cost_usd) + _money(settled_cost)
             if (
                 (
-                    reservation.reserved_input_tokens is not None
+                    input_reservation_is_explicit
+                    and reservation.reserved_input_tokens is not None
                     and settled_input is not None
                     and settled_input > reserved_input
                 )
@@ -1797,7 +1823,8 @@ class GovernanceRepository:
                     and settled_output > reserved_output
                 )
                 or (
-                    reservation.reserved_cost_usd is not None
+                    input_reservation_is_explicit
+                    and reservation.reserved_cost_usd is not None
                     and settled_cost is not None
                     and _money(settled_cost) > reserved_cost
                 )
@@ -1829,6 +1856,24 @@ class GovernanceRepository:
             reconciled=reconciled,
             now=now,
         )
+
+    @staticmethod
+    def _input_reservation_is_explicit(
+        session: Session,
+        reservation: ProviderCallReservation,
+    ) -> bool:
+        """Return whether a ledger input reservation came from an explicit hard bound."""
+
+        if reservation.run_id is None:
+            return True
+        row = session.execute(
+            select(EvaluationRun.id, EvaluationRun.input_token_reservation).where(
+                EvaluationRun.id == reservation.run_id
+            )
+        ).one_or_none()
+        if row is None:
+            raise GovernanceIntegrityError("governance_reservation_run_missing")
+        return row.input_token_reservation is not None
 
     @staticmethod
     def _append_settlement_audit(

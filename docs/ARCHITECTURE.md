@@ -176,7 +176,7 @@ Model 的凭据来源是显式状态，而不是从 nullable 字段猜测：`moc
 
 Governance policy 是不可变、内容寻址且只有一个 active version 的数据库事实。初始化前 `GET /api/v1/governance/policy` 是纯读取，返回 `404 governance_policy_not_initialized`，不会借查询偷偷 bootstrap。`PUT /api/v1/governance/policy` 是 full-document apply：所有字段都必填，不具备 PATCH 语义；相同内容幂等返回现有版本，重新提交历史内容会重新激活原 ID/version 并追加 activation audit。`policy_hash` 覆盖全部 20 个规范化限制字段，读取和每次 attempt admission 都重算校验。managed Run 创建会在没有 policy 时原子 bootstrap 确定性默认版本，然后在 global admission 锁内检查有限 backlog，把全量 policy、ID/hash、opaque provider scope、`question_quantum` 与恰好四个 Run override（input reservation 及 request/Token/USD lifetime budget）冻结到 execution snapshot；后续 policy 变更不追溯改写已提交 Run。外发前还会比较冻结 override 与 Run 列，防止任一一侧被篡改后绕过硬边界。
 
-policy 的 `null` 表示关闭该维限制，`0` 表示立即拒绝新 admission。四层 global/provider/model/run 限额全部满足才允许一次 attempt；hard TPM/Token budget 必须同时有显式 `input_token_reservation` 与有限 `max_tokens`，hard cost budget 还必须有冻结 USD 单价，否则在任何 Provider 外发前分别以稳定治理错误 fail closed。治理 USD 公开上限为 `10000000.00000000`，API 用 JSON string 返回 Decimal；PostgreSQL 使用精确 `NUMERIC(20,8)`，该更低的公开上限使 SQLite IEEE-754 相邻间距低于半个 `1e-8` 存储量化单位，保留兼容路径的 8 位往返。完整字段与状态码见 [`API.md`](./API.md)，操作与恢复见 [`OPERATIONS.md`](./OPERATIONS.md)。
+policy 的 `null` 表示关闭该维限制，`0` 表示立即拒绝新 admission。四层 global/provider/model/run 限额全部满足才允许一次 attempt；hard TPM/Token budget 必须同时有显式 `input_token_reservation` 与有限 `max_tokens`，hard cost budget 还必须有冻结 USD 单价，否则在任何 Provider 外发前分别以稳定治理错误 fail closed。未显式提供 input reservation 时，Runner 不把 UTF-8/tokenizer 估算写入 `reserved_input_tokens`，也不据此生成 reserved cost；Provider actual input 仍按原值保存。input/cost overdraw 只由显式 Run input reservation 派生，显式 `max_tokens` 形成的 output reservation 则独立生效。治理 USD 公开上限为 `10000000.00000000`，API 用 JSON string 返回 Decimal；PostgreSQL 使用精确 `NUMERIC(20,8)`，该更低的公开上限使 SQLite IEEE-754 相邻间距低于半个 `1e-8` 存储量化单位，保留兼容路径的 8 位往返。完整字段与状态码见 [`API.md`](./API.md)，操作与恢复见 [`OPERATIONS.md`](./OPERATIONS.md)，修正依据见 [`ADR-0018`](./decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)。
 
 ### 创建并执行 Run
 
@@ -545,7 +545,7 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 - `(benchmark_id, external_id)` 唯一；一个 Run 对同一 Question 最多一条 EvaluationResponse。
 - 导入 Benchmark 使用整体事务；逐题结果和进度使用短事务，避免把网络请求包在数据库事务中。
 - 只有 owner/token 匹配、租约未过期的 Worker 能写 Response、进度、费用、retry 或终态；唯一约束是最后的竞态防线，不替代 fencing。
-- attempt ledger never-delete 且状态单向；四层 scope/minute materialization 必须能由 ledger 重算，检测到高或低漂移时 fail closed 并由对外边界尽力写固定、无损坏值的完整性 audit，不静默修补后继续外发。
+- attempt ledger never-delete 且状态单向；四层 scope/minute materialization 必须能由 ledger 重算，检测到高或低漂移时 fail closed 并由对外边界尽力写固定、无损坏值的完整性 audit，不静默修补后继续外发。历史 managed ledger 的 input/cost overdraw 重算通过 `evaluation_runs.input_token_reservation` 判断预留是否显式；没有关联 Run 的内部 synthetic reservation 仍把调用者提供的值视为显式。
 - audit event 的 `event_key` 唯一，同 key 重放必须匹配 event type 与 payload hash；operational/security 默认分别至少保留 90/365 天。append-only 是应用约束，不是密码学 WORM 或数据库管理员防篡改。
 - 聚合从已持久化的 Responses 计算，并在 completed、cancelled 或 dead-letter 终态更新前写回 Run。报告仍防御性地从计划题与 Responses 重算唯一主指标，并只用 `metrics_provenance` 标注 Run 字段漂移，保证 summary/groups/responses 不互相矛盾。
 
@@ -560,7 +560,7 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 
 带凭据的目标 DSN 必须通过 `--target-env` 从受控环境读取；`--target` 拒绝 URL password 和 password query。COMMIT 未获得 PostgreSQL 确认时退出 `4`/`commit_outcome_unknown`；由于事务原子性，目标可能为空，也可能是完整的 precommit 快照。COMMIT 已确认但连接收尾、postcommit 快照/对账或报告失败时退出 `3`/`committed_but_verification_failed`；这时目标已提交完整 precommit 快照，不会自动回滚。两种结果都禁止盲目重试，必须保持目标离线，按已输出摘要独立检查目标是空还是完整提交。非空目标会拒绝再次导入，工具也不提供 PostgreSQL 到 SQLite 的反向同步。
 
-Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`20260828_0005` 增加 `worker_processes` 与 audit retention/exporter 扫描索引；schema-equivalent `20260829_0006` 只条件补齐早期 `0004` 变体缺少的三个 canonical 索引。兼容 preflight 仍以精确 fingerprint、integrity/FK、索引定义和 single-active 数据约束 fail closed。`0006 → 0005` 不删除 canonical 对象；后续两个 downgrade guard 都在第一条有损 DDL 前拒绝可能丢失的事实：0005 拒绝任意 Worker generation，0004 拒绝 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 证据。隔离空数据库分别验证 `0005 ↔ 0004` 与 `0004 ↔ 0003`；已使用环境应优先向前修复，或恢复经核验的旧备份并单独保留新 schema 证据。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
+Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`20260828_0005` 增加 `worker_processes` 与 audit retention/exporter 扫描索引；schema-equivalent `20260829_0006` 只条件补齐早期 `0004` 变体缺少的三个 canonical 索引；当前 data-only head `20260830_0007` 不改 schema、ledger 或 actual usage，只按显式 hard reservation 语义重算 `governance_scopes.overdrawn`。`0007` upgrade/downgrade 均在任何更新前拒绝 `reserved/send_started` active reservation；downgrade 只恢复旧派生谓词。兼容 preflight 仍以精确 fingerprint、integrity/FK、索引定义和 single-active 数据约束 fail closed。`0006 → 0005` 不删除 canonical 对象；后续两个 downgrade guard 都在第一条有损 DDL 前拒绝可能丢失的事实：0005 拒绝任意 Worker generation，0004 拒绝 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 证据。隔离空数据库分别验证 `0005 ↔ 0004` 与 `0004 ↔ 0003`；已使用环境应优先向前修复，或恢复经核验的旧备份并单独保留新 schema 证据。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
 
 ## 错误处理与可观察性
 

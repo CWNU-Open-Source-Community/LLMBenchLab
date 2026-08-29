@@ -287,7 +287,7 @@ curl -sS http://127.0.0.1:8000/api/v1/tasks/metrics
 - `runs_with_queue_notification_error`：`last_error=queue_notification_unavailable` 的当前 Run 数。
 - `managed_backlog`：当前 `pending/running` 且已冻结治理 policy 的 Run；`governance_delayed` 与 `governance_exhausted` 分别是当前延迟和治理耗尽的 Run 数。
 - `active_provider_attempts`：attempt ledger 中仍为 `reserved/send_started` 的行数；它是本地数据库 admission 事实，不承诺 Worker 崩溃后的 Provider 幽灵请求已经停止。
-- `overdrawn_governance_scopes`：已被实际 usage 超出 reservation 的治理 scope 数，不是超额 attempt 数。
+- `overdrawn_governance_scopes`：实际 usage 超过**显式 hard reservation** 的治理 scope 数，不是超额 attempt 数。无显式 `input_token_reservation` 时，输入估算不构成 input/cost overdraw；显式 `max_tokens` 的 output reservation 仍独立生效。
 - `total_attempts`、`total_failed_attempts`、`total_dispatches`：Run 表中 lease 取得次数、实际 Run 级失败次数与公平调度 dispatch 次数的总和。
 - `worker_expected_processes` 是部署显式声明的最小进程数；`registered/live/stalled/shortfall` 从未停止的 `worker_processes` generation 与同一 DB UTC cutoff 派生，`last_seen_at == cutoff` 仍为 live。
 - 五个 `worker_last_*` 字段对未停止 generation 取最近（`MAX`）事实；空集合或尚未发生该事件时为 `null`。响应不包含 generation/worker ID，dependency probe 也不会写入或伪造这些时间。
@@ -803,7 +803,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/benchmarks/reload-demo
 | `seed` | `42` | 32 位有符号整数或 `null` |
 | `system_prompt` | `null` | 最长 4000；提供时覆盖 Benchmark system prompt |
 | `concurrency` | `1` | `1..4`；快照值即实际执行并发度 |
-| `input_token_reservation` | `null` | `null` 或严格整数 `1..10000000`；hard TPM/Token/费用启用时必须提供可证明的每题输入预留上界 |
+| `input_token_reservation` | `null` | `null` 或严格整数 `1..10000000`；hard TPM/Token/费用启用时必须提供可证明的每题输入预留上界。`null` 时实现不会把 UTF-8/tokenizer 估算写成 hard reservation 或用它触发 input/cost overdraw |
 | `lifetime_request_budget` | `null` | `null` 或严格整数 `0..1000000000`；覆盖该 Run 的累计请求预算，`0` 拒绝新 attempt |
 | `lifetime_token_budget` | `null` | `null` 或严格整数 `0..10000000000000`；覆盖该 Run 的累计 Token 预算，`0` 拒绝新 attempt |
 | `lifetime_cost_budget_usd` | `null` | `null` 或 `0..10000000.00000000` USD，最多 8 位小数；请求接受 JSON number/十进制 string，`RunRead` 的非空响应始终是 JSON string；费用硬边界还要求显式 Token 上界和冻结价格 |
@@ -927,7 +927,7 @@ Run 表没有 `credential_id`、ciphertext、nonce 或 keyring 列，Run API 也
 | `governance_policy_id` | admission 时冻结的 policy；`null` 只用于 0004 前的 `legacy_unmanaged` Run |
 | `governance_status` | `legacy_unmanaged`、`managed`、`delayed` 或 `exhausted` |
 | `governance_reason` / `governance_not_before` | 稳定治理原因与 rate/concurrency 延迟后的最早重新调度数据库时间 |
-| `input_token_reservation` | 显式冻结的每题输入 Token 上界；估算值不能替代 hard Token/费用边界 |
+| `input_token_reservation` | 显式冻结的每题输入 Token 上界；估算值不能替代 hard Token/费用边界。该字段为 `null` 时 actual input 仍保存，但 attempt 的 input reservation/reserved cost 为空 |
 | `lifetime_*_budget` | 可选 Run 级 request/Token/USD 累计覆盖值；与冻结 policy 中更严格的适用边界共同生效 |
 | `lease_owner` | 当前 Worker ID；只在 `running` 且租约活动时非空 |
 | `lease_token` | 单调递增的 fencing generation；租约释放后保留最后值，防止旧 Worker 写入 |
@@ -1065,7 +1065,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/runs \
 - `500 governance_integrity_error`：冻结 policy 或治理事实不一致，admission fail closed，并尽力追加固定、无秘密的完整性事件。
 - `422`：生成参数、治理 override 或读取超时越界、ID 为空、布尔/浮点冒充治理整数，或出现额外字段。
 
-Run 一旦提交，不会因随后 Redis 故障、并发/RPM/TPM 饱和而删除。瞬时治理压力让它回到 `pending/delayed` 并设置 `governance_not_before`；确定性 lifetime/pricing/上界失败会聚合已有 Response 后进入 `failed/exhausted`，不会伪造一条题级 0 分 Response。hard Token/TPM/费用启用时，`input_token_reservation` 和有限 `max_tokens` 是必须的显式上界；UTF-8 长度估计不能替代它，费用边界还要求 Model 快照存在 input/output USD 价格。
+Run 一旦提交，不会因随后 Redis 故障、并发/RPM/TPM 饱和而删除。瞬时治理压力让它回到 `pending/delayed` 并设置 `governance_not_before`；确定性 lifetime/pricing/上界失败会聚合已有 Response 后进入 `failed/exhausted`，不会伪造一条题级 0 分 Response。hard Token/TPM/费用启用时，`input_token_reservation` 和有限 `max_tokens` 是必须的显式上界；UTF-8 长度估计不能替代它，费用边界还要求 Model 快照存在 input/output USD 价格。Provider actual usage 始终保存；只有超过显式 input/output 预留或由完整显式上界和价格派生的 reserved cost 才会产生 `*_overdrawn`。Run Detail 对该类原因显示“实际用量曾被判定超过预留”；这一中性历史措辞也适用于升级前已经终止的 Run，不再把原因等同于 conservative settlement。
 
 ### 6.4 `GET /runs/{run_id}`
 

@@ -202,7 +202,6 @@ def _context(
         provider_scope=provider_scope_key("mock", None),
         lease_owner=lease.owner,
         lease_token=lease.token,
-        estimated_input_tokens=4,
         reserved_output_tokens=2,
         reserved_cost_usd=Decimal("0.00001000"),
     )
@@ -516,6 +515,191 @@ def test_attempt_actual_settlement_updates_all_scopes_and_bucket(governance_stor
         )
 
 
+def test_observational_input_usage_does_not_create_hard_overdraw(governance_store) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 27, 14, 0, tzinfo=UTC))
+    repository = GovernanceRepository(governance_store, clock=clock)
+    _admit(governance_store, repository)
+    lease = _claim(governance_store, clock)
+    context = repository.question_context(
+        run_id=lease.run_id,
+        question_id="question-governance-1",
+        model_id="model-governance",
+        provider_scope=provider_scope_key("mock", None),
+        lease_owner=lease.owner,
+        lease_token=lease.token,
+        reserved_output_tokens=None,
+        reserved_cost_usd=Decimal("0.00010000"),
+    )
+
+    assert context.reserved_input_tokens is None
+    assert context.reserved_cost_usd is None
+    permit = repository.reserve(context, provider_attempt=1, lease_owner=lease.owner)
+    repository.mark_send_started(permit, lease_owner=lease.owner)
+    repository.finish(
+        permit,
+        disposition=ProviderAttemptDisposition.SETTLED_ACTUAL,
+        outcome=ProviderAttemptOutcome.SUCCEEDED,
+        input_tokens=75,
+        output_tokens=5,
+        actual_cost_usd=Decimal("0.00020000"),
+    )
+
+    with governance_store() as session:
+        reservation = session.get(ProviderCallReservation, permit.reservation_id)
+        assert reservation is not None
+        assert reservation.reserved_input_tokens is None
+        assert reservation.reserved_cost_usd is None
+        assert reservation.actual_input_tokens == 75
+        assert reservation.actual_cost_usd == Decimal("0.00020000")
+        assert all(scope.overdrawn is False for scope in session.scalars(select(GovernanceScope)))
+
+    next_context = repository.question_context(
+        run_id=lease.run_id,
+        question_id="question-governance-2",
+        model_id="model-governance",
+        provider_scope=provider_scope_key("mock", None),
+        lease_owner=lease.owner,
+        lease_token=lease.token,
+        reserved_output_tokens=None,
+        reserved_cost_usd=None,
+    )
+    next_permit = repository.reserve(
+        next_context,
+        provider_attempt=1,
+        lease_owner=lease.owner,
+    )
+    repository.finish(
+        next_permit,
+        disposition=ProviderAttemptDisposition.RELEASED_PRE_SEND,
+        outcome=ProviderAttemptOutcome.MARK_SEND_FAILED,
+        input_tokens=None,
+        output_tokens=None,
+        actual_cost_usd=None,
+    )
+
+
+def test_explicit_input_reservation_overdraw_still_stops_following_attempts(
+    governance_store,
+) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 27, 14, 0, tzinfo=UTC))
+    repository = GovernanceRepository(governance_store, clock=clock)
+    run = _pending_run("run-explicit-input-overdraw")
+    run.input_token_reservation = 59
+    with governance_store() as session, session.begin():
+        repository.admit_run(session, run, provider_type="mock", base_url=None)
+    lease = _claim(
+        governance_store,
+        clock,
+        run_id=run.id,
+        owner="worker-explicit-input-overdraw",
+    )
+    context = repository.question_context(
+        run_id=lease.run_id,
+        question_id="question-governance-1",
+        model_id="model-governance",
+        provider_scope=provider_scope_key("mock", None),
+        lease_owner=lease.owner,
+        lease_token=lease.token,
+        reserved_output_tokens=None,
+        reserved_cost_usd=None,
+    )
+    permit = repository.reserve(context, provider_attempt=1, lease_owner=lease.owner)
+    repository.mark_send_started(permit, lease_owner=lease.owner)
+    repository.finish(
+        permit,
+        disposition=ProviderAttemptDisposition.SETTLED_ACTUAL,
+        outcome=ProviderAttemptOutcome.SUCCEEDED,
+        input_tokens=75,
+        output_tokens=5,
+        actual_cost_usd=None,
+    )
+
+    with governance_store() as session:
+        assert all(scope.overdrawn is True for scope in session.scalars(select(GovernanceScope)))
+
+    next_context = repository.question_context(
+        run_id=lease.run_id,
+        question_id="question-governance-2",
+        model_id="model-governance",
+        provider_scope=provider_scope_key("mock", None),
+        lease_owner=lease.owner,
+        lease_token=lease.token,
+        reserved_output_tokens=None,
+        reserved_cost_usd=None,
+    )
+    with pytest.raises(GovernanceExhausted) as caught:
+        repository.reserve(next_context, provider_attempt=1, lease_owner=lease.owner)
+    assert caught.value.code == "governance_global_overdrawn"
+
+
+def test_explicit_output_reservation_overdraw_remains_hard(governance_store) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 27, 14, 0, tzinfo=UTC))
+    repository = GovernanceRepository(governance_store, clock=clock)
+    _admit(governance_store, repository)
+    lease = _claim(governance_store, clock)
+    context = repository.question_context(
+        run_id=lease.run_id,
+        question_id="question-governance-1",
+        model_id="model-governance",
+        provider_scope=provider_scope_key("mock", None),
+        lease_owner=lease.owner,
+        lease_token=lease.token,
+        reserved_output_tokens=4,
+        reserved_cost_usd=None,
+    )
+    permit = repository.reserve(context, provider_attempt=1, lease_owner=lease.owner)
+    repository.mark_send_started(permit, lease_owner=lease.owner)
+    repository.finish(
+        permit,
+        disposition=ProviderAttemptDisposition.SETTLED_ACTUAL,
+        outcome=ProviderAttemptOutcome.SUCCEEDED,
+        input_tokens=1,
+        output_tokens=5,
+        actual_cost_usd=None,
+    )
+
+    with governance_store() as session:
+        assert all(scope.overdrawn is True for scope in session.scalars(select(GovernanceScope)))
+
+
+def test_explicit_cost_reservation_overdraw_remains_hard(governance_store) -> None:
+    clock = FixedDatabaseClock(datetime(2026, 8, 27, 14, 0, tzinfo=UTC))
+    repository = GovernanceRepository(governance_store, clock=clock)
+    run = _pending_run("run-explicit-cost-overdraw")
+    run.input_token_reservation = 10
+    with governance_store() as session, session.begin():
+        repository.admit_run(session, run, provider_type="mock", base_url=None)
+    lease = _claim(
+        governance_store,
+        clock,
+        run_id=run.id,
+        owner="worker-explicit-cost-overdraw",
+    )
+    context = repository.question_context(
+        run_id=lease.run_id,
+        question_id="question-governance-1",
+        model_id="model-governance",
+        provider_scope=provider_scope_key("mock", None),
+        lease_owner=lease.owner,
+        lease_token=lease.token,
+        reserved_output_tokens=10,
+        reserved_cost_usd=Decimal("0.00010000"),
+    )
+    permit = repository.reserve(context, provider_attempt=1, lease_owner=lease.owner)
+    repository.mark_send_started(permit, lease_owner=lease.owner)
+    repository.finish(
+        permit,
+        disposition=ProviderAttemptDisposition.SETTLED_ACTUAL,
+        outcome=ProviderAttemptOutcome.SUCCEEDED,
+        input_tokens=5,
+        output_tokens=5,
+        actual_cost_usd=Decimal("0.00020000"),
+    )
+
+    with governance_store() as session:
+        assert all(scope.overdrawn is True for scope in session.scalars(select(GovernanceScope)))
+
+
 def test_pre_send_release_and_expired_send_reconciliation(governance_store) -> None:
     clock = FixedDatabaseClock(datetime(2026, 8, 27, 14, 0, tzinfo=UTC))
     repository = GovernanceRepository(governance_store, clock=clock)
@@ -566,9 +750,9 @@ def test_pre_send_release_and_expired_send_reconciliation(governance_store) -> N
         assert first_row is not None and second_row is not None
         assert first_row.state == ProviderCallReservationState.RELEASED_PRE_SEND
         assert second_row.state == ProviderCallReservationState.SETTLED_CONSERVATIVE
-        assert second_row.actual_input_tokens == 4
+        assert second_row.actual_input_tokens is None
         assert second_row.actual_output_tokens == 2
-        assert second_row.actual_cost_usd == Decimal("0.00001000")
+        assert second_row.actual_cost_usd is None
         scopes = list(session.scalars(select(GovernanceScope)))
         assert all(scope.active_reservations == 0 for scope in scopes)
         assert all(scope.consumed_requests == 1 for scope in scopes)
@@ -870,7 +1054,7 @@ def test_send_start_moves_reservation_to_its_database_minute(governance_store) -
         assert old_bucket.reserved_requests == old_bucket.reserved_input_tokens == 0
         assert old_bucket.reserved_output_tokens == 0
         assert send_bucket.consumed_requests == 1
-        assert send_bucket.reserved_input_tokens == 4
+        assert send_bucket.reserved_input_tokens == 0
         assert send_bucket.reserved_output_tokens == 2
         reservation = session.get(ProviderCallReservation, permit.reservation_id)
         assert reservation is not None
@@ -951,7 +1135,6 @@ def test_cost_only_budget_requires_explicit_finite_token_bounds(governance_store
         provider_scope=provider_scope_key("mock", None),
         lease_owner=explicit_lease.owner,
         lease_token=explicit_lease.token,
-        estimated_input_tokens=4,
         reserved_output_tokens=None,
         reserved_cost_usd=Decimal("0.00001000"),
     )
@@ -976,7 +1159,6 @@ def test_unknown_unbounded_usage_stays_null_without_false_overdraw(governance_st
         provider_scope=provider_scope_key("mock", None),
         lease_owner=lease.owner,
         lease_token=lease.token,
-        estimated_input_tokens=4,
         reserved_output_tokens=None,
         reserved_cost_usd=None,
     )
@@ -1009,7 +1191,6 @@ def test_unknown_unbounded_usage_stays_null_without_false_overdraw(governance_st
         provider_scope=provider_scope_key("mock", None),
         lease_owner=lease.owner,
         lease_token=lease.token,
-        estimated_input_tokens=4,
         reserved_output_tokens=None,
         reserved_cost_usd=None,
     )

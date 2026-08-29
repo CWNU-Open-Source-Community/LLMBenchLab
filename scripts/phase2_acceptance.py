@@ -43,7 +43,7 @@ PROTOCOL_VERSION = "llmbenchlab-protocol-v1"
 PRE_GOVERNANCE_REVISION = "20260827_0003"
 GOVERNANCE_REVISION = "20260827_0004"
 WORKER_PROGRESS_REVISION = "20260828_0005"
-DATABASE_HEAD_REVISION = "20260829_0006"
+DATABASE_HEAD_REVISION = "20260830_0007"
 TASK_MESSAGE_VERSION = "llmbenchlab-run-task-v1"
 TASK_STREAM = "llmbenchlab:runs:v1"
 TASK_GROUP = "llmbenchlab-workers-v1"
@@ -115,7 +115,6 @@ context = governance.question_context(
     provider_scope=provider_scope_key("mock", None),
     lease_owner=owner,
     lease_token=lease.token,
-    estimated_input_tokens=8,
     reserved_output_tokens=64,
     reserved_cost_usd=Decimal("0"),
 )

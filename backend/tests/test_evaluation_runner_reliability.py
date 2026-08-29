@@ -916,7 +916,7 @@ async def test_managed_question_uses_frozen_context_and_persists_safe_provider_e
     assert disposition == ResponseDisposition.INSERTED
     context_call = governance_repository.question_context_calls[0]
     assert context_call["provider_scope"] == "a" * 64
-    assert context_call["estimated_input_tokens"] > 0
+    assert "estimated_input_tokens" not in context_call
     assert context_call["reserved_output_tokens"] == 25
     assert context_call["reserved_cost_usd"] == Decimal("0.0003")
     assert adapter.calls[0][2] == {"attempt_context": context}

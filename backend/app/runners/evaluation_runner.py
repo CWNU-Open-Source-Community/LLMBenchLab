@@ -889,13 +889,8 @@ class EvaluationRunner:
                 # old Runs migrated as explicitly unmanaged.
                 generated = await adapter.generate(messages, config)
             else:
-                estimated_input_tokens = self._estimate_input_tokens(messages)
                 reserved_output_tokens = self._reserved_output_tokens(config)
-                reserved_input_tokens = (
-                    model.governance.input_token_reservation
-                    if model.governance.input_token_reservation is not None
-                    else estimated_input_tokens
-                )
+                reserved_input_tokens = model.governance.input_token_reservation
                 reserved_cost = self._cost(
                     model,
                     reserved_input_tokens,
@@ -910,7 +905,6 @@ class EvaluationRunner:
                         provider_scope=model.governance.provider_scope,
                         lease_owner=lease.owner,
                         lease_token=lease.token,
-                        estimated_input_tokens=estimated_input_tokens,
                         reserved_output_tokens=reserved_output_tokens,
                         reserved_cost_usd=reserved_cost,
                     )
@@ -1063,16 +1057,6 @@ class EvaluationRunner:
         if disposition == ResponseDisposition.FENCE_LOST:
             raise _LeaseUnavailable("response_fence_lost")
         return disposition
-
-    @staticmethod
-    def _estimate_input_tokens(messages: list[dict[str, str]]) -> int:
-        """Return an observational UTF-8/protocol estimate, never a hard bound."""
-
-        encoded_bytes = sum(
-            len(message["role"].encode("utf-8")) + len(message["content"].encode("utf-8")) + 8
-            for message in messages
-        )
-        return max(1, (encoded_bytes + 3) // 4)
 
     @staticmethod
     def _reserved_output_tokens(generation: Mapping[str, Any]) -> int | None:

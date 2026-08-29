@@ -247,8 +247,11 @@ WITH scope_facts AS MATERIALIZED (
     reservation.reserved_cost_usd,
     reservation.actual_input_tokens,
     reservation.actual_output_tokens,
-    reservation.actual_cost_usd
+    reservation.actual_cost_usd,
+    (reservation.run_id IS NULL OR run.input_token_reservation IS NOT NULL)
+      AS input_reservation_is_explicit
   FROM provider_call_reservations AS reservation
+  LEFT JOIN evaluation_runs AS run ON run.id = reservation.run_id
   CROSS JOIN LATERAL (
     VALUES
       (reservation.global_scope_id),
@@ -289,6 +292,8 @@ derived_scopes AS MATERIALIZED (
       state IN ('settled_actual', 'settled_conservative')
       AND (
         (
+          input_reservation_is_explicit
+          AND
           reserved_input_tokens IS NOT NULL
           AND actual_input_tokens IS NOT NULL
           AND actual_input_tokens > reserved_input_tokens
@@ -299,6 +304,8 @@ derived_scopes AS MATERIALIZED (
           AND actual_output_tokens > reserved_output_tokens
         )
         OR (
+          input_reservation_is_explicit
+          AND
           reserved_cost_usd IS NOT NULL
           AND actual_cost_usd IS NOT NULL
           AND actual_cost_usd > reserved_cost_usd

@@ -993,6 +993,38 @@ def test_source_preflight_rejects_reserved_governance_aggregates(
 
 
 @pytest.mark.parametrize(
+    ("input_reservation_is_explicit", "actual_output_tokens", "expected"),
+    [
+        (False, 2, False),
+        (True, 2, True),
+        (False, 3, True),
+    ],
+)
+def test_importer_overdraw_reconciliation_distinguishes_observations_from_hard_bounds(
+    input_reservation_is_explicit: bool,
+    actual_output_tokens: int,
+    expected: bool,
+) -> None:
+    reservation = {
+        "reserved_input_tokens": 59,
+        "reserved_output_tokens": 2,
+        "reserved_cost_usd": Decimal("0.00010000"),
+        "actual_input_tokens": 75,
+        "actual_output_tokens": actual_output_tokens,
+        "actual_cost_usd": Decimal("0.00020000"),
+    }
+
+    assert (
+        import_sqlite_module._reservation_is_overdrawn(
+            reservation,
+            "settled_actual",
+            input_reservation_is_explicit=input_reservation_is_explicit,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
     ("table_name", "column_name", "value", "direction", "error_pattern"),
     [
         (
