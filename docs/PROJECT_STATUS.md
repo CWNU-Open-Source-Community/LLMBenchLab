@@ -57,10 +57,18 @@
 - 真实失败备份副本已无损升级到 `0006` 并通过 integrity/FK/Alembic check；当前重建库由标准 preflight 自动备份后从 canonical `0005` 到 `0006`，startup gate、quick check、FK 和 metadata check 全部通过，业务计数与 Worker facts 保持。
 - 本地 migration `52 passed`；最终完整 `make test` 为后端 `927 passed, 33 skipped`、前端 `38 passed`，`make lint`、Mock smoke 和 Compose config 均通过。实现 SHA `8fb51b690ae6335b8ef93b3cbe54e039781fb173` 已 push，[run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 的 backend、真实 PostgreSQL/Redis、完整 Compose 与 frontend 四个 job 全部成功；本维护任务完成，不改变 Phase 2/P2-07 状态。
 
+## 2026-08-30 本地数据恢复与静默启动（`in_progress`）
+
+- 默认本地 SQLite 重建库逻辑为空；多份约 96 MiB 候选也因 freelist 较大但业务表全空，不能恢复数据。最新且 revision 最高的非空一致性备份为 `backend/data/llmbenchlab.db.pre-alembic-20260827T073137431634Z.bak`（SHA-256 `7e046c1e7cd4ec39c5fe6f57b34f130670e0d249a70bf052a84a23e085a59a53`），含 1 个 Mock Model、1 个 Demo Benchmark、15 Questions、1 个 completed Run 和 15 Responses；与更早两份非空备份在全部共有列的内容摘要一致。
+- 停止 API/Worker/Vite 并确认默认库无占用/sidecar 后，只在该备份的一致性 staging 副本上执行 `0002→0006`。迁移前后五张旧表共有列摘要都为 `d1b3b74b7726f9e7903fbd3f445ad258d5f5aa4b885c976582f2d53e1d30302f`；恢复后的默认库 `quick_check=ok`、外键错误 0、Alembic current=head，API/Web 实际读取到 `1/1/1` 个 Model/Benchmark/Run。原始恢复源未修改；重建空库另存为 `backend/data/llmbenchlab.db.pre-original-data-restore-20260829T170121Z.bak`（SHA-256 `ec2ef8b2d5c9a338ce3e5f94c68a3c5742d288a798df2b7a6096960a48610c90`）。
+- `make dev` 现在只在控制台显示地址和日志位置；API、Worker、Vite 详细输出分别 append 到私有的 Git 忽略日志，单服务 Make 入口仍保留前台诊断。离线启动器 `3 passed`，真实本地启动/live/health/ready/API/Web 探针通过；完整 `make test` 为后端 `930 passed, 33 skipped`、前端 `38 passed`，lint/build/smoke/Compose config 也已通过。提交/push 与精确 SHA CI 尚在收尾，因此当前维护状态仍为 `in_progress`。
+- 该维护只恢复个人本地 SQLite Demo 数据并改进开发入口，不是 P2-07 的 PostgreSQL+keyring backup/restore、Redis 重建或灾难恢复认证；Phase 2/P2-07 状态不变。
+
 ## 状态与后续
 
 - P2-06：状态为 `completed`；实现、clean-SHA Compose evidence、实现 commit 与 evidence closeout 文档 commit 的 push 和精确 SHA CI 均已完成。
 - 0004 历史索引兼容修复：状态为 `completed`；实现 commit `8fb51b690ae6335b8ef93b3cbe54e039781fb173` 已 push，精确 SHA run `33263405214` 4/4 成功。
+- 本地数据恢复与静默启动：状态为 `in_progress`；数据恢复和本地验证已完成，等待提交/push 与精确 SHA CI。
 - P2-07：状态为 `planned`，已建立 [ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、其 exact-head amendment [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md)、[独立计划](plans/2026-08-28-phase-2-recovery-operations.md) 和 [工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的功能实现尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
@@ -100,6 +108,7 @@
 | P2-06 evidence 文档远程 CI | `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 run `33165775037` 4/4 | 精确文档 SHA 门禁完成；P2-06 为 `completed` |
 | P2-01 实现远程 CI | `b6a35fe…` run `33146681285` 4/4 | 精确实现 SHA 全绿；PR #2 已于 2026-08-28 合并 |
 | P2-01 证据文档收尾 CI | `875f13a…` run `33150080341` 4/4 | 精确文档 SHA 全绿；P2-01 仓库级收尾完成 |
+| 2026-08-30 本地恢复/静默启动 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、恢复库 digest/quick/FK/head 与真实 API/Web 读取通过 | 默认库恢复 `1/1/15/1/15`；实现尚待 commit/push 与精确 SHA CI，不改变 P2-07 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见上方独立行 |
 | P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见上方独立行 |
@@ -123,7 +132,8 @@
 - [Phase 2 治理、审计与性能](worklogs/2026-08-27-phase-2-governance-audit-performance.md)
 - [Phase 2 正式 SLO 与容量模型](worklogs/2026-08-28-phase-2-slo-capacity-model.md)
 - [Phase 2 可观测性与审计保留](worklogs/2026-08-28-phase-2-observability-retention.md)
+- [本地数据恢复与静默启动](worklogs/2026-08-30-restore-data-quiet-startup.md)
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。P2-06 已完成仓库级收尾；P2-07 工作包已建立、状态为 `planned`，后续从最小只读 recovery verifier 开始实施。Phase 2 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。本次个人本地 SQLite/启动器维护不改变路线图：P2-06 已完成仓库级收尾；P2-07 工作包已建立、状态为 `planned`，后续从最小只读 recovery verifier 开始实施。Phase 2 继续保持 `in_progress`。

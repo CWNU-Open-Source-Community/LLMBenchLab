@@ -15,7 +15,7 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 | API 与进程边界测试 | FastAPI Schema、状态码、秘密安全、Run 提交与 API/Worker 分离 | `backend/tests/test_api.py`、`test_run_dispatch.py`、`test_process_boundaries.py` | 禁止 |
 | Governance / audit 测试 | policy/ledger 完整性、typed history/audit、Provider/credential evidence，以及 canonical archive/离线 verify/精确 reconcile/restore/delete | `test_governance.py`、`test_audit_api.py`、`test_audit_archive.py`、`test_audit_retention.py`、`test_audit_retention_cli.py` | 禁止；SQLite/Mock/fixture；真实 PG retention 只连测试库 |
 | 租约与 Worker 测试 | 条件领取、fencing、心跳、取消、幂等 Response、重试/恢复、队列 ACK，以及 generation 级 DB-time scan/claim/lease-heartbeat/progress/stale | `test_run_leases.py`、`test_evaluation_runner_reliability.py`、`test_worker.py`、`test_worker_progress.py`、`test_worker_probe.py` | 禁止；SQLite/假队列 |
-| Metrics / alert / logging 测试 | 固定 Prometheus exposition、snapshot/hard cap/single-flight/取消竞态、精确八规则/Runbook，以及全部生产 logger source/第三方 handler 治理 | `test_prometheus_exporter.py`、`test_prometheus_alert_rules.py`、`test_logging.py`、`test_logging_sources.py` | 禁止；SQLite/假队列/标准库 JSON |
+| Metrics / alert / logging 测试 | 固定 Prometheus exposition、snapshot/hard cap/single-flight/取消竞态、精确八规则/Runbook、全部生产 logger source/第三方 handler 治理，以及组合开发启动器的日志分流/退出传播 | `test_prometheus_exporter.py`、`test_prometheus_alert_rules.py`、`test_logging.py`、`test_logging_sources.py`、`test_dev_script.py` | 禁止；SQLite/假队列/标准库 JSON/假子进程 |
 | 迁移与导入回归 | SQLite/真实 PostgreSQL migration、`0005` populated downgrade refusal/空库往返，以及 13 表 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
 | 真实基础设施集成 | PostgreSQL 并发领取/取消竞态、Redis Streams PEL/ACK/重复投递 | `backend/tests/integration/` 与 importer 的 `integration` 用例 | 只连接显式测试 PostgreSQL/Redis；禁止 Provider |
 | Mock 端到端 Smoke | API 提交 pending Run → 独立 WorkerService → Responses → Leaderboard/Metrics | `backend/tests/test_smoke.py`，marker 为 `smoke` | 禁止 |
@@ -470,7 +470,7 @@ keyring bootstrap 的 `24` 个定向测试覆盖所有相关本地入口强制 C
 make dev
 ```
 
-它同时启动 API、独立 Worker 和 Vite。若拆分终端，必须分别运行 `make backend`、`make worker` 与 `make frontend`；只启动 API 时新 Run 保持 `pending` 是预期行为。
+它同时启动 API、独立 Worker 和 Vite。正常运行期间控制台应只保留启动地址和三个详细日志路径；API 请求、Worker 和 Vite 输出写入 `artifacts/dev-logs/*.log`。若拆分终端，必须分别运行 `make backend`、`make worker` 与 `make frontend`；只启动 API 时新 Run 保持 `pending` 是预期行为。`backend/tests/test_dev_script.py` 使用假 `uv`/`npm` 验证 stdout/stderr 分流、append、`0700/0600` 权限、失败码传播和其余进程清理，不启动真实服务。
 
 ### 11.1 API 验收
 

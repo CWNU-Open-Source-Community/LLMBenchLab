@@ -135,7 +135,7 @@ make setup
 make dev
 ```
 
-`make setup` 会让 `uv` 显式选择 CPython，按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，`Ctrl-C` 会一起停止。
+`make setup` 会让 `uv` 显式选择 CPython，按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，控制台只显示地址与日志位置；三个服务的详细输出分别追加到 Git 忽略的 `artifacts/dev-logs/api.log`、`worker.log` 和 `frontend.log`，`Ctrl-C` 会一起停止。
 
 默认地址：
 
@@ -158,7 +158,7 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 
 API 为每个请求自行生成 `X-Request-ID` 并在响应中返回，不信任或回显客户端提供的同名 header。LLMBenchLab 生产日志调用只允许无格式参数的字面量消息；结构化 extra 除字段白名单外还逐字段执行固定枚举、UUID/Redis stream ID 与有限数值规范化，非法 ID 被省略，未知 method/code 只输出固定 `unsupported`。Redis Run 通知本身也只接受 canonical UUID。外部 logger 的动态消息不进入 JSON，原始 Uvicorn access handler 关闭。凭据和敏感内容仍绝不得放在 URL、header、请求路径或日志字段中。
 
-如需分别观察日志，可在三个终端运行 `make backend`、`make worker` 和 `make frontend`。只启动 API 时，新 Run 会持久化为 `pending`，但不会在 API 进程内执行。本地 SQLite 只支持一个 Worker；Redis URL 可留空，Worker 将使用数据库对账。所有命令可通过 `make help` 查看；更完整的环境变量、迁移和排障说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
+需要跟踪组合启动日志时可运行 `tail -f artifacts/dev-logs/api.log artifacts/dev-logs/worker.log artifacts/dev-logs/frontend.log`；需要在前台分别观察时，可在三个终端运行 `make backend`、`make worker` 和 `make frontend`。只启动 API 时，新 Run 会持久化为 `pending`，但不会在 API 进程内执行。本地 SQLite 只支持一个 Worker；Redis URL 可留空，Worker 将使用数据库对账。所有命令可通过 `make help` 查看；更完整的环境变量、迁移和排障说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 ## Mock Demo：完整离线流程
 

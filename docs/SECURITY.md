@@ -149,6 +149,7 @@ Web stored 流程如下：
 
 - 不记录 `os.environ`、HTTP headers、完整异常 locals、请求体或 `.env` 内容。
 - 应用外的反向代理 access log、PostgreSQL/Redis server log、Docker/runtime log，以及 formatter 配置前或进程崩溃时的 stderr 不受上述 sanitizer 控制；未知且安装自有 handler 的第三方库也必须在部署侧审计、过滤并设置保留策略。
+- 本地 `make dev` 不再把三个服务的详细输出持续写到控制台，而是分别追加到 Git 忽略的 `artifacts/dev-logs/*.log`；启动器把目录/文件权限收紧为 `0700`/`0600`。Git ignore 和文件权限都不是加密、自动保留或安全删除，日志仍不得包含 Key、请求体或完整 Provider 内容，也不得作为公开附件上传。
 - 即使进程内原始 Uvicorn access handler 已禁用，秘密仍不得出现在 URL、查询参数或路径；反向代理和基础设施日志必须应用相同规则。
 - `DEBUG` 仅用于无秘密的本地排障。HTTP wire logging 和第三方 SDK debug logging 默认关闭；即使 SQL 参数已隐藏，也不应在含敏感数据的部署中采集冗长 SQL trace。
 - 原始模型回答可能含供应商回显的其他敏感内容。当前只保证精确替换正在使用的 Key，并识别部分常见秘密形态；回答仍会作为评测证据持久化并通过 Responses API 返回，不能把“没有当前 Key”误当成“可以公开”。

@@ -71,6 +71,8 @@
 
 `slice_delivered` 表示该垂直切片及其候选门禁已交付，不表示整个阶段完成。Phase 2 必须保持 `in_progress`。
 
+2026-08-30 的个人本地维护已从最新非空 SQLite 一致性备份恢复 1 个 Mock Model、1 个 Demo Benchmark、15 Questions、1 个 completed Run 和 15 Responses，并让组合开发启动器把三服务详细输出分流到私有 Git 忽略日志。该操作有 staging 迁移、共有列摘要、完整性/外键/head、真实本地启动与 API/Web 读取证据，但不包含 PostgreSQL/keyring、Redis 或告警恢复认证，不能计作 P2-07 实施或改变本阶段状态。
+
 ## 验收标准与当前结论
 
 - [x] 可靠执行基础：API/Worker restart、真实 lease-owner `SIGKILL`、Redis stop/start、duplicate delivery、pending/running cancel 和 lease takeover 有历史真实 PostgreSQL/Redis/Compose 证据。
@@ -113,6 +115,7 @@
 | P2-06 staged 技术/安全终审 | structured-extra High 与 Worker `__main__` logger Medium 已修复；76-file implementation index 为 0 Blocker/High/Medium；hydration/import integrity 目标集 `67 passed` | 已进入 clean implementation commit `9a20676…` |
 | P2-06 evidence-doc remote gate | [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) | 精确 `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`，四个必需 job 全 success；P2-06 仓库级闭环完成 |
 | 2026-08-29 DB compatibility repair | migration `52 passed`；完整 backend `927 passed, 33 skipped`、frontend `38 passed`；lint/smoke/config、真实失败备份副本与当前库 startup/check 全绿 | `8fb51b6…` 的 exact-SHA run `33263405214` 4/4；不改变 P2-07 planned 状态 |
+| 2026-08-30 本地恢复/静默启动维护 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、SQLite digest/quick/FK/head、真实 API/Web 读取通过 | 个人本地 Demo 数据恢复和开发 UX；尚待精确 SHA CI，且不是 P2-07 恢复认证 |
 
 所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
 

@@ -57,7 +57,17 @@ make setup
 make dev
 ```
 
-`scripts/dev.sh` 同时管理三个进程；任一进程退出会停止另外两个。需要分开查看日志时使用三个终端：
+`scripts/dev.sh` 同时管理三个进程；任一进程退出会停止另外两个并传播其退出状态。组合启动的控制台只显示 Web/API 地址和日志位置，API、Worker、Vite 的 stdout/stderr 分别追加到 `artifacts/dev-logs/api.log`、`worker.log`、`frontend.log`，每次启动都有 UTC session marker。目录和日志在创建/复用时分别收紧为 `0700`/`0600`，且都被 Git 忽略；它们仍是敏感本地运维证据，不应上传。
+
+跟踪详细输出可运行：
+
+```bash
+tail -f artifacts/dev-logs/api.log \
+  artifacts/dev-logs/worker.log \
+  artifacts/dev-logs/frontend.log
+```
+
+需要把日志放到其他受保护目录时，仅为本地启动器设置 `LLMBENCHLAB_DEV_LOG_DIR`。需要让某个服务直接在前台输出时使用三个独立入口：
 
 ```bash
 make backend
@@ -254,6 +264,7 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `CORS_ORIGINS` / `LLMBENCHLAB_CORS_ORIGINS` | 两种 localhost `:5173` | 显式 allowlist；拒绝 `*` |
 | `FRONTEND_ORIGIN` | `http://localhost:5173` | 单 Origin 兼容别名；`CORS_ORIGINS` 优先 |
 | `LOG_LEVEL` / `LLMBENCHLAB_LOG_LEVEL` | `INFO` | `CRITICAL/ERROR/WARNING/INFO/DEBUG` |
+| `LLMBENCHLAB_DEV_LOG_DIR` | `artifacts/dev-logs` | 仅供 `make dev` 使用的本地详细日志目录；不是应用 Settings 或生产日志后端 |
 | `LLMBENCHLAB_ENVIRONMENT` | `development` | `/info` 环境标签 |
 | `LLMBENCHLAB_DEBUG` | `false` | 只用于受控本地调试 |
 | `API_HOST` / `API_PORT` | `127.0.0.1` / `8000` | Make/脚本监听；Compose 只消费 host port |

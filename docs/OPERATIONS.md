@@ -331,6 +331,10 @@ PostgreSQL 不可用时没有可替代事实源。API 不应接受新 Run，Work
 
 若恢复点早于某些 Provider 外发，数据库无法知道备份之后的远端消费；必须以 Provider 账单和 request ID 独立核对。Redis 可以重建通知，不能用来补造丢失的数据库事实。
 
+### 8.1 本地开发 SQLite 恢复边界
+
+个人本地 SQLite 恢复不等同 P2-07 的 PostgreSQL/keyring 灾难恢复认证。恢复前必须停止 `make dev`、CLI 和任何直接连接者，并确认默认库没有进程占用或 WAL/SHM/journal sidecar。候选备份应按逻辑表计数、`PRAGMA quick_check`、外键、Alembic revision 和内容摘要选择，不能按文件体积猜测；含大量 freelist 的大文件可能在逻辑上为空。保留原候选不变，只在 staging 副本上执行受支持的 migration preflight/upgrade/check；迁移后数据摘要一致才可替换默认库。替换前另存并验证当前库，stored credential 还必须配对恢复数据库外 keyring，且核验过程不得输出 Key、ciphertext、nonce 或 keyring 内容。
+
 ## 9. Audit archive、核验与保留
 
 `audit_events.expires_at` 表示行已达到最低保留期，不表示可由请求链路自动删除。Operational/security 事件仍分别至少保留 90/365 天；维护流程必须严格执行 **archive → offline verify → reconcile → maintenance-window delete**。Archive 是含内部 ID 的敏感运维文件，hash 只用于误改检测和精确文件确认，不是签名、认证、WORM 或不可篡改证明。

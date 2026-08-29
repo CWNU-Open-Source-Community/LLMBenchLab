@@ -40,6 +40,7 @@ Phase 0 and the Phase 1 MVP vertical slice are complete. The Phase 2 reliable-ex
 
 ### Changed
 
+- Changed the combined `make dev` launcher to keep the console quiet after a concise address/log summary. API, Worker, and Vite output is appended to separate Git-ignored `artifacts/dev-logs` files with UTC session markers and private local permissions; individual service Make targets remain foreground diagnostics, and child failures still propagate their status.
 - Governed production logging at the source boundary: application calls use literal argument-free messages, structured values remain allowlisted and finite, third-party logger text/identity is replaced by fixed classification, and the raw Uvicorn access handler is disabled rather than bypassing the JSON redaction contract.
 - Extended the Phase 2 migration/importer head from `20260827_0004` / 12 tables to `20260828_0005` / 13 tables. A populated `worker_processes` table blocks `0005 -> 0004` before DDL; only an explicitly emptied table may downgrade, after which the existing governance/audit `0004` guards still apply.
 - Hardened the final P2-06 integrity boundaries: importer reconciliation now compares committed target facts through the same canonical contract, no-op retention mutations still execute post-commit verification, PostgreSQL archive/delete/restore operations hold advisory plus row locks, and audit archives enforce the record-count cap before per-line decoding.

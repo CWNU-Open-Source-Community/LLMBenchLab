@@ -22,6 +22,8 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 `0006` 兼容修复已完成本地 migration/full test/lint/Mock smoke、真实失败备份副本升级和当前重建库 startup/check；实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 已 push，[run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 4/4 成功，因此该维护任务为 `completed`，不改变 P2-07 的 `planned` 状态或范围。
 
+2026-08-30 的个人本地维护又从最新逻辑非空的 SQLite 一致性备份在 staging 中前进迁移并恢复 Demo 数据，同时让 `make dev` 默认把 API/Worker/Vite 详细输出分流到私有 Git 忽略日志。它只处理默认本地开发库和启动体验，不提供 PostgreSQL+keyring backup/restore、Redis rebuild 或告警演练，因而不算 P2-07 功能实现；本文件的下一切片保持不变。
+
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；本次兼容修复已在自动备份后将当前重建库前进到 `0006` 并通过 startup/check。
 
 ## 已完成：建立 P2-07 工作包
