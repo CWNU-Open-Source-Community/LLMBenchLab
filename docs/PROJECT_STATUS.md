@@ -64,19 +64,19 @@
 - `make dev` 现在只在控制台显示地址和日志位置；API、Worker、Vite 详细输出分别 append 到私有的 Git 忽略日志，单服务 Make 入口仍保留前台诊断。离线启动器 `3 passed`，真实本地启动/live/health/ready/API/Web 探针通过；完整 `make test` 为后端 `930 passed, 33 skipped`、前端 `38 passed`，lint/build/smoke/Compose config 也已通过。实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 已 push，[run `33265171953`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33265171953) 四个必需 job 全部成功，因此本维护为 `completed`。
 - 该维护只恢复个人本地 SQLite Demo 数据并改进开发入口，不是 P2-07 的 PostgreSQL+keyring backup/restore、Redis 重建或灾难恢复认证；Phase 2/P2-07 状态不变。
 
-## 2026-08-30 已下载标准评测集本地加载（`in_progress`）
+## 2026-08-30 已下载标准评测集本地加载（`completed`）
 
 - `artifacts/benchmarks/` 中三个 Git 忽略 dataset-v1 ZIP 均由当前 Loader 校验通过：GPQA-Diamond `198` 题、MMLU-Pro Direct `12,032` 题、MMLU-Pro Official-CoT `12,032` 题。原始 `dataset-cache` 仍只作为固定来源缓存，没有被当作导入包。
 - 在现有 `make dev` 服务无活动 Run 时，先用 SQLite 在线 backup 创建 `0600` 的 `backend/data/llmbenchlab.db.pre-benchmark-import-20260829T173032Z.bak`（SHA-256 `d8c71c44b0ee364030d0053788f34bd985a443ba30a9cd17f1069a9737d10206`），再通过正式 `/api/v1/benchmarks/import` 逐个导入，三个请求均为 `201`。
 - 默认个人 SQLite 现有 `4` 个 Benchmark、`24,277` 道题；逐集持久化题数与 manifest 一致。原有 `1` 个 Model、`1` 个 completed Run 和 `15` 条 Response 不变，active Run 为 `0`；`quick_check=ok`、外键错误 `0`、Alembic head=`20260829_0006`，API 列表/逐集 total 也已对账。
-- 目标 Loader/标准转换器离线测试 `40 passed`；未调用真实 Provider，未修改 Schema/API/协议或产品代码。当前只等待仓库文档提交、push 与精确 SHA CI，不改变 Phase 3/P2-07 状态。
+- 目标 Loader/标准转换器离线测试 `40 passed`；未调用真实 Provider，未修改 Schema/API/协议或产品代码。仓库记录 commit [`0163b67c00eb59ae59db5f3adb679ad85c799142`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/0163b67c00eb59ae59db5f3adb679ad85c799142) 已 push，其精确 SHA 的 [run `33266167547`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33266167547) 四个必需 job 全部成功；本地加载维护为 `completed`，不改变 Phase 3/P2-07 状态。
 
 ## 状态与后续
 
 - P2-06：状态为 `completed`；实现、clean-SHA Compose evidence、实现 commit 与 evidence closeout 文档 commit 的 push 和精确 SHA CI 均已完成。
 - 0004 历史索引兼容修复：状态为 `completed`；实现 commit `8fb51b690ae6335b8ef93b3cbe54e039781fb173` 已 push，精确 SHA run `33263405214` 4/4 成功。
 - 本地数据恢复与静默启动：状态为 `completed`；实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 已 push，精确 SHA run `33265171953` 4/4 成功。
-- 已下载标准评测集本地加载：三个现有正式 ZIP 已导入并完成本地数据库/API/目标测试验证；仓库文档门禁仍为 `in_progress`。
+- 已下载标准评测集本地加载：状态为 `completed`；三个现有正式 ZIP 已导入并完成本地数据库/API/目标测试验证，`0163b67…` 的 run `33266167547` 4/4 成功。
 - P2-07：状态为 `planned`，已建立 [ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、其 exact-head amendment [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md)、[独立计划](plans/2026-08-28-phase-2-recovery-operations.md) 和 [工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的功能实现尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
@@ -117,7 +117,7 @@
 | P2-01 实现远程 CI | `b6a35fe…` run `33146681285` 4/4 | 精确实现 SHA 全绿；PR #2 已于 2026-08-28 合并 |
 | P2-01 证据文档收尾 CI | `875f13a…` run `33150080341` 4/4 | 精确文档 SHA 全绿；P2-01 仓库级收尾完成 |
 | 2026-08-30 本地恢复/静默启动 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、恢复库 digest/quick/FK/head 与真实 API/Web 读取通过 | 默认库恢复 `1/1/15/1/15`；`5075bdb…` 的 run `33265171953` 4/4 成功，不改变 P2-07 |
-| 2026-08-30 标准评测集本地加载 | 三个 ZIP Loader 校验通过；API 导入 `201/201/201`；数据库/API 对账为 `4` Benchmarks、`24,277` Questions；`quick_check=ok`、FK `0`、head `0006`；目标测试 `40 passed` | 本地加载完成，原 Model/Run/Response 保持；文档 commit/push/精确 SHA CI 待执行，无 Provider 调用 |
+| 2026-08-30 标准评测集本地加载 | 三个 ZIP Loader 校验通过；API 导入 `201/201/201`；数据库/API 对账为 `4` Benchmarks、`24,277` Questions；`quick_check=ok`、FK `0`、head `0006`；目标测试 `40 passed` | 本地加载完成，原 Model/Run/Response 保持；`0163b67…` 的 run `33266167547` 4/4 成功，无 Provider 调用 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见上方独立行 |
 | P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见上方独立行 |

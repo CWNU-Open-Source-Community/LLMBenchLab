@@ -88,10 +88,14 @@
 | SQLite quick/FK/head/count/逐集对账 | 通过；`4` Benchmarks / `24,277` Questions |
 | API Benchmark 列表与逐集 total 对账 | 通过 |
 | `uv run pytest -q tests/test_dataset_loader.py tests/test_standard_datasets.py` | `40 passed`；只有既有上游弃用 warning |
+| `git diff --cached --check`、高置信秘密扫描、独立只读终审 | 通过；0 Blocker/High/Medium/Low，未发现题目正文或秘密 |
+| `git commit` / `git push origin codex/complete-evaluation-workflow` | 记录 commit `0163b67c00eb59ae59db5f3adb679ad85c799142` 已普通 push |
+| `gh run watch 33266167547 --exit-status` | backend、真实 PostgreSQL/Redis integration、真实 Compose acceptance、frontend 4/4 成功 |
 
 ### 已知边界与未运行项
 
-- 本次没有产品代码、Schema、API、协议或前端行为变更，因此本地未重复全量 `make test`、lint、frontend build、Smoke 或 Compose；目标 Loader/转换器测试和真实本地导入/数据库/API 对账是本次最小充分验证，远程 CI 将执行仓库常规门禁。
+- 本次没有产品代码、Schema、API、协议或前端行为变更，因此本地未重复全量 `make test`、lint、frontend build、Smoke 或 Compose；目标 Loader/转换器测试和真实本地导入/数据库/API 对账是本次最小充分验证，远程 CI 已执行并通过仓库常规门禁。
 - 两种 MMLU-Pro profile 共享源题但 prompt 配置不同，结果不得互相或与其他 profile/hash 无提示混合比较。
 - 本地 SQLite 与第三方题目/备份不进入 Git；备份 hash 是完整性标识，不是签名、加密或访问控制。
-- 当前状态：本地数据加载完成；文档提交、普通 push 与精确 SHA GitHub Actions 待执行，所以任务暂保持 `in_progress`。
+- 初次 `gh pr status --json currentBranch` 因本机 `gh` 不支持该 JSON 字段而失败；随后改用 `gh pr view 3 --json headRefOid,statusCheckRollup`，精确确认 PR head 与四个 check，不影响产品或验证结果。
+- 状态：本地数据加载、仓库记录提交、普通 push 与精确 SHA GitHub Actions 均完成；任务为 `completed`，Phase 3/P2-07 状态保持不变。
