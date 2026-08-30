@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
 - 关联计划：[多 Worker 并行评测](../plans/2026-08-30-multi-worker-evaluation.md)
 - 关联 ADR：[ADR-0005](../decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](../decisions/ADR-0009-database-governance-audit-fair-scheduling.md)
-- 最终状态：in_progress
+- 最终状态：completed
 
 ## 初始仓库状态
 
@@ -43,7 +43,7 @@
 - [x] Compose 默认两个 Worker，按方向同步 API expected/scale，并自动验证 expected/registered/live/stalled/shortfall=`2/2/2/0/0`
 - [x] 两个不同 Benchmark Run 可由不同 Worker并发领取，同一 Run 不会重复拥有有效 lease
 - [x] 自动化只用 Mock/Stub，相关 lint/test/smoke/config 通过
-- [ ] 强制文档、commit/push 与精确 SHA CI 完成
+- [x] 强制文档、commit/push 与精确 SHA CI 完成
 
 ## 假设
 
@@ -63,7 +63,7 @@
 1. [completed] 完成只读勘察、计划、日志与测试合同
 2. [completed] 实现本地/Compose 多 Worker启动入口
 3. [completed] 增加 launcher、真实 PostgreSQL 与真实 Compose 回归
-4. [in_progress] 同步文档、运行完整门禁、commit/push 并等待精确 SHA CI
+4. [completed] 同步文档、运行完整门禁、commit/push 并等待精确 SHA CI
 
 ## 实际修改
 
@@ -112,6 +112,8 @@
 | `cd frontend && npm run build` | production build | 0 | 2194 modules；构建通过，仅既有 >500 kB chunk warning |
 | `docker compose config --quiet`、`git diff --check` | 部署/格式门禁 | 0 | 无输出、无 warning/whitespace error |
 | `git diff --cached --check`、staged name/stat/diff 与三类秘密/debug 扫描 | 提交前范围与安全复核 | 0 | 19 files；secret/key patterns、敏感路径、debug marker 均为 0；无 unstaged diff |
+| `git commit`、`git push origin codex/complete-evaluation-workflow` | 实现交付 | 0 | implementation `b06594c2df67d6e2a8b117651b193cd0fa409bf5` 已普通 push；无 force push |
+| `gh run watch 33299883513 --exit-status`、`gh run view 33299883513` | 精确实现 SHA 远程门禁 | 0 | backend、PostgreSQL/Redis integration、frontend、real Compose reliability 四个必需 job 全 success |
 
 ## 测试结果
 
@@ -119,14 +121,15 @@
 - 失败：首次空 PostgreSQL 因未迁移 setup error，按部署顺序修正后通过；第一次真实 Compose冷启动有一个 Worker exit 1，wrapper安全失败，随后两次冷启动和完整扩缩均通过
 - Lint/typecheck/build：完整门禁全部通过；build 仅有既有 chunk-size warning
 - Smoke/Docker：真实 Compose只使用空 PostgreSQL/Redis且没有 Model/Run；未调用真实 Provider
+- 远程：implementation exact-SHA run `33299883513` 4/4 success；Node 20 action deprecation annotation 为 GitHub Action维护提示，不是功能失败
 
 ## 未运行验证
 
-- 精确 implementation/evidence commit 的远程 CI 尚未运行。
+- 真实 Provider与 3+ Worker容量资格未运行（有意，均不在本任务支持声明内）。
 
 ## 未完成项
 
-- implementation commit/push 与精确 SHA远程门禁待完成。
+- 无功能未完成项；P2-07 保持下一独立任务。
 
 ## 已知问题与限制
 
@@ -139,16 +142,16 @@
 - 真实 API 调用：否
 - 日志/API 脱敏：未改变
 - 危险 Git 操作（force push/reset 等）：无
-- 阶段 push：待完成
-- 远程 CI：待完成
+- 阶段 push：implementation SHA `b06594c…` 已普通 push
+- 远程 CI：run `33299883513` 四个必需 job 全 success
 - 遗留安全风险：现有可信 loopback与 Provider SSRF边界不变
 
 ## 结果与下一步
 
-任务进行中；实现、完整本地门禁、staged diff 与秘密复核已完成，下一步提交、普通 push 并等待精确 SHA远程门禁。
+任务完成：PostgreSQL 日常多 Worker入口、本地/Compose安全边界、并发租约证据和本地/远程门禁全部闭环；P2-07 仍是下一独立任务。
 
 ## 最终 Git 状态
 
 ```text
-任务进行中
+implementation commit/push 后为空；本 closeout 文档提交完成后再次核对
 ```

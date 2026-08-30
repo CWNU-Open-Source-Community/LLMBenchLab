@@ -1,7 +1,7 @@
 # 多 Worker 并行评测执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed
 - Created: 2026-08-30
 - Updated: 2026-08-30
 - Related requirements: FR-RUN-04、NFR-PERF-03、Phase 2 P2-03
@@ -62,7 +62,7 @@
    - 修改范围：后端 Worker/租约或 PostgreSQL integration 测试。
    - 操作：验证两个不同 Benchmark Run 被不同 Worker领取且无同 Run重复 owner。
    - 完成判据：目标后端测试通过；真实基础设施测试在可用环境执行并记录。
-4. [in_progress] **同步文档并完成门禁**
+4. [completed] **同步文档并完成门禁**
    - 修改范围：README、Architecture、Deployment、Operations、Testing、Changelog、Project Status、Phase 2、Next Task、本计划与工作日志。
    - 操作：记录命令、支持边界、回滚与实际验证；运行相关完整门禁。
    - 完成判据：lint/test/smoke/build/config 与精确提交远程 CI 符合仓库 DoD。
@@ -86,6 +86,7 @@
 | 租约并发 | PostgreSQL integration 目标测试 | 不同 Benchmark Run 不同 owner；同 Run 唯一 lease | 首次空库未迁移在 fixture setup 报两项 `UndefinedTable`；迁移到 `20260830_0007` 后相同两项 `2 passed` |
 | 质量门禁 | `make lint && make test && make smoke` | 全部通过且无真实 Provider | 终审后重跑：lint/typecheck 通过；backend `1003 passed, 35 skipped`、frontend `64 passed`；offline Mock smoke `1 passed, 7 deselected`；frontend build 与 Compose config 通过 |
 | 秘密与无关改动检查 | `git diff --check`、`git status --short` 及敏感词检查 | 无格式错误、无密钥、范围正确 | 19-file staged diff/范围已复核；secret/key、敏感路径、debug marker 三类扫描均为 0；`git diff --cached --check` 通过 |
+| 精确 SHA 远程 CI | implementation commit push 后查询该 SHA | 四个必需 job 全部成功 | `b06594c2df67d6e2a8b117651b193cd0fa409bf5` 的 [run `33299883513`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33299883513) 4/4 success |
 
 ## Rollback
 
@@ -102,9 +103,9 @@
 ## Completion evidence
 
 - 修改文件：Make/环境示例/Compose、本地与 Compose launcher、launcher/真实 PG tests、README 与 Phase 2 运维/部署/测试/状态文档
-- 实际命令：目标 launcher `42 passed`；迁移后真实 PG `2 passed`；终审修复后的真实 Compose 冷启动与 `2→1→2` 五 gauges 通过且隔离 cleanup 为零；终审后完整 lint/test/smoke/build/config/diff check 通过
+- 实际命令：目标 launcher `42 passed`；迁移后真实 PG `2 passed`；终审修复后的真实 Compose 冷启动与 `2→1→2` 五 gauges 通过且隔离 cleanup 为零；终审后完整 lint/test/smoke/build/config/diff check 通过；implementation exact-SHA CI 4/4 success
 - 验收对应：本地/Compose入口、SQLite fail-fast、按方向 scale/expected、active scan、五 gauges 与跨 Benchmark lease 已有本地证据
-- 未运行：精确 implementation SHA 的远程 CI
+- 未运行：真实 Provider（有意）；3+ Worker容量资格（不在范围）
 - 已知问题：SQLite 继续单 Worker；3+ Worker和真实 Provider尚未资格
 
 ## Decision and discovery log

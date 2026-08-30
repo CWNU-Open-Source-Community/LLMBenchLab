@@ -39,12 +39,12 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 - 目标 Run 实页显示通过 179、普通答错 17、执行异常 2、未执行 0，Token `45,509 / 4,561,625`、输入/输出覆盖均为 `196/198`；desktop/768/375 无横向溢出，console 无 warning/error，键盘与 Tooltip 验收通过。
 - 实现 SHA `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已普通 push，PR #5 的 exact-SHA Actions run `33289522923` 四个必需 job 全部成功，因此本切片为 `completed`。Phase 3 整体仍为 `in_progress`；P2-07 恢复为下一独立任务并保持 `planned`。
 
-## 2026-08-30 多 Worker 日常评测入口（`in_progress`）
+## 2026-08-30 多 Worker 日常评测入口（`completed`）
 
 - 现场只读诊断确认当前不是 Worker 进程死亡：唯一 Worker 仍持续续租，但一个 Run 使用 4 路题目并发、300 秒 read timeout 和最多 3 次 HTTP attempt；长时间未返回的 Provider 请求可以让该 Worker 约 15 分钟不产生新题证据，其余 3 个 due Run 因没有空闲 Worker而排队。诊断未读取 Key/正文、未取消或改写 Run。
 - 核心租约/fencing 不变。`make dev DEV_WORKERS=N` 现可在 PostgreSQL 下管理 1–32 个独立 Worker进程和私有日志，SQLite 请求 `N>1` 会在 keyring、日志和服务创建前固定失败；`make dev-multi` / `make docker-up WORKERS=N` 默认 2，用同一参数驱动 Compose scale 与 API expected，扩容先证明 active Worker scan、缩容先降低 API expected，并在返回前校验 `expected/registered/live/stalled/shortfall=N/N/N/0/0`。
 - 新增的真实 PostgreSQL 16 回归证明两个 owner 可并发领取属于不同 Benchmark 的两个 due Run，且另一个有效 lease 不阻塞不同 Run、也不能重复领取同一 Run。启动器目标回归为 `42 passed`；终审后又用 DB 时钟 watermark 证明本轮新增 generation 已真实 scan，并用 all/running 两类 Compose replica 正确判定含 exited container 的缩容方向。第一次临时 PG 测试因空库未迁移在 fixture setup 报两项 `UndefinedTable`，按真实部署顺序迁移到 `20260830_0007` 后相同两项 `2 passed`。修复后的隔离 Compose 冷启动得到 `2/2/2/0/0`，随后 `2→1→2` 的 gauges 依次为 `1/1/1/0/0`、`2/2/2/0/0`，最终 container/volume/network/本轮 image tag 均为 0。所有临时资源按精确 project/container/image 名清理，未触碰用户 SQLite、默认 Compose volume 或共享 image tag。
-- 终审修复后的完整本地门禁已通过：`make lint`（Ruff/format 160 files、ESLint、TypeScript）、`make test`（backend `1003 passed, 35 skipped`、frontend `64 passed`）、Mock smoke `1 passed, 7 deselected`、frontend build、Compose config 与 `git diff --check`。本维护不迁移当前个人 SQLite、不改变 schema/API/protocol/governance，也不把允许配置 3–32 个 Worker写成容量资格；当前资格仍仅覆盖 1–2 个 Worker。实现 commit/push 和 exact-SHA CI 尚待完成，因此状态保持 `in_progress`，P2-07 仍为下一独立切片。
+- 终审修复后的完整本地门禁已通过：`make lint`（Ruff/format 160 files、ESLint、TypeScript）、`make test`（backend `1003 passed, 35 skipped`、frontend `64 passed`）、Mock smoke `1 passed, 7 deselected`、frontend build、Compose config 与 `git diff --check`。实现 SHA [`b06594c2df67d6e2a8b117651b193cd0fa409bf5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/b06594c2df67d6e2a8b117651b193cd0fa409bf5) 已普通 push，其精确 SHA 的 GitHub Actions [run `33299883513`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33299883513) 四个必需 job 全部成功，因此该维护为 `completed`。它不迁移当前个人 SQLite、不改变 schema/API/protocol/governance，也不把允许配置 3–32 个 Worker写成容量资格；当前资格仍仅覆盖 1–2 个 Worker，P2-07 仍为下一独立切片。
 
 ## 已通过候选门禁的 Phase 2 切片
 
@@ -167,7 +167,7 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 | 2026-08-30 observational overdraw 修复 | backend `946 passed, 33 skipped`；真实 PG+Redis integration `33 passed`；双方言 migration 往返/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、real-Compose `9/9`、Compose config 与当前库 backup/migrate/check 通过 | 当前 SQLite head=`20260830_0007`，scope `4→0`，7 Responses/7 ledger/407 input/599 output、13 表行数、quick/FK 保持；无真实 Provider；`cb00924…` 的 run `33271095910` 4/4 成功 |
 | 2026-08-30 Run Detail 指标修复 | backend API/Smoke 目标 `11 passed`、frontend Run Detail/format `20 passed`；完整 backend `951 passed, 33 skipped`、frontend `47 passed`；lint/build/Mock smoke/Compose config/实页验收通过 | 目标 Run 19/17/2、已知 Token `45,509/4,561,625` 和 `196/198` 覆盖可见；无真实 Provider；`0003e429…` 的 run `33286730109` 4/4 成功 |
 | P3-06 Run Detail 热力图/live metrics | 初版 cursor 后端 red suite `4 failed`（预期且合同已废弃）；fixed-block backend/frontend target `37/32 passed`（20 Run Detail + 12 heatmap）；完整 backend `964 passed, 33 skipped`、frontend `64 passed`；lint/smoke/build/config/目标 Run 浏览器验收通过 | `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已 push；PR #5 exact-SHA run `33289522923` 4/4；切片 `completed`，Phase 3 仍 `in_progress`，P2-07 为下一任务 |
-| 2026-08-30 多 Worker评测入口 | 启动器/fake Compose `42 passed`；隔离 PostgreSQL 16 首次因未迁移在 fixture setup 报 `UndefinedTable`，迁移到 `0007` 后跨 Benchmark/唯一 lease `2 passed`；终审后的 fresh/watermark 与 exited-replica 回归、真实 Compose `2→1→2` gauges/cleanup 通过 | 终审后完整 `make test` 为 backend `1003 passed, 35 skipped`、frontend `64 passed`，lint/Mock smoke/build/config/diff check 全绿；implementation push 与 exact-SHA CI 待完成，状态 `in_progress` |
+| 2026-08-30 多 Worker评测入口 | 启动器/fake Compose `42 passed`；隔离 PostgreSQL 16 首次因未迁移在 fixture setup 报 `UndefinedTable`，迁移到 `0007` 后跨 Benchmark/唯一 lease `2 passed`；终审后的 fresh/watermark 与 exited-replica 回归、真实 Compose `2→1→2` gauges/cleanup 通过 | 完整 backend `1003 passed, 35 skipped`、frontend `64 passed`，lint/Mock smoke/build/config/diff check 全绿；`b06594c…` 的 exact-SHA run `33299883513` 4/4，维护 `completed` |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见上方独立行 |
 | P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见上方独立行 |
@@ -201,4 +201,4 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 现记录多 Worker日常入口维护的进行中门禁，并继续提供 P2-07 最小只读 recovery verifier 入口。该维护不改变数据库/API/protocol或 P2-07 范围；只有完整本地门禁、push 与 exact-SHA CI 完成后才可标为 `completed`。P2-07 仍是其后的下一独立任务并保持 `planned`，Phase 2 与 Phase 3 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 现记录多 Worker日常入口维护已完成本地/远程门禁，并继续提供 P2-07 最小只读 recovery verifier 入口。该维护不改变数据库/API/protocol或 P2-07 范围。P2-07 是下一独立任务并保持 `planned`，Phase 2 与 Phase 3 继续保持 `in_progress`。
