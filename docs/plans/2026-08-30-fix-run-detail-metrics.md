@@ -1,7 +1,7 @@
 # 修复 Run Detail 错题与部分 Token 展示执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed
 - Created: 2026-08-30
 - Updated: 2026-08-30
 - Related requirements: FR-RUN-08、FR-RUN-10、FR-API-08、FR-UI-05、NFR-UX-01、TST-04
@@ -57,7 +57,7 @@ Run `a3de7e4d-40b2-4d8c-994b-c713047393ae` 有 198 条 Response：179 条正确�
    - 修改范围：`backend/app/api/v1/runs.py`、`backend/app/schemas/evaluation_response.py`、`frontend/src/api/types.ts`、`frontend/src/api/client.ts`、`frontend/src/pages/RunDetailPage.tsx`、必要格式函数。
    - 操作：单次聚合返回 count/sum；UI 区分精确与部分 Token，并拆分未得分/普通答错/异常。
    - 完成判据：目标后端与前端测试通过，既有分页/轮询行为不变。
-3. [in_progress] **文档、完整验证与交付复核**
+3. [completed] **文档、完整验证与交付复核**
    - 修改范围：API、TESTING、CHANGELOG、PROJECT_STATUS、Phase 2/3、NEXT_TASK、工作日志和本计划。
    - 操作：记录兼容语义、运行目标测试、lint、完整 test、smoke、build、Compose config，检查 diff/秘密/状态。
    - 完成判据：本地门禁通过并记录真实结果；按仓库规则 commit/push 后等待精确 SHA CI。
@@ -99,10 +99,11 @@ Run `a3de7e4d-40b2-4d8c-994b-c713047393ae` 有 198 条 Response：179 条正确�
 
 ## Completion evidence
 
-- 修改文件：待完成
-- 实际命令：待完成
-- 验收对应：待完成
-- 未运行：待完成
+- 修改文件：后端 Responses Schema/API、前端 API 类型/Run Detail、后端与前端回归，以及 README/API/TESTING/CHANGELOG/PROJECT_STATUS/Phase/NEXT_TASK/计划/工作日志共 18 个文件。
+- 实际命令：目标后端 `11 passed`、目标前端 `20 passed`；`make lint`、`make test`（backend `951 passed, 33 skipped`；frontend `47 passed`）、`make smoke`、frontend build、Compose config、目标本地 API/Browser 实页核对均通过。
+- 验收对应：目标 Run 实页显示未得分/普通答错/执行异常/正确=`19/17/2/179`，已知 input/output=`45,509/4,561,625`，覆盖=`196/198`；第二页显示 8 条未得分与 2 条执行异常。
+- 远程证据：实现 commit [`0003e4291769a851005ba46c7e59b156a6b789eb`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/0003e4291769a851005ba46c7e59b156a6b789eb) 已 push 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)；精确 SHA 的 [CI run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 四个 job 全部成功。
+- 未运行：真实 Provider（有意）；没有 API Key、历史数据写入或模型费用。实现精确 SHA 已由远程真实 PostgreSQL/Redis integration 与 real-Compose acceptance 覆盖。
 - 已知问题：两条历史异常调用的真实 usage 不可恢复；已知小计不等于 Provider 账单
 
 ## Decision and discovery log

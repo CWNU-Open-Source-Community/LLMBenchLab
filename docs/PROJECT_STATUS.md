@@ -16,6 +16,8 @@
 
 公开仓库：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab)，当前开发分支为 `codex/complete-evaluation-workflow`。P2-06 实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已普通 push 并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 GitHub Actions [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 四个必需 job 全部成功；绑定该 clean SHA 的 capacity 与 9/9 acceptance 也已通过。Evidence closeout 文档 commit [`ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6) 已 push，其精确 SHA 的 GitHub Actions [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 四个必需 job 全部成功，因此 P2-06 已完成仓库级收尾并标记为 `completed`。[ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / `20260829_0006` 数据库兼容修复实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 已普通 push，其精确 SHA 的 GitHub Actions [run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 四个必需 job 全部成功，因此该维护任务为 `completed`。[ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md) / data-only `20260830_0007` 已修复 observational input estimate 误触发 overdraw；本地完整门禁、当前个人 SQLite 数据验真与最终 SHA [`cb00924ea3ba3d01ce5bc322b7eabdae1345baf3`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/cb00924ea3ba3d01ce5bc322b7eabdae1345baf3) 的 [run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 全部通过，该维护为 `completed`。Phase 2 仍为 `in_progress`；P2-07 已建立 ADR-0016、独立计划和工作日志，状态为 `planned`，功能实现尚未开始。历史 P2-01 位于 [PR #2](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/2)：实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run `33146681285`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run `33150080341`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
 
+Run Detail 指标维护实现 SHA [`0003e4291769a851005ba46c7e59b156a6b789eb`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/0003e4291769a851005ba46c7e59b156a6b789eb) 已普通 push 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)；其精确 SHA 的 [GitHub Actions run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 对 backend、真实 PostgreSQL/Redis integration、real-Compose acceptance 和 frontend 四个 job 全部成功，因此该维护为 `completed`。它不改变 Phase 2/3 或 P2-07 状态。
+
 ## 已交付基线
 
 - Phase 0/1 的治理、架构、协议、数据格式、ADR、FastAPI/SQLAlchemy/Alembic、React/TypeScript、Mock 垂直链路、三类 Evaluator、Demo 数据、API/UI、离线测试和开源流程。
@@ -78,11 +80,11 @@
 - 应用 Alembic head 已前进到 data-only `20260830_0007`。该 migration 不改 schema、ledger、actual usage、Response、audit 或 Run 终态，只重算 `governance_scopes.overdrawn`；upgrade/downgrade 在任何更新前拒绝 active reservation。前端 overdrawn 文案改为“实际用量曾被判定超过预留”，既适用于新 hard overdraw，也不会误述升级前保留的历史终态。
 - 本地验证已完成：backend `946 passed, 33 skipped`，真实 PostgreSQL+Redis integration `33 passed`，双方言 migration upgrade/downgrade/upgrade/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、real-Compose `9/9` 与 Compose config 均通过。当前个人 SQLite 已到 `0007`；四层 scope `overdrawn` 从 4 降为 0，7 Responses/7 ledger、407 input/599 output、13 张业务表行数均保留，`quick_check=ok`、FK=0。未调用真实 Provider。首次实现 SHA 的 acceptance-only `float(None)` 失败已保留，最终修正 SHA `cb00924…` 的 run `33271095910` 4/4 成功，因此本维护为 `completed`。
 
-## 2026-08-30 Run Detail 错题与部分 Token 展示修复（`in_progress`）
+## 2026-08-30 Run Detail 错题与部分 Token 展示修复（`completed`）
 
 - 目标 Run `a3de7e4d-40b2-4d8c-994b-c713047393ae` 的 198 条证据实际为正确 179、普通答错 17、执行异常 2；旧页面把只统计异常的 `error_questions=2` 标成“错误题”。页面现显示未得分 19，并明确拆分三类数量；当前页也分别统计未得分与执行异常。
 - 196/198 条 Response 有 usage，已知输入 45,509、输出 4,561,625。protocol-v1 精确 Run Token 继续因两条缺失而保持 `null`；Responses API 追加分页无关的输入/输出已知小计和独立覆盖数，页面显示“已知小计”和“完整总量未知”，不会修改历史数据或冒充 Provider 账单。
-- API/UI、OpenAPI、零/全/部分/非对称 usage、合法零 Token、分页、并行快照竞态与页内错题拆分的目标测试已通过；完整本地门禁、commit/push 与精确 SHA CI 尚待完成。本维护不改变 Phase 2/3 或 P2-07 状态。
+- API/UI、OpenAPI、零/全/部分/非对称 usage、合法零 Token、分页、并行快照竞态与页内错题拆分的目标测试、完整本地门禁和目标实页核对均通过。实现 commit `0003e429…` 已普通 push；PR #5 的精确 SHA CI run `33286730109` 4/4 成功。本维护不改变 Phase 2/3 或 P2-07 状态。
 
 ## 状态与后续
 
@@ -91,7 +93,7 @@
 - 本地数据恢复与静默启动：状态为 `completed`；实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 已 push，精确 SHA run `33265171953` 4/4 成功。
 - 已下载标准评测集本地加载：状态为 `completed`；三个现有正式 ZIP 已导入并完成本地数据库/API/目标测试验证，`0163b67…` 的 run `33266167547` 4/4 成功。
 - observational Token overdraw 修复：状态为 `completed`；目标 head `0007`、本地完整验证、当前库迁移、最终修正 commit/push 与 exact-SHA CI 4/4 均完成。
-- Run Detail 错题与部分 Token 展示修复：状态为 `in_progress`；目标实现与回归已完成，完整本地/远程门禁尚待完成。
+- Run Detail 错题与部分 Token 展示修复：状态为 `completed`；实现 SHA `0003e429…` 已 push，PR #5 的精确 SHA CI run `33286730109` 4/4 成功。
 - P2-07：状态为 `planned`，已建立 [ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)、[独立计划](plans/2026-08-28-phase-2-recovery-operations.md) 和 [工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的功能实现尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。P2-07 recovery-manifest-v1 的尚未实施 exact head 现为 `20260830_0007`。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
@@ -135,7 +137,7 @@
 | 2026-08-30 本地恢复/静默启动 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、恢复库 digest/quick/FK/head 与真实 API/Web 读取通过 | 默认库恢复 `1/1/15/1/15`；`5075bdb…` 的 run `33265171953` 4/4 成功，不改变 P2-07 |
 | 2026-08-30 标准评测集本地加载 | 三个 ZIP Loader 校验通过；API 导入 `201/201/201`；数据库/API 对账为 `4` Benchmarks、`24,277` Questions；`quick_check=ok`、FK `0`、head `0006`；目标测试 `40 passed` | 本地加载完成，原 Model/Run/Response 保持；`0163b67…` 的 run `33266167547` 4/4 成功，无 Provider 调用 |
 | 2026-08-30 observational overdraw 修复 | backend `946 passed, 33 skipped`；真实 PG+Redis integration `33 passed`；双方言 migration 往返/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、real-Compose `9/9`、Compose config 与当前库 backup/migrate/check 通过 | 当前 SQLite head=`20260830_0007`，scope `4→0`，7 Responses/7 ledger/407 input/599 output、13 表行数、quick/FK 保持；无真实 Provider；`cb00924…` 的 run `33271095910` 4/4 成功 |
-| 2026-08-30 Run Detail 指标修复（本地门禁） | backend API/Smoke 目标 `11 passed`、frontend Run Detail/format `20 passed`；完整 backend `951 passed, 33 skipped`、frontend `47 passed`；lint/build/Mock smoke/Compose config/实页验收通过 | 目标 Run 19/17/2、已知 Token `45,509/4,561,625` 和 `196/198` 覆盖可见；无真实 Provider；commit/push 与精确 SHA CI 待完成 |
+| 2026-08-30 Run Detail 指标修复 | backend API/Smoke 目标 `11 passed`、frontend Run Detail/format `20 passed`；完整 backend `951 passed, 33 skipped`、frontend `47 passed`；lint/build/Mock smoke/Compose config/实页验收通过 | 目标 Run 19/17/2、已知 Token `45,509/4,561,625` 和 `196/198` 覆盖可见；无真实 Provider；`0003e429…` 的 run `33286730109` 4/4 成功 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见上方独立行 |
 | P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见上方独立行 |
@@ -166,4 +168,4 @@
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。当前先完成 Run Detail 错题与部分 Token 展示修复的完整门禁；之后入口仍为 P2-07 最小只读 recovery verifier。P2-06 已完成仓库级收尾，P2-07 仍为 `planned`；Phase 2 与 Phase 3 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。Run Detail 错题与部分 Token 展示修复已完成本地/远程门禁；后续入口恢复为 P2-07 最小只读 recovery verifier。P2-06 已完成仓库级收尾，P2-07 仍为 `planned`；Phase 2 与 Phase 3 继续保持 `in_progress`。

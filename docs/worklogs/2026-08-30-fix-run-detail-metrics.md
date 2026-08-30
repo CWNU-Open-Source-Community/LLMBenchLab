@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)、[Phase 3 — Benchmarks](../phases/PHASE-3-BENCHMARKS.md)
 - 关联计划：[2026-08-30-fix-run-detail-metrics.md](../plans/2026-08-30-fix-run-detail-metrics.md)
 - 关联 ADR：无；不改变既有协议/架构决定
-- 最终状态：in_progress
+- 最终状态：completed
 
 ## 初始仓库状态
 
@@ -62,7 +62,7 @@
 
 1. [completed] 冻结 API/UI 语义并添加失败回归。
 2. [completed] 实现后端只读聚合和前端展示。
-3. [in_progress] 更新文档并完成本地/远程门禁。
+3. [completed] 更新文档并完成本地/远程门禁。
 
 ## 实际修改
 
@@ -106,6 +106,9 @@
 | 本地 API 读取目标 Run Responses summary | 真实目标记录只读验真 | 0 | total 198；known input/output `45,509/4,561,625`；两侧 `196/198` |
 | Browser 打开目标 Run Detail、翻到第二页并检查 console | 实页视觉/交互验收 | 0 | 首屏 19/17/2、已知小计 460.7万；第二页 8 未得分/2 执行异常；console error 0 |
 | `git diff --check` + added diff/untracked 高置信 secret scan | 最终范围、空白与秘密复核 | 0 | 无 whitespace error、无 Key/Bearer/private-key 命中；18 个候选文件均在计划范围 |
+| `git commit -m "fix: clarify run detail result metrics"` / `git push origin codex/complete-evaluation-workflow` | 形成并发布实现阶段 | 0 | commit `0003e4291769a851005ba46c7e59b156a6b789eb`；远端分支与本地一致 |
+| `gh pr create ...` | 触发分支远程门禁 | 0 | [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5) 已创建；未执行合并 |
+| `gh run watch 33286730109 --exit-status` | 等待实现精确 SHA CI | 0 | backend、真实 PostgreSQL/Redis integration、real-Compose acceptance、frontend 4/4 success |
 
 ## 测试结果
 
@@ -116,11 +119,11 @@
 
 ## 未运行验证
 
-- 真实 Provider、真实 PostgreSQL/Redis integration 与 real-Compose acceptance 未运行：本修复是读取 API/UI 的 additive maintenance，完整自动化和既有离线 Smoke 已覆盖；没有 API Key，也不需要产生模型费用。远程 CI 尚待执行。
+- 真实 Provider 未运行（有意）：没有 API Key，也不需要产生模型费用。本地没有另跑真实 PostgreSQL/Redis integration 或 real-Compose acceptance；实现精确 SHA 的远程 CI 已实际运行这两项并通过。
 
 ## 未完成项
 
-- 本地实现、文档和门禁已完成；只剩最终范围/秘密复核、commit/push 与精确 SHA CI。
+- 无功能、测试或远程门禁未完成项。PR #5 保持打开；合并不在本次授权范围，也不是本阶段 commit/push/exact-SHA CI 的完成条件。
 
 ## 已知问题与限制
 
@@ -132,16 +135,16 @@
 - 真实 Provider API 调用：否；只读取本地 API 的目标 Run 汇总
 - 日志/API 脱敏：本任务不新增正文或 Provider-controlled 聚合字段
 - 危险 Git 操作（force push/reset 等）：无
-- 阶段 push：尚未执行
-- 远程 CI：尚未执行
+- 阶段 push：实现 commit `0003e429…` 已普通 push；无 force push
+- 远程 CI：[run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 对实现精确 SHA 4/4 success；只有 Node.js 20 action deprecation annotation，无失败
 - 遗留安全风险：已知 Token 小计不是 Provider 账单真值，必须保持明确文案
 
 ## 结果与下一步
 
-当前为 `in_progress`。本地实现与完整门禁已经完成；下一步做最终秘密/范围复核，随后按仓库规则 commit/push 并等待精确 SHA CI。
+本维护为 `completed`：实现、文档、本地门禁、普通 push 和实现精确 SHA CI 均已闭环。下一独立任务仍是 `docs/NEXT_TASK.md` 中的 P2-07 最小只读 recovery verifier；本次不合并 PR、不开始 P2-07。
 
 ## 最终 Git 状态
 
 ```text
-待任务结束时填写
+实现 commit/push 后 clean；证据收尾文档将形成独立 commit，最终状态在交付回复中复核。
 ```

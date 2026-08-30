@@ -93,7 +93,7 @@
 - [x] **P2-06 仓库级闭环完成**：clean implementation commit `9a20676dcf545040782f04c166205d0043345753` 已 push，clean capacity/9/9 acceptance 与 [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 通过；evidence-doc commit `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 也精确 4/4 通过。
 - [x] **0004 历史索引兼容修复完成**：schema-equivalent `20260829_0006`、仅允许三个已知索引缺失子集的可重入 SQLite preflight、PostgreSQL `0005` metadata 白名单控制流、重复 active/额外 drift 拒绝、真实失败备份副本升级及本地门禁均通过；实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 的 [run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 4/4 成功。historical PG missing-index 分支仍仅有 Mock 回归，标准 CI 真实 PG 只覆盖 fresh canonical 分支。
 - [x] **Observational overdraw 修复完成**：目标行为与 `0007` migration 已通过本地完整测试、双方言 migration 和当前个人 SQLite 验真；最终修正 SHA [`cb00924ea3ba3d01ce5bc322b7eabdae1345baf3`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/cb00924ea3ba3d01ce5bc322b7eabdae1345baf3) 的 [run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 成功。
-- [ ] **Run Detail 指标维护交付中**：API/UI 与零/全/部分/非对称 usage、页内错题拆分及并行快照回归已实现并通过目标测试；完整本地门禁、commit/push 与精确 SHA CI 尚待完成。
+- [x] **Run Detail 指标维护完成**：API/UI 与零/全/部分/非对称 usage、页内错题拆分及并行快照回归已实现；本地 lint/test/smoke/build/config 和目标实页核对通过。实现 SHA [`0003e4291769a851005ba46c7e59b156a6b789eb`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/0003e4291769a851005ba46c7e59b156a6b789eb) 已 push，[PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5) 的 [run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 4/4 成功；不改变 P2-07 或 Phase 2 整体状态。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
 ## 已实际运行的中间证据
@@ -156,4 +156,4 @@
 
 ## 状态
 
-`in_progress`。P2-01、P2-06 与 observational overdraw 维护已完成，P2-05 主切片已交付。P2-07 状态为 `planned`，功能尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+`in_progress`。P2-01、P2-06、observational overdraw 与 Run Detail 指标维护已完成，P2-05 主切片已交付。P2-07 状态为 `planned`，功能尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
