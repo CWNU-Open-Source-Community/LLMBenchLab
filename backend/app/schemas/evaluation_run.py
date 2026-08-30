@@ -20,8 +20,8 @@ from app.schemas.base import APIModel, ORMModel
 class EvaluationRunCreate(APIModel):
     model_id: str = Field(min_length=1, max_length=36)
     benchmark_id: str = Field(min_length=1, max_length=36)
-    temperature: float = Field(default=0.0, ge=0, le=2)
-    top_p: float = Field(default=1.0, gt=0, le=1)
+    temperature: float | None = Field(default=0.0, ge=0, le=2)
+    top_p: float | None = Field(default=1.0, gt=0, le=1)
     max_tokens: int | None = Field(default=256, ge=1, le=MAX_GENERATION_TOKENS)
     seed: int | None = Field(default=42, ge=-(2**31), le=2**31 - 1)
     system_prompt: str | None = Field(default=None, max_length=4000)

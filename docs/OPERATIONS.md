@@ -397,25 +397,29 @@ llmbenchlab-audit-retention restore \
 
 退出码 `0` 表示已确认成功，`2` 表示在提交前安全失败，`3` 表示提交已成功但后验核验失败，`4` 表示 commit outcome unknown。遇到 `3` 或 `4` 不得盲目重跑 mutation：保留 archive/count/digest，先执行只读 `reconcile` 判定数据库与 archive 的精确关系，再由操作者决定恢复或删除。Archive 与数据库/keyring 备份是不同资产；archive 不含 credential ciphertext/nonce/keyring，也不能单独恢复 stored Provider Key。
 
-## 10. 0007、0006、0005 与 0004 安全回滚
+## 10. 0008、0007、0006、0005 与 0004 安全回滚
 
-### 10.1 Observational overdraw 数据修复 0007
+### 10.1 Provider API 协议约束 0008
 
-当前 head `20260830_0007` 不新增表、字段或索引，也不修改 never-delete reservation、Provider actual usage、Response、audit 或 Run 终态。它只关联 managed reservation 对应的 `evaluation_runs.input_token_reservation`，按以下规则重算每个 `governance_scopes.overdrawn`：input/cost 维度只有在 Run 冻结了显式 input reservation 时参与；显式 `max_tokens` 形成的 output reservation 独立参与；没有关联 Run 的内部 synthetic reservation 继续把调用者提供的值视为显式。
+当前 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并同时替换 Provider 类型 check 与远程配置 check，使 `openai_responses`、`anthropic_messages` 成为显式 Adapter 值；既有 `mock`/`openai_compatible` 行不改写，13 表、Run/Response、ledger、audit 与 archive-v1 字段不变。`0008 -> 0007` 会先锁定 Model 表并检查新类型；只要存在任一新协议 Model 就在第一条 DDL 前拒绝，否则恢复 `VARCHAR(17)` 与两个旧 check。安全回退必须先停止 API/Worker/CLI writer，确认无 active Run，并在 0008 应用中显式删除或转换这些配置；不要直接改 check、删历史 Run 或绕过凭据/active-Run 门禁。
+
+### 10.2 Observational overdraw 数据修复 0007
+
+`20260830_0007` 不新增表、字段或索引，也不修改 never-delete reservation、Provider actual usage、Response、audit 或 Run 终态。它只关联 managed reservation 对应的 `evaluation_runs.input_token_reservation`，按以下规则重算每个 `governance_scopes.overdrawn`：input/cost 维度只有在 Run 冻结了显式 input reservation 时参与；显式 `max_tokens` 形成的 output reservation 独立参与；没有关联 Run 的内部 synthetic reservation 继续把调用者提供的值视为显式。
 
 `0006 -> 0007` 和 `0007 -> 0006` 都会在任何 materialized 更新前拒绝仍为 `reserved` 或 `send_started` 的 attempt。标准维护流程是停止 API/Worker/CLI writer，确认 active reservation 为零并创建一致性备份，再由唯一 migration owner 执行 `make migrate`。直接 `UPDATE governance_scopes`、删除 ledger 或裁剪 actual usage 均不受支持。降级到 `0006` 只按旧谓词重算 flag，让旧应用看到与旧 runtime 一致的 projection；它不会恢复旧代码、删除事实或把历史失败 Run 改成成功。
 
-### 10.2 Governance index compatibility repair 0006
+### 10.3 Governance index compatibility repair 0006
 
 revision `20260829_0006` 不增加新的业务字段或表，只为曾执行早期 `0004` 变体的数据库条件补齐 `ix_evaluation_runs_started_at_id`、`ix_evaluation_runs_finished_at_id` 与 `uq_governance_policies_single_active`。`make migrate` 只在 revision fingerprint 为 canonical，或缺失项是这三个索引的非空子集时放行，并先创建 SQLite 一致性备份；这允许在 SQLite repair DDL 部分完成但 marker 仍为 `0005` 时安全重入。PostgreSQL `0005` 也必须通过 metadata drift 校验。若有多条 active policy、错误的同名索引或任何额外 drift，必须人工核对，工具不会自动停用 policy。`0006 -> 0005` 保留这三个 canonical `0004` 索引，因此是有意的 no-op downgrade。
 
-### 10.3 Worker progress / retention revision 0005
+### 10.4 Worker progress / retention revision 0005
 
 revision `20260828_0005` 增加 `worker_processes` 和 audit retention/exporter 扫描索引。`0005 -> 0004` 在第一条 DDL 前检查 Worker process facts；只要表中存在任何 generation 行就拒绝，以免静默丢失注册、进展或 graceful-stop 证据。安全降级必须先停止 Worker、归档需要保留的 process facts，并由明确的数据生命周期审批清空；正常代码回滚应保留 0005 schema 并优先向前修复。
 
 正式迁移验收同时保留两层独立门禁：populated 0005 数据库拒绝跨过 Worker progress revision且 revision/核心事实不变；隔离空库允许 `0005 -> 0004 -> 0005`。这不会替代下节已有的 populated 0004 governance 拒绝与空库 `0004 -> 0003 -> 0004` 往返。
 
-### 10.4 Governance/audit revision 0004
+### 10.5 Governance/audit revision 0004
 
 revision `20260827_0004` 增加 policy、scope、minute bucket、question execution、Provider attempt ledger、typed audit、Run governance/fairness 字段及 Response Provider metadata。downgrade guard 在第一条 DDL 前检查数据损失风险。
 

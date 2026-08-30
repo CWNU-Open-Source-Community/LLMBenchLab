@@ -282,7 +282,10 @@ def test_archive_v1_rejects_unsupported_source_revision_on_write_and_read(tmp_pa
         verify_archive(path)
 
 
-@pytest.mark.parametrize("source_revision", ["20260829_0006", "20260830_0007"])
+@pytest.mark.parametrize(
+    "source_revision",
+    ["20260829_0006", "20260830_0007", "20260830_0008"],
+)
 def test_archive_v1_accepts_compatible_repair_revision(source_revision: str) -> None:
     data, _digest = build_archive_bytes(
         (),

@@ -2,7 +2,7 @@
 
 ## 1. 测试原则
 
-LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模型费用。自动化测试和 CI 只能使用 `MockModelAdapter`，或使用进程内 `httpx.MockTransport` 验证 OpenAI-compatible 协议；不得访问真实 Provider，不要求 API Key，不把“本机碰巧可用”当作通过证据。
+LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模型费用。自动化测试和 CI 只能使用 `MockModelAdapter`，或使用进程内 `httpx.MockTransport` 验证 Chat Completions、OpenAI Responses 与 Anthropic Messages 协议；不得访问真实 Provider，不要求 API Key，不把“本机碰巧可用”当作通过证据。
 
 每次报告测试结果时必须写明实际命令、通过/失败、测试数量、失败原因和未运行项。没有执行的 Docker、浏览器或联网验证不能写成通过。
 
@@ -179,22 +179,24 @@ docker compose config --quiet
 
 ### 5.2 Adapter 单元测试
 
-`test_adapters.py` 覆盖：
+`test_adapters.py` 覆盖 Mock 与既有 Chat transport；`test_provider_protocol_adapters.py` 覆盖三协议 request/response 合同，`test_provider_protocol_plumbing.py` 覆盖 API/Run/Runner/CLI、typed retry 与 attempt ledger 联动：
 
 - Mock 输出、Token、延迟、request ID 可预测且不进行 I/O。
 - Mock 可注入分类错误，用于验证单题故障隔离；latency/Token/usage shape 等确定性本地配置在 reserve 前全部验证，非法配置断言治理 hook 零调用，成功与模拟 Provider error 断言 reserve→mark→actual/conservative finish 顺序。
-- OpenAI-compatible 的 Chat Completions URL、messages、`Accept: text/event-stream`、`stream:true`、`stream_options.include_usage:true` 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
+- Chat Completions 的 URL、messages、`Accept: text/event-stream`、`stream:true`、`stream_options.include_usage:true` 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
+- Responses 的 `/responses`、Bearer header、`input`、`max_output_tokens`、普通 JSON `output` 与 typed SSE `response.output_text.delta`/`response.completed`；Messages 的 `/messages`、`x-api-key`/`anthropic-version`、顶层 system、有限 `max_tokens`、普通 JSON `content[].text` 与 typed SSE `content_block_delta`/`message_stop`。
+- 根 URL 与匹配完整 endpoint 均正确解析，已知跨协议后缀、Responses/Messages 非空 seed、Messages `temperature>1` 和 `max_tokens:null` 在 transport 零调用时稳定拒绝；请求/Model 默认均省略时，Responses/Messages 的 `temperature/top_p/seed` 快照为 `null` 且 Provider payload 不包含这些字段。
 - usage 缺失时 Token 字段为 `null`。
-- 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试。
-- 每个 OpenAI-compatible HTTP retry 都经过 request-local reserve→mark-send-started→finish hook；pre-send 失败 release，usage 完整 actual，transport/usage 缺失 conservative，settlement unknown 停止后续外发。
+- 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试；Responses 的 rate-limit/server typed error 与 Messages 的 `rate_limit_error`、`api_error`、`overloaded_error`、`timeout_error` 在 JSON/SSE 路径有限重试，Messages HTTP `529` 写入 Run retry snapshot，未知 typed error fail closed。
+- 每个远程协议 HTTP retry 都经过 request-local reserve→mark-send-started→finish hook；pre-send 失败 release，usage 完整 actual，transport/usage 缺失 conservative，settlement unknown 停止后续外发。
 - 远端 HTTPS 强制、loopback HTTP 例外，以及在发送 Key 前拒绝远端明文 HTTP。
 - 真 SSE 的任意网络/UTF-8 拆包与合包、LF/CRLF/独立 CR、BOM、comment ping、多 `data` 行、role/null delta、reasoning/timings 扩展忽略、finish 后继续读取可选 usage-only 块至 `[DONE]`，以及普通 JSON fallback。
-- 非法 UTF-8/JSON/字段、SSE 内 Provider error、缺失 `[DONE]`、transport 中断的有限重试，以及同一 Adapter 并发请求的 request-local 状态隔离。
-- 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat JSON 4 MiB/错误 64 KiB、SSE wire 64 MiB/单事件 1 MiB/聚合 content 4 MiB 的上限。
+- 非法 UTF-8/JSON/字段、SSE 内 Provider error、分别缺失 `[DONE]`/`response.completed`/`message_stop`、transport 中断的有限重试，以及同一 Adapter 并发请求的 request-local 状态隔离。
+- 模型发现按显式协议鉴权：Chat/Responses 使用 `Authorization: Bearer`，Messages 使用 `x-api-key` 与 `anthropic-version`；Messages 的 `has_more/last_id` 通过有界 `after_id` 分页聚合，并断言累计 100 页、60 秒 wall-clock、10,000 项、2 MiB、缺失/重复 cursor 边界 fail closed。发现与三类生成请求都使用 `Accept-Encoding: identity`、读取前拒绝压缩，并覆盖 JSON 4 MiB/错误 64 KiB、SSE wire 64 MiB/单事件 1 MiB/聚合 content 4 MiB 的上限。
 - legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；`finish_reason="length"` 的空输出分类为 `output_truncated`，普通空输出仍为 `empty_response`；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换，包括 Key 横跨 SSE delta 的聚合后替换。
-- 最终 `httpx.TransportError` 的安全 `AdapterError` 同时断言 `__cause__ is None`、`__context__ is None`，格式化 traceback 不含带 Authorization request 中的 canary Key。
+- 最终 transport、malformed JSON/SSE 或 oversized 响应的安全 `AdapterError` 同时断言 `__cause__ is None`、`__context__ is None`，格式化 traceback 不含带 `Authorization`/`x-api-key` request 中的 canary Key 或原始 Provider bytes。
 
-OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
+远程协议测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
 
 ### 5.3 Dataset Loader 单元测试
 
@@ -216,9 +218,9 @@ OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把
 - GPQA-Diamond 内层 CSV Hash、198 行约束、逐 Record ID 确定性选项重排、seed/domain 筛选，以及不携带作者/解释字段；
 - 输出 ZIP 再由普通 dataset-v1 Loader round-trip 校验。
 
-`test_provider_preflight.py` 只使用 `httpx.MockTransport`，覆盖 `/v1` 与完整 `/chat/completions` 的 `/models` 推导、远端 HTTP 拒绝、identity-only/2 MiB 发现响应、压缩体读取前拒绝、认证错误脱敏、发现模型 ID 反射当前 Key 时失败、唯一/多模型选择、最小 Chat canary 使用同一流式 payload/响应 Adapter、finish reason 脱敏，以及 canary 明确返回不同模型时失败。它不能证明任何真实 Provider 兼容，也不应改为读取开发者环境 Key。
+`test_provider_preflight.py` 只使用 `httpx.MockTransport`，覆盖 `/v1` 与完整 `/chat/completions`、`/responses`、`/messages` 的 `/models` 推导、远端 HTTP 拒绝、identity-only/2 MiB 发现响应、压缩体读取前拒绝、认证错误脱敏、发现模型 ID 反射当前 Key 时失败、唯一/多模型选择、按显式协议执行最小 canary、finish reason 脱敏，以及 canary 明确返回不同模型时失败。它不能证明任何真实 Provider 兼容，也不应改为读取开发者环境 Key。
 
-`test_evaluation_cli.py` 只做离线编排，覆盖无 `--api-key`、环境/隐藏输入生命周期、确认口令、含 HTTP retries 与剩余 Run attempts 的请求上界、profile 默认值、active Run 早拒绝、Run 创建/恢复/报告顺序、过期 incomplete lease 的 fenced reclaim 和 Key 值不持久化。它验证的是本地控制流，不证明真实 Provider 或操作系统级独占；人工 runbook 仍必须先停常规 API/Worker。
+`test_evaluation_cli.py` 只做离线编排，覆盖无 `--api-key`、环境/隐藏输入生命周期、确认口令、含 HTTP retries 与 `max_attempts - failed_attempt_count` 剩余预算的请求上界、profile/协议默认值、active Run 早拒绝、Run 创建/恢复/报告顺序、过期 incomplete lease 的 fenced reclaim 和 Key 值不持久化。它验证的是本地控制流，不证明真实 Provider 或操作系统级独占；人工 runbook 仍必须先停常规 API/Worker。
 
 `test_run_report.py` 使用临时数据库覆盖分页导出全部 Response、非重叠分组、三文件内容、目标拒绝覆盖、文件权限与秘密脱敏。回归还构造 failed Run 的陈旧汇总字段，验证 `summary.metrics` 从计划题与 Responses 派生、`metrics_provenance` 标出漂移，并与 groups/responses 保持同一口径。报告含题目和 raw response，因此测试 fixture 必须完全虚构。
 
@@ -290,7 +292,7 @@ uv run pytest tests/test_run_progress_api.py tests/test_response_metadata_api.py
 
 `backend/tests/test_migrations.py` 使用独立临时 SQLite 和 Alembic 子进程验证：
 
-- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260830_0007` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束、两个 bounded audit scan indexes，以及早期 `0004/0005` 三索引缺口、repair DDL 部分完成后的重入和 PostgreSQL `0005/0006` metadata 白名单/额外 drift 拒绝控制流（Mock）。
+- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260830_0008` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束、两个 bounded audit scan indexes，以及早期 `0004/0005` 三索引缺口、repair DDL 部分完成后的重入和 PostgreSQL `0005/0006/0007` metadata 白名单/额外 drift 拒绝控制流（Mock）。
 - 有模型、Benchmark、题目、Run 与 Response 的 legacy schema 被一致性备份、严格识别并无损升级；题目按原插入顺序回填 0-based `position`。
 - 与当前 metadata 一致但没有版本标记的库可安全收养，已有 head 重复 preflight 不生成多余备份。
 - 部分表、server default/CHECK 内容或重名、PK/UNIQUE/FK/index/partial index、trigger、SQLite conflict policy/generated column、`STRICT`/`WITHOUT ROWID` 等未知 drift 在创建版本标记和备份前被拒绝；已在 head 的库同样验证。
@@ -300,6 +302,7 @@ uv run pytest tests/test_run_progress_api.py tests/test_response_metadata_api.py
 - `0003 -> 0004` 把既有 Run 标为 `legacy_unmanaged` 并保留 protocol-v1 证据；任意 policy/scope/bucket/question execution/attempt ledger/audit、新 Run fairness/governance 字段或 Response Provider metadata 存在时，`0004 -> 0003` 必须在第一条 DDL 前拒绝。只有隔离空库用于 `0004 -> 0003 -> 0004` roundtrip。
 - `0004 -> 0005` 不回填虚构 Worker generation；任意 `worker_processes` 行都使 `0005 -> 0004` 在第一条 DDL 前拒绝。只有显式清空 process facts 或隔离空库才能往返，进入 `0004` 后原 governance/audit downgrade guard 继续生效。
 - `0006 -> 0007` 不改 schema 或历史 ledger/actual/Response，只重算 scope `overdrawn`：无显式 Run input bound 的 historical observational input/cost 超额被清除，显式 input/output 超额与由完整显式上界和价格派生的 cost 超额保留；`0007 -> 0006` 恢复旧派生结果。两个方向在任何更新前都拒绝 `reserved/send_started` active reservation。
+- `0007 -> 0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并同时替换 Provider 类型 check 与远程配置 check，旧 `mock`/`openai_compatible` 行值不改写；preflight 只接受精确 `17→18` type fingerprint，任意其他列宽/type drift 都拒绝。存在 `openai_responses` 或 `anthropic_messages` Model 时 downgrade 在第一条 DDL 前拒绝，隔离空库可往返。
 - 应用启动 revision 门禁拒绝未迁移库；测试夹具中的 `create_all` 仅用于隔离临时库，并显式 stamp 到与 metadata 对应的 head，不是运行时建表路径。
 
 目标化运行：
@@ -309,7 +312,7 @@ cd backend
 uv run pytest tests/test_migrations.py
 ```
 
-真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline并停止 API/Worker 后，从 head `0007` 发起 downgrade；`0007 -> 0006` 只恢复旧 overdraw 派生谓词，`0006 -> 0005` 为 schema no-op，随后 populated `0005 -> 0004` 在任何有损 DDL 前拒绝。另建隔离空 PostgreSQL 跨过 `0005 -> 0004 -> 0005`，最终 `upgrade head` 回到 `0007` 并 check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
+真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline并停止 API/Worker 后，从 head `0008` 发起 downgrade；因该基线没有新协议 Model，`0008 -> 0007` 会恢复 `VARCHAR(17)` 列宽、旧 Provider 类型 check 与旧远程配置 check，`0007 -> 0006` 只恢复旧 overdraw 派生谓词，`0006 -> 0005` 为 schema no-op，随后 populated `0005 -> 0004` 在任何有损 DDL 前拒绝。另建隔离空 PostgreSQL 跨过 `0005 -> 0004 -> 0005`，最终 `upgrade head` 回到 `0008` 并 check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
 
 ### 6.3 SQLite→PostgreSQL 导入
 
@@ -368,16 +371,16 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 自动化安全依赖多层约束：
 
 1. 所有端到端测试注册的 Provider 都是 `mock`；`MockModelAdapter.generate` 不执行网络 I/O。
-2. OpenAI-compatible 协议测试向 Adapter 注入 `httpx.MockTransport`，响应在进程内生成。
+2. Chat Completions、OpenAI Responses 与 Anthropic Messages 协议测试都向 Adapter 注入 `httpx.MockTransport` 或内存字节流，响应在进程内生成。
 3. 测试数据库和日志级别在应用导入前通过 fixture 环境变量设置，不读取开发 `.env`。
-4. CI 不配置任何真实 Provider Key；测试进程只生成独立临时 keyring 和明显虚构 canary。所有 OpenAI-compatible 路径必须注入 `MockTransport`，篡改/错误凭据路径在构造 Adapter 前失败。
+4. CI 不配置任何真实 Provider Key；测试进程只生成独立临时 keyring 和明显虚构 canary。所有三协议远程路径必须注入 `MockTransport`，篡改/错误凭据路径在构造 Adapter 前失败。
 5. 测试数据中的 Key 与域名必须是明显无效占位符，不从开发者环境复制。
 6. 标准数据测试必须注入内存 fetcher；CI 不运行在线 `llmbenchlab-evaluate prepare`，也不依赖本机已有 `artifacts/` 缓存。
 7. 报告和正式流程组件测试必须使用临时目录/临时数据库，不能读取或覆盖操作者已有正式 Run。
 
 当前测试套件没有操作系统级的“禁止所有出站网络”沙箱，因此最后一层仍是代码 Review：任何新增测试若构造真实 `httpx` client、读取开发 Key 或依赖在线服务，都必须被拒绝。公开 CI 加固可在后续增加 egress-disabled runner 或网络拦截 fixture；不能因为 CI runner 通常没有 Key 就认定任意网络访问安全。
 
-真实 OpenAI-compatible Provider 只允许作为用户主动执行、明确知晓费用和数据政策的可选手工验证；它不是 PR、CI、Smoke 或 Phase 2 可靠执行基础的完成条件。
+真实远程 Provider 只允许作为用户主动执行、显式选择 Chat/Responses/Messages 协议并明确知晓费用和数据政策的可选手工验证；它不是 PR、CI、Smoke 或 Phase 2 可靠执行基础的完成条件。
 
 真实模型验收应在隔离的本地数据库上先运行 `--limit`，人工核对模型发现、付费 canary、请求上界、逐题错误、Provider 账单和报告三文件，再决定是否 `--full`。这项手工操作不得写入自动化测试结果或 CI 通过数；如果本次没有真实 API URL/Key，就应明确记录“未运行”，不能用 MockTransport 结果替代“真实 Provider 已验证”。
 
@@ -391,8 +394,8 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 - `pending/running/completed/failed/cancelled` 五种状态标签。
 - Dashboard 主页面的 API 加载、严格总分、完成率、Run/模型/Benchmark 汇总与最近运行。
 - 后端不可达时的结构化、可重试错误状态。
-- Models password input、创建必填、编辑留空保留、origin 变化重输、请求 pending/成功/失败/关闭/切 Mock/unmount 清空、AbortSignal、恶意错误回显脱敏，以及不写 storage/console。
-- New Run 的 GPQA `8192/600s` 初始建议、MMLU-Pro official/direct 切换建议、手动预算不被覆盖、“应用建议”恢复、`max_tokens:null` Provider 托管提交，以及数字 `131072`/超时 `1800s` DOM 上限。
+- Models password input、创建必填、编辑留空保留、origin 变化重输、请求 pending/成功/失败/关闭/切 Mock/unmount 清空、AbortSignal、恶意错误回显脱敏、不写 storage/console，以及三协议 selector 的值、说明、匹配完整 endpoint 与提交 payload。
+- New Run 的 GPQA `8192/600s` 初始建议、MMLU-Pro official/direct 切换建议、手动预算不被覆盖、“应用建议”恢复、Chat/Responses 的 `max_tokens:null` Provider 托管提交，以及数字 `131072`/超时 `1800s` DOM 上限；协议切换还覆盖 Responses/Messages 默认 `temperature/top_p/seed=null`、逐 Model seed 恢复、Messages `temperature` DOM 上限 `1` 与有限 `max_tokens` 回落。
 - Runs 主导航、20 条 offset 分页、状态筛选、active Run 定时刷新、错误/空状态和详情链接。
 - Run Detail 返回 Runs 列表、终态停止轮询、逐题每页 100 条的 offset 导航，以及跨页序号/总数显示。
 - Run Detail 把全局和当前页的未得分与执行异常分开显示；Token 测试覆盖精确 Run 总量、部分已知小计、输入/输出非对称覆盖、零 usage、零 Response，以及并行 Run/Response 快照不一致时的保守降级。
@@ -579,7 +582,8 @@ make dev
 打开 `http://127.0.0.1:5173`，按顺序检查：
 
 - Dashboard 的模型、Benchmark、Run、得分/延迟/Token 汇总与最近运行来自 API，而非固定假数据。
-- Models 能新增、编辑、删除 Mock；选择 OpenAI-compatible 后出现 masked API Key 输入框，用户直接粘贴真实 Key，保存后输入框清空且卡片只显示“已安全保存”。编辑留空保留，改变 Provider origin 必须重输。
+- Models 能新增、编辑、删除 Mock，并显式选择 Chat Completions、OpenAI Responses 或 Anthropic Messages；远程类型出现 masked API Key 输入框，用户直接粘贴真实 Key，保存后输入框清空且卡片只显示“已安全保存”。编辑留空保留，改变 Provider origin 必须重输。
+- New Run 在 Responses/Messages 下禁用并清空 seed；Messages 禁用 Provider-managed 输出预算并回落到有限 Benchmark 建议值；切回 Chat 时恢复适用控件。
 - Benchmarks 能重载 Demo、显示版本/题数/Hash/许可证与醒目的 Demo 警告。
 - New Run 能选择 Model 与 Benchmark，区分 protocol-v1 API 默认和 Web 建议，允许数字预算或显式 Provider 托管，并把读取超时随创建请求提交。
 - Runs 列表能从主导航进入，按状态/20 条分页显示并链接回详情；Run Detail 独立轮询 Run、当前证据页与 progress index/变化 blocks，终态先到时追齐热力图再停止。切到证据第 2 页、切换 Run、隐藏/恢复标签页或 progress 暂时失败都不应清空当前页或混入旧 block。
@@ -614,7 +618,7 @@ make phase2-acceptance
 6. Redis 完全 stop/start；`live`/`health` 保持可用、`ready` 降级，API 仍以 `202` 提交数据库事实，Worker 仅靠 DB reconciliation 完成；Redis 恢复后新消息正常 ACK。
 7. Worker 停止时取消 pending Run；Worker 恢复消费旧通知后终态和 0 Response 不漂移。
 8. 运行中取消并再次 XADD 同一 Run；Response 数在取消后冻结，重复投递被 ACK 且 canonical snapshot 不变。
-9. 停止 API/Worker 后从 current head `20260830_0007` 尝试 downgrade 到 `0004`：data-only `0007 -> 0006` 只按旧谓词重算 overdrawn，schema-no-op `0006 -> 0005` 后，Worker progress rows 存在时必须在 `0005 -> 0004` 第一条有损 DDL 前拒绝，13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005`，最终回到 `0007` 并 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
+9. 停止 API/Worker 后从 current head `20260830_0008` 尝试 downgrade 到 `0004`：Mock baseline 没有新协议 Model，因此 `0008 -> 0007` 恢复 `VARCHAR(17)` 列宽、旧 Provider 类型 check 与旧远程配置 check；data-only `0007 -> 0006` 只按旧谓词重算 overdrawn，schema-no-op `0006 -> 0005` 后，Worker progress rows 存在时必须在 `0005 -> 0004` 第一条有损 DDL 前拒绝，13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005`，最终回到 `0008` 并 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
 
 任何一个场景失败、未运行、使用真实 Provider、最终 PEL/lag 非零或清理不完整，都不能把可靠执行基础写成通过。`--self-check-only` 只验证 Docker/Compose、隔离和清理 guard，不执行九场景，不能替代正式命令。精确 SHA `665244e…` 的最终本地运行已 9/9 通过；artifact 与 hash 见第 10.1 节。
 

@@ -20,6 +20,49 @@ from .base import (
 )
 from .mock import MockModelAdapter
 from .openai_compatible import OpenAICompatibleAdapter, sanitize_error_message
+from .provider_protocols import AnthropicMessagesAdapter, OpenAIResponsesAdapter
+
+
+def _remote_adapter_options(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Normalize the shared constructor surface for every remote adapter."""
+
+    options = dict(kwargs)
+    if "remote_model_name" not in options and "model_name" in options:
+        options["remote_model_name"] = options.pop("model_name")
+    aliases = {
+        "connect_timeout": "connect_timeout_seconds",
+        "read_timeout": "read_timeout_seconds",
+        "write_timeout": "write_timeout_seconds",
+        "pool_timeout": "pool_timeout_seconds",
+        "retry_count": "max_retries",
+        "backoff_base_seconds": "retry_backoff_base_seconds",
+        "backoff_cap_seconds": "retry_backoff_cap_seconds",
+    }
+    for old_name, new_name in aliases.items():
+        if old_name in options and new_name not in options:
+            options[new_name] = options.pop(old_name)
+    allowed = {
+        "base_url",
+        "remote_model_name",
+        "api_key_env",
+        "api_key",
+        "connect_timeout_seconds",
+        "read_timeout_seconds",
+        "write_timeout_seconds",
+        "pool_timeout_seconds",
+        "max_retries",
+        "retry_backoff_base_seconds",
+        "retry_backoff_cap_seconds",
+        "client",
+        "sleep",
+        "attempt_controller",
+    }
+    required = {"base_url", "remote_model_name"}
+    return {
+        key: value
+        for key, value in options.items()
+        if key in allowed and (value is not None or key in required)
+    }
 
 
 def build_adapter(provider_type: str, **kwargs: Any) -> ModelAdapter:
@@ -34,44 +77,11 @@ def build_adapter(provider_type: str, **kwargs: Any) -> ModelAdapter:
         }
         return MockModelAdapter(**mock_options)
     if normalized in {"openai", "openai_compatible"}:
-        options = dict(kwargs)
-        if "remote_model_name" not in options and "model_name" in options:
-            options["remote_model_name"] = options.pop("model_name")
-        aliases = {
-            "connect_timeout": "connect_timeout_seconds",
-            "read_timeout": "read_timeout_seconds",
-            "write_timeout": "write_timeout_seconds",
-            "pool_timeout": "pool_timeout_seconds",
-            "retry_count": "max_retries",
-            "backoff_base_seconds": "retry_backoff_base_seconds",
-            "backoff_cap_seconds": "retry_backoff_cap_seconds",
-        }
-        for old_name, new_name in aliases.items():
-            if old_name in options and new_name not in options:
-                options[new_name] = options.pop(old_name)
-        allowed = {
-            "base_url",
-            "remote_model_name",
-            "api_key_env",
-            "api_key",
-            "connect_timeout_seconds",
-            "read_timeout_seconds",
-            "write_timeout_seconds",
-            "pool_timeout_seconds",
-            "max_retries",
-            "retry_backoff_base_seconds",
-            "retry_backoff_cap_seconds",
-            "client",
-            "sleep",
-            "attempt_controller",
-        }
-        required = {"base_url", "remote_model_name"}
-        adapter_options = {
-            key: value
-            for key, value in options.items()
-            if key in allowed and (value is not None or key in required)
-        }
-        return OpenAICompatibleAdapter(**adapter_options)
+        return OpenAICompatibleAdapter(**_remote_adapter_options(kwargs))
+    if normalized == "openai_responses":
+        return OpenAIResponsesAdapter(**_remote_adapter_options(kwargs))
+    if normalized == "anthropic_messages":
+        return AnthropicMessagesAdapter(**_remote_adapter_options(kwargs))
     raise ValueError(f"Unsupported provider_type: {provider_type!r}")
 
 
@@ -80,6 +90,7 @@ OpenAICompatibleModelAdapter = OpenAICompatibleAdapter
 
 __all__ = [
     "AdapterError",
+    "AnthropicMessagesAdapter",
     "GenerationConfig",
     "Message",
     "MockModelAdapter",
@@ -87,6 +98,7 @@ __all__ = [
     "ModelGenerationResult",
     "OpenAICompatibleAdapter",
     "OpenAICompatibleModelAdapter",
+    "OpenAIResponsesAdapter",
     "ProviderAttemptContext",
     "ProviderAttemptController",
     "ProviderAttemptDisposition",

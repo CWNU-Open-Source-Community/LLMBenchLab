@@ -39,14 +39,17 @@ class Model(TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("name", name="uq_models_name"),
         CheckConstraint(
-            "provider_type IN ('mock', 'openai_compatible')", name="provider_type_values"
+            "provider_type IN ('mock', 'openai_compatible', 'openai_responses', "
+            "'anthropic_messages')",
+            name="provider_type_values",
         ),
         CheckConstraint(
             "credential_source IN ('none', 'environment', 'stored')",
             name="credential_source_values",
         ),
         CheckConstraint(
-            "provider_type != 'openai_compatible' OR "
+            "provider_type NOT IN "
+            "('openai_compatible', 'openai_responses', 'anthropic_messages') OR "
             "(base_url IS NOT NULL AND remote_model_name IS NOT NULL AND "
             "((credential_source = 'environment' AND api_key_env IS NOT NULL) OR "
             "(credential_source = 'stored' AND api_key_env IS NULL)))",

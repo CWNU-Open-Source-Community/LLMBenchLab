@@ -393,7 +393,7 @@ curl -sS http://127.0.0.1:8000/api/v1/info
   "protocol_version": "llmbenchlab-protocol-v1",
   "environment": "development",
   "capabilities": {
-    "providers": ["mock", "openai_compatible"],
+    "providers": ["mock", "openai_compatible", "openai_responses", "anthropic_messages"],
     "question_types": ["exact_match", "multiple_choice", "numeric"],
     "runner": "independent_database_lease_worker"
   }
@@ -446,7 +446,7 @@ curl -sS -X PUT http://127.0.0.1:8000/api/v1/governance/policy \
 | 字段 | 类型/默认值 | 规则 |
 | --- | --- | --- |
 | `name` | string，必填 | 去首尾空白后 `1..160`，全库唯一 |
-| `provider_type` | `mock` 或 `openai_compatible`，必填 | 首期封闭集合 |
+| `provider_type` | `mock`、`openai_compatible`、`openai_responses` 或 `anthropic_messages`，必填 | 显式 Adapter 封闭集合；旧 `openai_compatible` 继续表示 Chat Completions |
 | `base_url` | string/null | 绝对 URL；远端只允许 HTTPS，明文 HTTP 仅允许 loopback；禁止 URL 内嵌账号密码、query 与 fragment |
 | `remote_model_name` | string/null | 最长 256 |
 | `api_key` | string/null | **仅写入**；8–8192 bytes、无首尾空白、只含可见 ASCII；OpenAPI 标记 `writeOnly`，所有响应均省略 |
@@ -456,13 +456,13 @@ curl -sS -X PUT http://127.0.0.1:8000/api/v1/governance/policy \
 | `output_price_per_million` | number/null，默认 `null` | 有限非负数；Mock 未填时规范化为明确的 `0` |
 | `default_parameters` | object，默认 `{}` | 只允许 `temperature`、`top_p`、`max_tokens`、`seed`；其中 `max_tokens` 可为 `null` 或 `1..131072`，其余字段使用与 Run 相同的类型/范围约束 |
 
-`openai_compatible` 必须同时提供 `base_url`、`remote_model_name`，并在 `api_key` 与 `api_key_env` 中恰好选择一个；`mock` 的四个远端连接/凭据字段必须为空。Model Schema、Provider preflight 和 Adapter 都拒绝远端明文 HTTP，只有 `localhost` 或字面量 loopback IP 可使用 HTTP；HTTPS 私网、云元数据、DNS rebinding 和其他出站目标仍没有 allowlist，详见 [SECURITY.md](SECURITY.md)。
+三个远程类型都必须同时提供 `base_url`、`remote_model_name`，并在 `api_key` 与 `api_key_env` 中恰好选择一个；`mock` 的四个远端连接/凭据字段必须为空。协议必须显式选择：`openai_compatible`、`openai_responses`、`anthropic_messages` 分别使用 `/chat/completions`、`/responses`、`/messages`。根地址会追加所选后缀；与所选类型一致的完整 endpoint 保持不变；其他已知协议后缀在任何网络请求前拒绝。Model Schema、Provider preflight 和 Adapter 都拒绝远端明文 HTTP，只有 `localhost` 或字面量 loopback IP 可使用 HTTP；HTTPS 私网、云元数据、DNS rebinding 和其他出站目标仍没有 allowlist，详见 [SECURITY.md](SECURITY.md)。
 
 读响应额外包含两个派生字段：`credential_source` 为 `none | environment | stored`；`has_api_key` 只表示该 Model 当前拥有应用加密保存的 Web Key。环境变量模式即使 Worker 环境中已有值也仍返回 `has_api_key=false`。`stored` 模式在独立 `model_credentials` 行中以 `model_id` 为主键保存 AES-GCM envelope，Model/Run/Response Schema 均不映射其内部列。
 
-本 API 的 `GET /models` 是 LLMBenchLab 本地模型注册表，不会代替操作者访问 Provider。可信本地 `llmbenchlab-evaluate` 才会调用上游 `/models` 与付费 canary：发现到的任一模型 ID 若包含当前 Key，预检立即失败；canary 成功体若明确返回不同于请求目标的模型名，也会失败。模型发现与正式 Chat 请求声明 `Accept-Encoding: identity` 并拒绝其他响应编码。Chat 内部传输显式请求 SSE 与流式 usage，持续消费到 `[DONE]`；这不是新的 LLMBenchLab 公开 SSE API。忽略流式参数的 Provider 可返回普通 JSON fallback。发现体上限为 2 MiB；Chat 普通 JSON 成功体上限为 4 MiB，SSE 累计 wire 上限为 64 MiB、单事件上限为 1 MiB、最终聚合 content 上限为 4 MiB，非 2xx 错误体上限为 64 KiB。成功内容、raw usage 的对象键/所有 JSON 标量、token/status 数值、request ID、返回模型名、system fingerprint 与 finish reason 中出现的当前 Key 会在进入持久化边界前按精确值替换为 `[REDACTED]`。SSE content 先完整聚合再替换，因此 Key 横跨多个 delta 也不会因分块而跳过该精确匹配。
+本 API 的 `GET /models` 是 LLMBenchLab 本地模型注册表，不会代替操作者访问 Provider。可信本地 `llmbenchlab-evaluate` 才会调用上游 `/models` 与付费 canary：三个已知 endpoint 后缀都回到同级 `/models`，discovery 按显式协议鉴权（Chat/Responses 使用 `Authorization: Bearer`，Messages 使用 `x-api-key` 与 `anthropic-version`）；Messages 的 `has_more/last_id` 通过 `after_id` 分页，并受累计 100 页、60 秒 wall-clock、10,000 项、2 MiB 与缺失/重复 cursor 门禁保护。发现到的任一模型 ID 若包含当前 Key，预检立即失败；canary 成功体若明确返回不同于请求目标的模型名，也会失败。模型发现与正式请求声明 `Accept-Encoding: identity` 并拒绝其他响应编码。Chat、Responses、Messages 的内部流式传输分别以 `[DONE]`、`response.completed`、`message_stop` 为成功终止证据；这不是新的 LLMBenchLab 公开 SSE API。各协议普通 JSON 成功响应继续兼容。Provider 普通 JSON 成功体上限为 4 MiB，SSE 累计 wire 上限为 64 MiB、单事件上限为 1 MiB、最终聚合 content 上限为 4 MiB，非 2xx 错误体上限为 64 KiB。成功内容、raw usage 的对象键/所有 JSON 标量、token/status 数值、request ID、返回模型名、system fingerprint 与 finish reason 中出现的当前 Key 会在进入持久化边界前按精确值替换为 `[REDACTED]`。SSE content 先完整聚合再替换，因此 Key 横跨多个 delta 也不会因分块而跳过该精确匹配。
 
-Phase 1 的 Model 默认参数只覆盖上述四个实际由 Adapter 转发的生成字段。创建 Run 时，显式请求值优先；某字段未出现在请求 JSON 中时才使用 Model 默认值，否则使用协议默认值。`max_tokens:null` 是一个显式值：OpenAI-compatible Adapter 不发送 `max_tokens` 字段，由 Provider 决定其默认输出预算；这不表示无限输出，也不保证不同 Provider 使用相同上限。Run 的 `generation` 快照保存最终有效值，包括这个 `null`。
+Model 默认参数只覆盖上述四个生成字段。创建 Run 时，显式请求值优先；某字段未出现在请求 JSON 中时才使用 Model 默认值。为了兼容旧客户端，通用请求 Schema 仍显示 Chat 的 `temperature=0`、`top_p=1`、`seed=42` 默认；但 Responses/Messages 在请求与 Model 默认都没有显式提供这些字段时，会把三者归一化为 `null` 并从 Provider payload 省略，避免向不支持采样字段的模型发送参数。Chat Completions 把 `max_tokens` 原样发送；Responses 把它映射为 `max_output_tokens`；二者的 `null` 都表示省略该字段，由 Provider 决定默认输出预算，这不表示无限输出。Messages 必须使用有限 `max_tokens`，且显式 `temperature` 只能为 `0..1`。Responses/Messages 都不接受当前项目的非空 `seed`；非法组合在外发前稳定拒绝，不会静默忽略。Run 的 `generation` 快照保存最终有效值和显式 Adapter 类型。
 
 Model 响应示例（后续接口引用为 `ModelRead`）：
 
@@ -487,7 +487,7 @@ Model 响应示例（后续接口引用为 `ModelRead`）：
 
 ### 4.2 `GET /models`
 
-筛选参数：`provider_type=mock|openai_compatible`、`enabled=true|false`，并支持通用分页。
+筛选参数：`provider_type=mock|openai_compatible|openai_responses|anthropic_messages`、`enabled=true|false`，并支持通用分页。
 
 ```bash
 curl -sS 'http://127.0.0.1:8000/api/v1/models?provider_type=mock&enabled=true&offset=0&limit=20'
@@ -533,14 +533,14 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/models \
   -d '{"name":"Offline Mock","provider_type":"mock","enabled":true}'
 ```
 
-注册供 Web 使用的 OpenAI-compatible 配置。推荐在 Models 页面粘贴 Key；`api_key` 只出现在这次写请求中，成功响应不会返回它，数据库也不会保存其明文。下面只是请求结构，不是可直接填入真实 Key 的 shell 命令：
+注册供 Web 使用的远程配置。推荐在 Models 页面粘贴 Key；`api_key` 只出现在这次写请求中，成功响应不会返回它，数据库也不会保存其明文。下面是 Responses 类型的请求结构，不是可直接填入真实 Key 的 shell 命令：
 
 ```json
 {
-  "name": "Local Compatible",
-  "provider_type": "openai_compatible",
+  "name": "Local Responses",
+  "provider_type": "openai_responses",
   "base_url": "https://llm-gateway.invalid/v1",
-  "remote_model_name": "example-chat-model",
+  "remote_model_name": "example-responses-model",
   "api_key": "<write-only value entered in the Web form>",
   "enabled": true,
   "input_price_per_million": null,
@@ -799,10 +799,10 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/benchmarks/reload-demo
 | --- | ---: | --- |
 | `model_id` | 必填 | 非空，最长 36 |
 | `benchmark_id` | 必填 | 非空，最长 36 |
-| `temperature` | `0.0` | `0..2` |
-| `top_p` | `1.0` | `>0` 且 `<=1` |
+| `temperature` | `0.0` | `null` 或 `0..2`；Messages 非空值上限为 `1` |
+| `top_p` | `1.0` | `null` 或 `>0` 且 `<=1` |
 | `max_tokens` | `256` | `null` 或整数 `1..131072`；`null` 表示不发送该字段，由 Provider 决定默认值，并非无限输出 |
-| `seed` | `42` | 32 位有符号整数或 `null` |
+| `seed` | `42` | 32 位有符号整数或 `null`；Responses/Messages 只接受 `null` |
 | `system_prompt` | `null` | 最长 4000；提供时覆盖 Benchmark system prompt |
 | `concurrency` | `1` | `1..4`；快照值即实际执行并发度 |
 | `input_token_reservation` | `null` | `null` 或严格整数 `1..10000000`；hard TPM/Token/费用启用时必须提供可证明的每题输入预留上界。`null` 时实现不会把 UTF-8/tokenizer 估算写成 hard reservation 或用它触发 input/cost overdraw |
@@ -811,7 +811,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/benchmarks/reload-demo
 | `lifetime_cost_budget_usd` | `null` | `null` 或 `0..10000000.00000000` USD，最多 8 位小数；请求接受 JSON number/十进制 string，`RunRead` 的非空响应始终是 JSON string；费用硬边界还要求显式 Token 上界和冻结价格 |
 | `read_timeout_seconds` | `60` | 有限数字 `1..1800`；冻结为等待 Provider 下一批响应字节的空闲读取超时，不是请求总墙钟时限 |
 
-保留 `max_tokens=256` 作为通用 API/protocol-v1 默认值是兼容要求；当 Model 没有对应默认且用户尚未手动修改时，Web 的新建评测表单会根据已知 Benchmark 预填更适合长推理的显式建议值。它们是可编辑的客户端起点，不会改变省略字段时的 API 默认：
+保留 `max_tokens=256` 以及表中 Chat 采样值作为通用 API/protocol-v1 Schema 默认是兼容要求。创建 Responses/Messages Run 时，省略且没有 Model 默认的 `temperature`、`top_p`、`seed` 会冻结为 `null` 并从上游 payload 省略；这和客户端显式发送采样值不同。Web 在新协议下把 `temperature`/`top_p` 留空，seed 禁用；当 Model 没有输出默认且用户尚未手动修改时，新建评测表单仍根据已知 Benchmark 预填更适合长推理的显式输出建议。它们是可编辑的客户端起点，不会改变省略字段时的 API 默认：
 
 | Web Benchmark | 建议 `max_tokens` | 建议 `read_timeout_seconds` |
 | --- | ---: | ---: |
@@ -820,7 +820,7 @@ curl -sS -X POST http://127.0.0.1:8000/api/v1/benchmarks/reload-demo
 | MMLU-Pro `official_cot` | `4000` | `300` |
 | GPQA-Diamond | `8192` | `600` |
 
-Web 还允许显式选择“由 Provider 决定”，此时提交 `max_tokens:null`。更高数字、Provider 托管或更长读取超时都不是 Token/金额预算，也不证明模型支持对应输出长度。
+Chat/Responses 的 Web 表单还允许显式选择“由 Provider 决定”，此时提交 `max_tokens:null`；Messages 必须保留有限正整数输出上限。更高数字、Provider 托管或更长读取超时都不是 Token/金额预算，也不证明模型支持对应输出长度。
 
 Run 响应示例（后续接口引用为 `RunRead`）：
 
@@ -1154,7 +1154,7 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444
 - 这些字段是可审计的已知小计与覆盖证据，不是精确 Provider 账单。`RunRead.input_tokens/output_tokens` 继续遵守 protocol-v1 的 all-or-nothing 语义：任一逐题 usage 缺失时，精确 Run Token 保持 `null`，不会由部分小计回填。
 
 请求失败、空回答或解析失败的记录仍会出现，`score=0`，并填写 `error_type` 与
-`error_message`；上游 usage 缺失时 Token 和费用为 `null`。非法 SSE UTF-8/JSON/字段映射为 `invalid_provider_stream`，200 SSE 内的上游 error 映射为 `provider_stream_error`，HTTP 干净结束却缺少 `[DONE]` 映射为 `incomplete_provider_stream`；已收到的部分 content 不会作为成功答案持久化。真实 transport 异常仍按 Run 快照的 protocol-v1 有限策略重试，因此仍可能重复上游计算或计费。若 Provider 返回 `finish_reason="length"`，空输出以及未能解析出有效最终答案的非空输出都会归类为 `output_truncated`，而不是泛化成 `empty_response` 或 `parse_error`；非空输出仍保存在 `raw_response`。成功内容若精确反射当前 Key，会在写入 `raw_response` 前替换为 `[REDACTED]`。
+`error_message`；上游 usage 缺失时 Token 和费用为 `null`。非法 SSE UTF-8/JSON/字段映射为 `invalid_provider_stream`，200 SSE 内的上游 error 映射为 `provider_stream_error`，HTTP 干净结束却缺少所选协议的终止证据（Chat `[DONE]`、Responses `response.completed`、Messages `message_stop`）映射为 `incomplete_provider_stream`；已收到的部分 content 不会作为成功答案持久化。除既有 retryable HTTP/transport 分类外，Responses 的 rate-limit/server typed error，以及 Messages 的 `rate_limit_error`、`api_error`、`overloaded_error`、`timeout_error` 会按 Run 快照有限重试；Messages 快照的 HTTP retryable status 另含 `529`。未知流内错误 fail closed，每次重试独立进入 attempt ledger，因此仍可能重复上游计算或计费。若 Provider 返回 `finish_reason="length"`，空输出以及未能解析出有效最终答案的非空输出都会归类为 `output_truncated`，而不是泛化成 `empty_response` 或 `parse_error`；非空输出仍保存在 `raw_response`。成功内容若精确反射当前 Key，会在写入 `raw_response` 前替换为 `[REDACTED]`。
 
 逐题 transport 证据只保存并返回固定字段：Provider request ID、返回模型名、system fingerprint、finish reason 与实际 HTTP attempt 数；不会保存或返回任意 raw usage 对象。四个字符串必须是短、无空白的安全 opaque token，任何超长、控制字符、凭据形态或脱敏占位值都会 fail closed 为 `null`。这些值用于关联和诊断，不改变评分，也不把本地 Response 幂等扩展为 Provider exactly-once。可信本地报告的 `responses.jsonl` 导出同一组固定字段，并再次执行报告级 secret scrub 与安全字符边界。
 

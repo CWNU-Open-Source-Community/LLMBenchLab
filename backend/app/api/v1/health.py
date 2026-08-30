@@ -308,7 +308,12 @@ def info(settings: SettingsDep) -> InfoResponse:
         protocol_version=PROTOCOL_VERSION,
         environment=settings.environment,
         capabilities={
-            "providers": ["mock", "openai_compatible"],
+            "providers": [
+                "mock",
+                "openai_compatible",
+                "openai_responses",
+                "anthropic_messages",
+            ],
             "question_types": ["exact_match", "multiple_choice", "numeric"],
             "runner": "independent_database_lease_worker",
         },

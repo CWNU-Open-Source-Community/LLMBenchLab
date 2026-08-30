@@ -1212,3 +1212,51 @@ def test_postgres_model_lock_serializes_run_creation_before_sensitive_patch(
         run = session.get(EvaluationRun, run_id)
         assert model is not None and model.base_url == "https://provider.example/v1"
         assert run is not None and run.status == RunStatus.PENDING
+
+
+def test_postgres_provider_protocol_constraint_accepts_explicit_remote_adapters(
+    postgres_store,
+) -> None:
+    with postgres_store() as session, session.begin():
+        session.add_all(
+            [
+                Model(
+                    id="model-pg-responses",
+                    name="Postgres Responses",
+                    provider_type=ProviderType.OPENAI_RESPONSES,
+                    base_url="https://provider.example/v1",
+                    remote_model_name="responses-model",
+                    api_key_env="PROVIDER_KEY",
+                    credential_source=CredentialSource.ENVIRONMENT,
+                ),
+                Model(
+                    id="model-pg-messages",
+                    name="Postgres Messages",
+                    provider_type=ProviderType.ANTHROPIC_MESSAGES,
+                    base_url="https://provider.example/v1",
+                    remote_model_name="messages-model",
+                    api_key_env="PROVIDER_KEY",
+                    credential_source=CredentialSource.ENVIRONMENT,
+                ),
+            ]
+        )
+
+    with postgres_store() as session:
+        assert set(
+            session.scalars(
+                select(Model.provider_type).where(
+                    Model.id.in_(("model-pg-responses", "model-pg-messages"))
+                )
+            )
+        ) == {ProviderType.OPENAI_RESPONSES, ProviderType.ANTHROPIC_MESSAGES}
+
+    with pytest.raises(IntegrityError), postgres_store() as session, session.begin():
+        session.execute(
+            text(
+                "INSERT INTO models ("
+                "id, name, provider_type, credential_source, enabled, "
+                "default_parameters, created_at, updated_at"
+                ") VALUES ('model-pg-invalid-protocol', 'Invalid protocol', 'bad', "
+                "'none', true, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )

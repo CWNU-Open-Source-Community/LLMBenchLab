@@ -179,13 +179,14 @@ def test_run_lifecycle_timestamps_ignore_worker_host_clock_skew(client, monkeypa
 
 
 def test_parse_error_evidence_identifies_nonempty_truncated_output() -> None:
-    assert EvaluationRunner._parse_error_evidence(
-        "choice_not_found", {"finish_reason": "length"}
-    ) == (
-        "output_truncated",
-        "Provider stopped at the output token limit before a valid final answer was parsed "
-        "(choice_not_found).",
-    )
+    for finish_reason in ("length", "max_tokens"):
+        assert EvaluationRunner._parse_error_evidence(
+            "choice_not_found", {"finish_reason": finish_reason}
+        ) == (
+            "output_truncated",
+            "Provider stopped at the output token limit before a valid final answer was parsed "
+            "(choice_not_found).",
+        )
     assert EvaluationRunner._parse_error_evidence(
         "choice_not_found", {"finish_reason": "stop"}
     ) == ("parse_error", "choice_not_found")

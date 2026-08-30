@@ -7,7 +7,7 @@
 
 ## 1. 范围与术语
 
-MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark，创建 Run，在后台逐题调用、解析和评分，持久化结果，并在前端查看进度、逐题结果及排行榜。OpenAI-compatible 接入属于 MVP 配置能力，但自动化验收不得访问真实服务。
+MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark，创建 Run，在后台逐题调用、解析和评分，持久化结果，并在前端查看进度、逐题结果及排行榜。Chat Completions、OpenAI Responses 与 Anthropic Messages 接入属于可选远程配置能力，但自动化验收不得访问真实服务。
 
 - **Model**：一个可调用的模型配置；公开表示不包含真实密钥值，Provider 凭据由独立的加密记录或兼容环境变量提供。
 - **Benchmark**：有版本、题目集合、评分器和稳定 Hash 的数据集。
@@ -21,16 +21,16 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 ### FR-MOD：模型注册与调用
 
 - **FR-MOD-01** 系统必须支持创建、读取、更新、删除和分页列出 Model。
-- **FR-MOD-02** `provider_type` 首期只允许 `mock` 与 `openai_compatible`。
+- **FR-MOD-02** `provider_type` 只允许 `mock`、`openai_compatible`、`openai_responses` 与 `anthropic_messages`；协议必须显式选择，旧 `openai_compatible` 继续表示 Chat Completions。
 - **FR-MOD-03** Model 必须包含：`id`、`name`、`provider_type`、`base_url`、`remote_model_name`、`credential_source`、兼容字段 `api_key_env`、`enabled`、每百万输入/输出 Token 价格、默认参数、`created_at`、`updated_at`。
-- **FR-MOD-04** `openai_compatible` 必须校验并要求 `base_url`、`remote_model_name`，并选择 `stored` 或 `environment` 凭据来源；`mock` 的远端连接字段必须为空且凭据来源必须为 `none`。
+- **FR-MOD-04** 三个远程 Provider 类型都必须校验并要求 `base_url`、`remote_model_name`，并选择 `stored` 或 `environment` 凭据来源；`mock` 的远端连接字段必须为空且凭据来源必须为 `none`。根地址或完整 endpoint 必须与所选协议一致，已知错误协议后缀必须在外发前拒绝。
 - **FR-MOD-05** Web/REST 必须支持只写的 `api_key` 输入：明文只用于当前请求，服务端使用独立 keyring 的 AES-256-GCM 加密后保存到 `model_credentials`，不得把凭据数据流中的明文/Authorization 或 Provider 对 Key 的回显复制到 Model、Run-model snapshot、Response、Leaderboard、报告、日志或错误，也不得公开 nonce、ciphertext、key id 或 keyring material。该控制不要求扫描无关 Benchmark/Question 数据的独立字面巧合；`api_key_env` 仅作为 CLI 与既有部署的兼容路径。
 - **FR-MOD-06** 必须定义 `ModelAdapter.generate(messages, generation_config)`，返回文本、Token、延迟、provider request id、原始 usage 和元数据。
 - **FR-MOD-07** Mock Adapter 必须完全离线、输出可预测，可完成 Demo 中预定义的部分或全部问题，并可用于单元测试、CI 和 Smoke Test。
-- **FR-MOD-08** OpenAI-compatible Adapter 必须使用 Chat Completions 风格请求，支持 system prompt、temperature、top_p、max_tokens、seed、可配置 base URL/模型名及连接/读取超时。
-- **FR-MOD-09** 对 429、部分 5xx 和暂时网络错误必须有限次指数退避；明显的 4xx 配置错误不得无限重试。
+- **FR-MOD-08** `openai_compatible` 必须实现 Chat Completions，`openai_responses` 必须实现 Responses，`anthropic_messages` 必须实现 Messages；每类必须具有独立 endpoint、headers、payload、普通 JSON 与 typed SSE 解析及明确的流终止证据，并把文本、usage、finish reason、request id 与返回模型归一化。Chat 支持 `seed`；Responses/Messages 在请求与 Model 默认都未提供时必须省略 `temperature/top_p/seed`，并拒绝非空 `seed`；Messages 还必须限制 `temperature<=1` 并拒绝 `max_tokens:null`。
+- **FR-MOD-09** 对 429、部分 5xx 和暂时网络错误必须有限次指数退避；Responses rate-limit/server typed error、Messages `rate_limit_error`/`api_error`/`overloaded_error`/`timeout_error` 与 HTTP `529` 只按显式白名单重试，未知 typed error fail closed；明显的 4xx 配置错误不得无限重试。
 - **FR-MOD-10** 上游没有 Token Usage 时相关值允许为 `null`；错误应保存稳定类型与经过脱敏的可读信息。
-- **FR-MOD-11** Phase 1 的 `default_parameters` 只允许 `temperature`、`top_p`、`max_tokens`、`seed` 及其 Run 级约束；创建 Run 时显式请求值优先，最终有效值必须进入快照。
+- **FR-MOD-11** Phase 1 的 `default_parameters` 只允许 `temperature`、`top_p`、`max_tokens`、`seed` 及其 Run 级约束；创建 Run 时显式请求值优先，最终有效值必须进入快照；Responses/Messages 未显式提供的采样字段必须以 `null` 冻结而不是继承 Chat Schema 默认。
 
 ### FR-BEN：Benchmark 与导入
 
@@ -71,7 +71,7 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 
 - **FR-REP-01** protocol version 初始为 `llmbenchlab-protocol-v1`。
 - **FR-REP-02** Run 必须快照：Benchmark ID/version/SHA-256、Evaluator 名称及版本、Prompt template、system prompt、temperature、top_p、max_tokens、seed、模型名、Adapter 类型、模型参数、Git commit SHA（不可得时为 `null`）、开始/结束时间、并发度和重试策略。
-- **FR-REP-03** 默认公平参数为 `temperature=0`、`top_p=1`、固定 max tokens、并发度 1 或较小安全值；上游支持时传 seed。
+- **FR-REP-03** Chat 的默认公平参数为 `temperature=0`、`top_p=1`、固定 max tokens、并发度 1 或较小安全值，并在上游支持时传 seed；Responses/Messages 默认省略未配置的采样字段，不能假称跨协议同一采样参数必然等价。
 - **FR-REP-04** 不同 protocol version、Benchmark version 或 dataset hash 的结果不得无提示混合比较。
 
 ### FR-API：REST API
@@ -89,9 +89,9 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 ### FR-UI：用户界面
 
 - **FR-UI-01** 中文 Dashboard 必须展示模型、Benchmark、Run、成功 Run 数，最近运行及得分、延迟、Token 概览。
-- **FR-UI-02** Models 页面必须支持列表、添加、编辑、删除和表单校验；OpenAI-compatible 模型由用户直接在密码输入框粘贴 API Key，提交后立即清空，后续只显示“已安全保存”等状态，绝不回显密钥。环境变量名称不得作为 Web 主流程输入项。
+- **FR-UI-02** Models 页面必须支持列表、添加、编辑、删除和表单校验；远程模型必须显式选择 Chat Completions、OpenAI Responses 或 Anthropic Messages，由用户直接在密码输入框粘贴 API Key，提交后立即清空，后续只显示“已安全保存”等状态，绝不回显密钥。环境变量名称不得作为 Web 主流程输入项。
 - **FR-UI-03** Benchmarks 页面必须展示名称、版本、维度、语言、题数、Hash、详情、格式说明、Demo 标识及重新载入操作。
-- **FR-UI-04** New Run 必须允许选择 Model/Benchmark，设置 temperature、top_p、max_tokens、seed，创建后跳转详情。
+- **FR-UI-04** New Run 必须允许选择 Model/Benchmark，按协议设置或省略 temperature、top_p、max_tokens、seed；Messages 禁止 Provider-managed 输出预算且 temperature 上限为 1，创建后跳转详情。
 - **FR-UI-05** Run Detail 必须轮询状态并展示进度、三类得分/比率、正确/普通答错/执行异常数、延迟、Token、成本、配置快照及逐题原始/解析/标准答案、得分与错误。全 Run 进度必须以通过、普通答错、执行异常、未执行四态热力图呈现；动态主指标取自后端同快照证据聚合，Token/cost 已知小计必须同时显示 reported coverage，不能回填或冒充 nullable 的精确 Run 总量。
 - **FR-UI-06** Leaderboard 必须展示模型、Benchmark/version、protocol version、严格总分、回答准确率、完成率、延迟、Token、成本和运行时间，并支持筛选与排序。
 - **FR-UI-07** 所有页面必须有加载、空数据和错误状态，在常见桌面和移动宽度可用；不能是占位空壳。热力图状态不能只靠颜色，必须有文字图例、可访问名称和键盘导航；hover、focus 与移动端 tap 提供等价详情，block 尚未 hydrate 时必须显示“同步中”而非伪装为未执行。
@@ -119,7 +119,7 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 ## 4. 用户故事
 
 - **US-01** 作为首次使用者，我可以不配置 Key 注册 Mock 模型、载入 Demo 并完成一次 Run，以验证系统可用。
-- **US-02** 作为本地用户，我可以在 Web 中直接粘贴 OpenAI-compatible API Key；保存后界面和 API 不再返回明文，后台 Worker 可以直接用于真实模型评测。
+- **US-02** 作为本地用户，我可以在 Web 中显式选择远程 API 协议并直接粘贴 Provider API Key；保存后界面和 API 不再返回明文，后台 Worker 可以直接用于真实模型评测。
 - **US-03** 作为研究人员，我可以导入经过校验的版本化小型 Benchmark，并看到题数与稳定 Hash。
 - **US-04** 作为评测者，我创建 Run 后立即获得 ID，离开创建页面也能查看进度和终态。
 - **US-05** 作为分析者，我能检查每题原始输出、解析答案、标准答案、评分、耗时、Token 和错误。
@@ -145,7 +145,7 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 
 ### 安全与隐私
 
-- **NFR-SEC-01** 不得明文保存或返回真实 Key，不得记录 Authorization；Web 提交的 Key 只能以 AES-256-GCM 密文保存，错误信息、请求标识和日志必须经过 canary 测试证明不会反射密钥。
+- **NFR-SEC-01** 不得明文保存或返回真实 Key，不得记录 `Authorization` 或 `x-api-key`；Web 提交的 Key 只能以 AES-256-GCM 密文保存，错误信息、请求标识和日志必须经过 canary 测试证明不会反射密钥。
 - **NFR-SEC-02** 导入限制大小、拒绝路径穿越和任意文件引用，不执行数据集代码；数值解析禁止 `eval`。
 - **NFR-SEC-03** CORS 来源显式配置，API 校验输入；恶意 `base_url`/SSRF 是已记录风险。
 - **NFR-SEC-04** `.env` 被 Git 忽略，CI secret 非必需；依赖应固定或有 lockfile 并接受自动化审计。

@@ -206,7 +206,17 @@ async def create_run(
             detail={"code": "benchmark_not_found", "message": "Benchmark was not found"},
         )
 
-    run = build_evaluation_run(model, benchmark, payload, settings)
+    try:
+        run = build_evaluation_run(model, benchmark, payload, settings)
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "invalid_provider_generation_parameters",
+                "message": str(exc),
+            },
+        ) from None
     try:
         repository.admit_run(
             session,

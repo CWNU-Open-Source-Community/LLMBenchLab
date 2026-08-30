@@ -15,6 +15,7 @@
 - 可观测性与审计保留：[ADR-0015](../decisions/ADR-0015-observability-worker-progress-audit-retention.md)
 - Schema-equivalent 索引修复：[ADR-0017](../decisions/ADR-0017-schema-equivalent-governance-index-repair.md)
 - Observational reservation 修正：[ADR-0018](../decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
+- Provider API 显式协议：[ADR-0019](../decisions/ADR-0019-explicit-provider-api-protocol-adapters.md)
 
 ## 阶段目标
 
@@ -22,7 +23,7 @@
 
 ## 当前功能范围
 
-- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容；日常入口维护已把 `make dev DEV_WORKERS=N` 和默认双 Worker的 `make dev-multi` / `make docker-up WORKERS=N` 暴露为受保护入口，并按扩/缩方向同步 scale、API expected 与 expected/registered/live/stalled/shortfall。P2-06 implementation SHA `9a20676…` 将双方言 Alembic 链扩展至 `20260828_0005`，`20260829_0006` 仅修复早期 `0004` 三索引缺口；当前 data-only head `20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn。
+- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容；日常入口维护已把 `make dev DEV_WORKERS=N` 和默认双 Worker的 `make dev-multi` / `make docker-up WORKERS=N` 暴露为受保护入口，并按扩/缩方向同步 scale、API expected 与 expected/registered/live/stalled/shortfall。P2-06 implementation SHA `9a20676…` 将双方言 Alembic 链扩展至 `20260828_0005`，`20260829_0006` 仅修复早期 `0004` 三索引缺口，`20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn；当前 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并替换 Provider 类型 check 与远程配置 check，旧 Model 不改写。
 - Redis at-least-once 通知；Run、取消、重试、租约、Response、终态、治理、attempt ledger 和 audit 全由数据库裁决。
 - 原子 claim、数据库时间 lease/heartbeat、fencing、有限 retry/backoff、取消、过期接管、duplicate no-op 和 dead-letter。
 - 停写只读 SQLite→空 PostgreSQL 的单向 importer；`0005` 按依赖顺序复制 13 张应用表并做 count/PK/content fingerprint，源有 live Worker generation 时拒绝，stopped/stale progress 可精确复制。keyring 仍在数据库之外。
@@ -57,7 +58,7 @@
 - write-only `api_key`、AES-256-GCM `model_credentials`、数据库外共享 keyring、legacy `api_key_env`、origin/active-Run 门禁继续有效。Key、Authorization、ciphertext、nonce、keyring、Provider URL、题目/prompt/response正文不得进入 audit。
 - Provider request ID/returned model/system fingerprint/finish reason 仅在固定字符、长度和凭据形态检查后保存；不安全值为 `null`，不生成含 Provider 控制文本的 redaction event。
 - audit 是应用 append-only、event-key 幂等并有 hash/schema read validation，不是数据库管理员不可篡改的 WORM。
-- OpenAI-compatible SSE、严格 `[DONE]`、JSON fallback、wire/event/content 上限和聚合后 Key 脱敏保持不变。
+- Chat Completions 的严格 `[DONE]`，Responses 的 `response.completed`，Messages 的 `message_stop`，各自 JSON fallback、wire/event/content 上限和聚合后 Key 脱敏保持不变；协议由 Run snapshot 显式选择，不做失败 fallback。
 
 ## 任务状态
 
@@ -67,6 +68,7 @@
 | P2-02 PostgreSQL 迁移 | `slice_delivered` | 历史 `0002`～`0004` 与 12 表 importer 已通过精确 SHA 远程门禁；`9a20676…` 增加 `0005` / 13 表 importer、live Worker preflight 和 populated downgrade guard，clean Compose 与远程实现门禁已通过 |
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；`9a20676…` 增加 generation 级 DB-time scan/claim/lease-heartbeat/progress 与 stale 聚合，dependency probe 仍只表示 capability |
 | P2-03 日常多 Worker入口维护 | `completed` | 本地 PostgreSQL 多进程与 Compose 默认双 Worker入口、SQLite fail-fast、fresh/watermark scan、all/running scale direction、五 gauges 与跨 Benchmark PG lease 回归已通过本地/远程门禁；不改变 P2-07 或 Phase 2 总状态 |
+| Provider API 三协议维护 | `in_progress` | ADR-0019、`openai_responses` / `anthropic_messages` Adapter、`0008` 列宽与两个 check 变更、CLI/Web 显式协议与 MockTransport 合同已实现；本地完整门禁和隔离 PostgreSQL 16 往返通过，等待 commit/push/exact-SHA CI；不改变 protocol-v1、P2-07 或 Phase 2 总状态 |
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
 | P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
 | P2-05 observational overdraw 维护 | `completed` | ADR-0018 与 data-only `0007` 只重算 overdrawn 并保留 ledger/actual/Response/Run，active reservation 时拒绝；本地完整验证、当前库迁移和最终 SHA `cb00924…` 的 CI 4/4 均通过 |

@@ -181,7 +181,7 @@
 - 独立 Worker、原子领取、数据库时间租约、心跳、单调 fencing token、逐题幂等、有限重试、取消、过期接管和 dead-letter；大 Run 快照加载移出事件循环并保持租约心跳，dead-letter 前从持久化 Response 重聚合证据。
 - Alembic `0004` 的 policy/scope/minute bucket/question execution/Provider reservation/audit event 六类治理表及 `0005` 的 Worker process/progress 表与 bounded audit indexes；Run/Response 证据字段和 13 表 SQLite→PostgreSQL importer。
 - managed Run 冻结 policy/hash 与显式 overrides；global/provider/model/run 四层 concurrency、固定窗口 RPM/TPM、global/run lifetime request/Token/USD budget 和逐 Provider HTTP attempt ledger。
-- 当前 data-only head `20260830_0007` 按 ADR-0018 将观测 input 估算与 hard reservation 分离：无显式 input bound 时不生成 input reservation/reserved cost，actual usage 仍保存；显式 input/output 上界及由完整上界和价格派生的 reserved cost 超额继续 fail closed。本地完整门禁、当前 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与远程 CI 4/4 均通过。
+- data-only `20260830_0007` 按 ADR-0018 将观测 input 估算与 hard reservation 分离：无显式 input bound 时不生成 input reservation/reserved cost，actual usage 仍保存；显式 input/output 上界及由完整上界和价格派生的 reserved cost 超额继续 fail closed。本地完整门禁、当前 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与远程 CI 4/4 均通过。当前 head `20260830_0008` 按 ADR-0019 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并替换 Provider 类型 check 与远程配置 check，以加入显式 Chat Completions / Responses / Messages Adapter；不改评分或 protocol-v1。
 - materialized counter 只作 ledger 投影；counter、policy/hash 或 Run override 漂移 fail closed。confirmed pre-send release 按 ADR-0011 不消耗未发送 HTTP retry。
 - 有限 backlog、typed `429`、database not-before、question quantum、dispatch/failure 分离和跨 Model 公平排序。
 - typed audit、Run audit、task history/latency、Provider metadata、credential 非秘密事件和前端治理状态；P2-06 实现 SHA `9a20676…` 另交付固定低基数 Prometheus exporter/八条规则、canonical retention archive/verify/reconcile/restore/delete、Worker DB-time progress/liveness 聚合与全日志源治理。
@@ -208,6 +208,7 @@
 | P2-04 生命周期可靠性 | 可靠基础已交付 | retry/取消/恢复/dead-letter/终态重算及三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；外部调用仍不保证 exactly-once |
 | P2-05 并发治理 | 切片已实现 | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序和完整性 fail-closed 已实现；真实 PG/capacity/acceptance/精确 SHA CI 候选门禁已通过 |
 | P2-05 observational overdraw 维护 | `completed` | ADR-0018 与 data-only `0007` 只重算 overdrawn 并保留 ledger/actual，active reservation 时拒绝；当前库迁移和本地门禁通过，最终 SHA `cb00924…` 的 run `33271095910` 4/4 成功 |
+| Provider API 三协议维护 | `in_progress` | ADR-0019、Chat / Responses / Messages 显式 Adapter、`0008`、CLI/Web 与本地完整门禁已完成；等待 commit/push/exact-SHA CI，不改变 protocol-v1 或 P2-07 |
 | P2-06 可观测性 | `completed` | exporter/八规则、retention CLI、Worker DB-time progress、`0005`/13 表 importer 与全日志源治理已实现；`9a20676…` 已 push、PR #3、实现 run `33164609388` 4/4，clean capacity/9/9 acceptance 全绿；evidence-doc commit `ec29596…` 已 push且精确 SHA run `33165775037` 4/4 |
 | P2-07 验证与运维 | `planned` | ADR-0016、独立计划与工作日志已建立；功能尚未实现，后续从最小只读 verifier 开始，再开展数据库+keyring restore、Redis 重建、告警响应与完整失败矩阵 |
 

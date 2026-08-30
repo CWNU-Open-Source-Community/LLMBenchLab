@@ -6,7 +6,7 @@ GitHub：[`CWNU-Open-Source-Community/LLMBenchLab`](https://github.com/CWNU-Open
 
 LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测工作台。它把模型注册、版本化 Benchmark、后台评测、逐题证据、汇总指标和排行榜放进一条可审计的本地流程，并以“默认离线、严格评分、结果可复现”为首要约束。
 
-当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理候选；P2-06 可观测性/审计保留切片已完成实现、clean evidence 与 evidence-doc 精确 SHA CI，状态为 `completed`。PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger、typed audit 与 Worker progress 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；OpenAI-compatible Chat Completions 适配器及真实 Provider 调用始终是用户主动启用的可选能力。
+当前版本在保留 SQLite 单机兼容路径的同时，已经交付 Phase 2 的可靠执行与治理候选；P2-06 可观测性/审计保留切片已完成实现、clean evidence 与 evidence-doc 精确 SHA CI，状态为 `completed`。PostgreSQL 是 Compose/部署目标和任务、四层治理、逐 HTTP attempt ledger、typed audit 与 Worker progress 的事实来源，Redis Streams 只提供可重复、可丢失的低延迟通知，独立 Worker 通过数据库租约和公平 question quantum 执行任务。完全不需要 API Key 的 Mock Demo 仍是默认验收路径；Chat Completions、OpenAI Responses、Anthropic Messages 三类远程适配器及真实 Provider 调用始终是用户主动启用的可选能力。
 
 ## 当前状态
 
@@ -15,8 +15,8 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - Phase 0（治理、需求、架构和协议）已完成。
 - Phase 1 MVP 已具备完整垂直链路：注册模型、载入/导入 Benchmark、创建 Run、逐题持久化、结果聚合和前端展示。
 - Phase 2 候选已通过真实 PostgreSQL/Redis 和进程故障验证：除租约、心跳、fencing、幂等 Response 与数据库恢复外，Web/API managed Run 还具有 global/provider/model/run 四层数据库 admission、fixed-minute RPM/TPM、lifetime request/Token/cost budget、有限 backlog、公平 slice、逐 attempt reservation/settlement、typed audit 和历史延迟。
-- 当前 Alembic head 为 data-only `20260830_0007`：没有显式 `input_token_reservation` 时，输入 Token 估算只用于观测，不再写成 hard reservation 或参与 cost/overdraw 裁决；Provider actual usage 仍完整保存。显式 input/output 预留及由完整上界和价格计算的 reserved cost 超额仍按原规则 fail closed。
-- 可信本地 CLI 已提供 MMLU-Pro 与 GPQA-Diamond 的固定来源转换、真实 OpenAI-compatible 预检、可恢复执行和完整报告导出；这是 Phase 3 的客观题垂直切片，不代表 Phase 2 或 Phase 3 已完成。
+- 当前 Alembic head 为 `20260830_0008`：它将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，同时替换 Provider 类型 check 与远程配置 check；既有 `mock`/`openai_compatible` 行不改写，存在新协议 Model 时 downgrade 会先拒绝。其上游 data-only `0007` 继续保证没有显式 `input_token_reservation` 时，输入 Token 估算只用于观测，不写成 hard reservation 或参与 cost/overdraw 裁决；Provider actual usage 仍完整保存。
+- 可信本地 CLI 已提供 MMLU-Pro 与 GPQA-Diamond 的固定来源转换、三类显式远程协议预检、可恢复执行和完整报告导出；这是 Phase 3 的客观题垂直切片，不代表 Phase 2 或 Phase 3 已完成。
 - 自动化、CI、Compose 故障验收和容量演练的模型执行都只使用 Mock；根据层级使用临时 SQLite 或隔离 PostgreSQL 16/Redis 7，不访问真实模型服务，也不产生模型费用。
 - Phase 2 仍为 `in_progress`。P2-01 已完整交付：`P2-local-control-plane-v2` 在 clean commit `b6a35fef1dd069ebb54b69955058915c722aa34d` 从零完成 1 次 warm-up + 5 次 measured trial，23/23 SLO 与逐轮硬门禁全部通过，容量模型为 `qualified`；该实现的 [GitHub Actions run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功，证据文档收尾 commit `875f13a253c40b7573d45c6287385e60f2bb8f04` 的 [run 33150080341](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33150080341) 也已 4/4 成功。
 - P2-06 状态为 `completed`。实现 SHA [`9a20676dcf545040782f04c166205d0043345753`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/9a20676dcf545040782f04c166205d0043345753) 已 push 到当前分支并进入 [PR #3](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/3)，其精确 SHA 的 [GitHub Actions run 33164609388](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 成功。绑定同一 clean SHA 的 Compose acceptance 9/9 通过，evidence 为 `.pytest_cache/artifacts/phase2-acceptance/llmbenchlab-p2-92e173eeee28/evidence.json`（SHA-256 `e4ffb8668fd3fa62d59b5d83f5c29eede35b327d88e6099345acd5950670fc47`），Worker expected/registered/live/stalled/shortfall=`2/2/2/0/0` 且 cleanup C/V/N 全空；clean capacity evidence 为 `.pytest_cache/artifacts/phase2-capacity/llmbenchlab-p2-ca5673061b0f/evidence.json`（SHA-256 `2382f9138f09028f269d76c341b236dd4089d678c8a2323582045fac2b4f5039`），1W/2W/burst QPS=`7.267474/12.962228/9.333604`、wall=`8.255963/4.628834/6.428385s`，最终 18 Runs/270 Responses/270 QuestionExecutions/271 reservations/1230 audit，0 question error/drift/duplicate/PEL/lag，Worker expected=2、shortfall=0，cleanup C/V/N/image 全零且 image counters=`1/1/0/0`。这是 Mock-only 单机观测，不是生产或真实 Provider SLO；此前 dirty evidence 继续保留为历史，不替代该 clean-SHA 结果。Evidence-doc commit [`ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6) 已 push，其精确 SHA 的 [run 33165775037](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 4/4 成功，完成 P2-06 仓库级收尾。
@@ -28,7 +28,7 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 ## 核心特性
 
 - **完全离线的 Mock Demo**：15 道原创双语演示题，覆盖 exact match、multiple choice 和 numeric；结果必须明确标记为 Demo，不能当作正式模型能力结论。
-- **模型注册表**：支持 `mock` 与 `openai_compatible`，记录远端模型名、默认生成参数和可选价格信息。
+- **模型注册表**：支持 `mock`、Chat Completions、OpenAI Responses 与 Anthropic Messages 四种显式 Adapter 类型，记录远端模型名、默认生成参数和可选价格信息。
 - **版本化 Benchmark**：严格校验 `manifest.json` 与 `questions.jsonl`，支持受限 ZIP 导入、稳定 SHA-256 和导入冲突检测。
 - **固定标准数据集供应链**：MMLU-Pro test/validation 与 GPQA-Diamond 使用固定 revision、源文件 SHA-256、转换器版本和确定性 profile/选项重排；第三方题目只落在 Git 忽略的本地 `artifacts/`。
 - **真实模型本地入口**：`llmbenchlab-evaluate prepare/run/resume/report` 完成下载、模型发现、付费 canary、显式确认、有界执行、缺失题恢复和全量证据导出；Key 只来自环境变量或隐藏输入，远端 Provider 必须使用 HTTPS，明文 HTTP 仅允许 loopback。
@@ -75,11 +75,11 @@ flowchart LR
     Runner --> Adapters[Adapter Registry]
     Runner --> Evaluators[Evaluator Registry]
     Adapters --> Mock[Mock / 无网络]
-    Adapters -->|仅用户主动配置| Provider[OpenAI-compatible API]
+    Adapters -->|仅用户主动配置| Provider[Chat / Responses / Messages API]
     WorkerEnv[Worker 环境变量 / 旧配置] -.->|兼容读取| Adapters
 ```
 
-API 创建 managed Run 时先在数据库锁内检查 backlog、冻结 active policy 与 Run override，再提交数据库、best-effort 发送 Redis 通知并返回 `202`；通知失败不回滚数据库事实。Worker 优先从数据库对账，并可消费重复 Redis 消息；每次写入都校验当前租约 owner/token，每个 Provider HTTP attempt 由数据库 ledger 单独 admission/结算，恢复时跳过已有 Response。数据库因此是唯一事实来源，Redis、日志、指标和 Worker 内存都不能覆盖 Run 状态。前端轮询 Run，进入 `completed`、`failed` 或 `cancelled` 终态后停止。详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，治理语义见 [`ADR-0009`](docs/decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、交付边界修正 [`ADR-0010`](docs/decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、pre-send retry generation 修正 [`ADR-0011`](docs/decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md) 和 observational reservation 修正 [`ADR-0018`](docs/decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)，评分语义见 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)。
+API 创建 managed Run 时先在数据库锁内检查 backlog、冻结 active policy 与 Run override，再提交数据库、best-effort 发送 Redis 通知并返回 `202`；通知失败不回滚数据库事实。Worker 优先从数据库对账，并可消费重复 Redis 消息；每次写入都校验当前租约 owner/token，每个 Provider HTTP attempt 由数据库 ledger 单独 admission/结算，恢复时跳过已有 Response。数据库因此是唯一事实来源，Redis、日志、指标和 Worker 内存都不能覆盖 Run 状态。前端轮询 Run，进入 `completed`、`failed` 或 `cancelled` 终态后停止。详细设计见 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)，治理语义见 [`ADR-0009`](docs/decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、交付边界修正 [`ADR-0010`](docs/decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、pre-send retry generation 修正 [`ADR-0011`](docs/decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、observational reservation 修正 [`ADR-0018`](docs/decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md) 和显式 Provider 协议选择 [`ADR-0019`](docs/decisions/ADR-0019-explicit-provider-api-protocol-adapters.md)，评分语义见 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)。
 
 任务投递是 at-least-once，本地 Response、ledger 状态转换和聚合是幂等的；这不等于 Provider exactly-once。若 Worker 在 `send_started` 后崩溃，本地会保守结算并最终释放 admission permit，但远端幽灵请求可能仍在运行；若 Provider 已响应而本地 Response 尚未提交，接管 Worker 还可能再次调用并产生额外费用。本地 consumed 数是保守预算证据，不是 Provider 账单真值。
 
@@ -90,7 +90,7 @@ LLMBenchLab/
 ├── backend/
 │   ├── alembic/             # 数据库迁移
 │   ├── app/
-│   │   ├── adapters/        # Mock / OpenAI-compatible
+│   │   ├── adapters/        # Mock / Chat / Responses / Messages
 │   │   ├── api/v1/          # REST 路由
 │   │   ├── cli/             # 可信本地正式评测入口
 │   │   ├── core/            # 配置、日志、常量、时间
@@ -98,7 +98,7 @@ LLMBenchLab/
 │   │   ├── evaluators/      # 三类确定性评分器
 │   │   ├── governance/      # Policy、四层 admission、attempt ledger 与审计
 │   │   ├── models/          # SQLAlchemy 实体
-│   │   ├── providers/       # 模型发现与最小 Chat canary
+│   │   ├── providers/       # 模型发现与显式协议 canary
 │   │   ├── reports/         # 完整 Run 报告导出
 │   │   ├── runners/         # 租约仓储与评测 Runner
 │   │   ├── schemas/         # Pydantic API Schema
@@ -241,9 +241,9 @@ uv run llmbenchlab-evaluate run \
   --concurrency 1
 ```
 
-`base_url` 可以是兼容根地址（如 `https://host/v1`，实际 POST 到 `/v1/chat/completions`），也可以直接是以 `/chat/completions` 结尾的完整端点。远端主机只接受 HTTPS；`http://localhost`、`http://127.0.0.1` 或 `http://[::1]` 仅用于本机推理服务。CLI 默认先请求同一根路径的 `GET /models`：只发现一个模型时可省略 `--model`；多个模型时必须显式选择。若 Provider 不实现 `/models`，只有已经给出 `--model` 时才会继续；也可显式使用 `--no-model-discovery --model ...`。发现结果中任何模型 ID 若反射当前 Key，预检会直接失败且不会把该值写入诊断信息。
+`base_url` 可以是协议根地址，也可以直接是匹配的完整 endpoint。CLI 的 `--provider-type` 可选 `openai_compatible`（默认 Chat Completions）、`openai_responses` 或 `anthropic_messages`；它分别请求 `/chat/completions`、`/responses`、`/messages`，不会根据模型名猜测。远端主机只接受 HTTPS；`http://localhost`、`http://127.0.0.1` 或 `http://[::1]` 仅用于本机推理服务。CLI 默认先请求同一根路径的 `GET /models`：只发现一个模型时可省略 `--model`；多个模型时必须显式选择。若 Provider 不实现 `/models`，只有已经给出 `--model` 时才会继续；也可显式使用 `--no-model-discovery --model ...`。发现结果中任何模型 ID 若反射当前 Key，预检会直接失败且不会把该值写入诊断信息。
 
-在创建 Run 前，CLI 会打印目标 host、模型、题数、剩余 Run attempts 和 Chat Completion HTTP 尝试次数上界，等待输入 `RUN`，然后发送一个可能计费的最小 canary。canary 必须可解析为预期答案；若成功体明确返回的模型名不同于请求目标，也会失败。当前上界按 `(计分题数 × 剩余 Run attempts + 1 个 canary) × 3 次 HTTP attempts` 保守计算；自动化脚本只有显式传入 `--yes` 才能越过交互确认。该直连 CLI 当前创建 `legacy_unmanaged` Run，不经过 Web/API governance admission；这不是 Token、RPM/TPM 或金额预算上限。建议确认少量题结果后再运行全量：
+在创建 Run 前，CLI 会打印目标 host、显式协议、模型、题数、剩余 failed-attempt 预算和 Provider HTTP 尝试次数上界，等待输入 `RUN`，然后发送一个可能计费的最小 canary。剩余预算严格为 `max_attempts - failed_attempt_count`，不把 cooperative yield 算作失败；canary 必须可解析为预期答案，且成功体明确返回的模型名不同于请求目标时失败。当前上界按 `(计分题数 × 剩余 failed-attempt 预算 + 1 个 canary) × 3 次 HTTP attempts` 保守计算；自动化脚本只有显式传入 `--yes` 才能越过交互确认。该直连 CLI 当前创建 `legacy_unmanaged` Run，不经过 Web/API governance admission；这不是 Token、RPM/TPM 或金额预算上限。建议确认少量题结果后再运行全量：
 
 ```bash
 cd backend
@@ -276,17 +276,25 @@ uv run llmbenchlab-evaluate report <RUN_ID> \
 
 输出目录必须尚不存在。每份报告包含 `summary.json`、`groups.csv` 和覆盖全部已持久化 Response 的 `responses.jsonl`；全局与分组指标统一从计划题和这些 Response 证据派生，`metrics_provenance` 会标出数据库 Run 汇总字段是否发生漂移。默认输出、下载缓存和转换 ZIP 都在 Git 忽略的 `artifacts/`。完整来源、profile、Hash 与比较规则见 [`docs/DATASET_FORMAT.md`](docs/DATASET_FORMAT.md) 和 [`docs/BENCHMARK_PROTOCOL.md`](docs/BENCHMARK_PROTOCOL.md)，操作与安全边界见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) 和 [`docs/SECURITY.md`](docs/SECURITY.md)。
 
-## 接入 OpenAI-compatible Provider
+## 接入远程 Provider
 
-本节描述通过 Web/API 加常驻 Worker 的服务路径；一次性正式评测优先使用上一节的可信本地 CLI。LLMBenchLab 使用 Chat Completions 风格接口。若 `base_url` 为 `https://provider.example/v1`，Adapter 会请求 `https://provider.example/v1/chat/completions`；如果填写的 URL 已以 `/chat/completions` 结尾，则不会重复追加。
+本节描述通过 Web/API 加常驻 Worker 的服务路径；一次性正式评测优先使用上一节的可信本地 CLI。远程协议必须显式选择，不按模型名或失败结果自动猜测，也不会在一次失败后切换 endpoint：
+
+| Provider 类型 | 请求 endpoint | 主要参数边界 |
+| --- | --- | --- |
+| `openai_compatible` | `/chat/completions` | 默认 `temperature=0/top_p=1/seed=42`；`max_tokens` 可由 Provider 决定 |
+| `openai_responses` | `/responses` | 未显式配置时省略 `temperature/top_p/seed`；输出预算映射为 `max_output_tokens` |
+| `anthropic_messages` | `/messages` | 未显式配置时省略 `temperature/top_p/seed`；`temperature<=1`，且必须提供有限 `max_tokens` |
+
+`base_url` 可以填写协议根地址（例如 `https://provider.example/v1`），也可以填写与所选类型一致的完整 endpoint。填写其他已知协议的完整后缀会在发起网络请求前被拒绝，避免构造 `/responses/chat/completions` 一类错误地址。OpenCode Go 当前文档中的模型也必须按其所列 endpoint 选择对应类型。模型发现同样按该显式协议鉴权：Chat/Responses 使用 `Authorization: Bearer`，Messages 使用 `x-api-key` 与 `anthropic-version`；Messages 的 `has_more/last_id` 通过 `after_id` 分页并受累计 100 页、60 秒 wall-clock、2 MiB、10,000 项与重复 cursor 门禁保护。
 
 1. 运行 `make setup && make dev`，打开 `http://127.0.0.1:5173`，进入 **模型**，点击新建模型。
-2. Provider 选择 `openai_compatible`，填写 API Base URL、远端模型名，并把真实 Key 直接粘贴到 **API Key** 密码框；这里不再填写环境变量名称。
+2. Provider 选择 **Chat Completions**、**OpenAI Responses** 或 **Anthropic Messages**，填写 API Base URL、远端模型名，并把真实 Key 直接粘贴到 **API Key** 密码框；这里不再填写环境变量名称。
 3. 保存后密码框立即清空，卡片只显示“已安全保存”，GET/list/编辑表单都不会回填原 Key。进入 **新建评测** 选择模型和 Benchmark 后，独立 Worker 才解密并调用 Provider。
 4. 在 **新建评测** 检查页面给出的输出预算和单次读取超时建议。Demo 默认建议 `256 / 60s`，MMLU-Pro Direct 为 `1024 / 180s`，MMLU-Pro official CoT 为 `4000 / 300s`，GPQA-Diamond 为 `8192 / 600s`；未知正式集使用保守起点 `4096 / 300s`。建议值可调整，也不代表 Provider 一定支持相同上限。
 5. 创建后可离开详情页；主导航 **评测记录** 会列出全部状态并重新进入详情。Run Detail 的全题热力图使用 absolute-position block 独立同步，逐题正文证据仍每页 100 条；上一页/下一页不会改变全 Run 动态指标或热力图计数。
 
-Web 的数字 `max_tokens` 允许 `1..131072`；选择“由 Provider 决定”会保存 `null` 并在 Chat Completions 请求中省略 `max_tokens`，含义是采用 Provider 自身默认值，**不是无限输出**。未显式提供该字段的通用 API 和 `llmbenchlab-protocol-v1` 兼容路径仍默认 `256`，Benchmark 建议只影响 Web 表单起点。OpenAI-compatible Chat 请求会发送 `stream:true` 与 `stream_options.include_usage:true`，持续消费 SSE token/心跳；看到 finish 后不会提前结束，若 Provider 发送 usage-only 尾块也会继续读取，直到 `[DONE]` 才完成本题。usage 缺失时 Token 统计保持未知；忽略流式参数而返回普通 JSON 的 Provider 仍兼容。
+Web 的数字 `max_tokens` 允许 `1..131072`；Chat Completions 与 Responses 可选择“由 Provider 决定”，保存的 `null` 只表示省略相应输出预算字段，**不是无限输出**。Anthropic Messages 要求有限 `max_tokens`，页面会禁用该选项。未显式提供该字段的通用 API 和 `llmbenchlab-protocol-v1` 兼容路径仍默认 `256`，Benchmark 建议只影响 Web 表单起点。Responses/Messages 若请求和 Model 默认都没有显式采样值，会把 `temperature/top_p/seed` 冻结为 `null` 并从 Provider payload 省略；非空 seed 会在外发前拒绝。Chat 请求以 `[DONE]`、Responses 以 `response.completed`、Messages 以 `message_stop` 作为流式成功终止证据；缺少相应终止事件不会保存部分答案。三类 Adapter 都兼容各自协议的普通 JSON 成功响应，usage 缺失时 Token 统计保持未知。Responses 的 rate-limit/server typed error，以及 Messages 的 `rate_limit_error`、`api_error`、`overloaded_error`、`timeout_error` 和 HTTP `529` 才进入新增协议的有限 retry 白名单；未知流内错误 fail closed，每次重试独立结算 attempt ledger。
 
 `read_timeout_seconds` 允许 `1..1800` 秒并随 Run 的 `execution.timeouts_seconds.read` 快照保存。它是等待下一批响应字节的**空闲读取上限**，不是整个生成的总墙钟上限；只要 token 或 SSE comment 持续到达，总生成时间可以超过这个数值。Provider 以 `finish_reason="length"` 截断空内容或在截断后无法解析最终答案时，逐题证据会标记 `output_truncated`，提示提高输出预算或改由 Provider 决定。
 
@@ -296,8 +304,8 @@ Web 的数字 `max_tokens` 允许 `1..131072`；选择“由 Provider 决定”�
 
 ```json
 {
-  "name": "My Compatible Model",
-  "provider_type": "openai_compatible",
+  "name": "My Responses Model",
+  "provider_type": "openai_responses",
   "base_url": "https://provider.example.invalid/v1",
   "remote_model_name": "replace-with-provider-model-name",
   "api_key": "<write-only-provider-key>",
@@ -306,7 +314,7 @@ Web 的数字 `max_tokens` 允许 `1..131072`；选择“由 Provider 决定”�
 }
 ```
 
-真实 Key 会且只会在创建/替换模型时进入本机 API 请求体，随后以 AES-256-GCM 密文落库；它不应进入 Git、Issue、日志、截图、URL、命令行或 `VITE_*` 变量。浏览器不会直接调用 Provider。Model Schema 会拒绝 `base_url` query，拒绝远端明文 HTTP（仅 loopback 可用 HTTP），并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段；其中 `max_tokens=null` 同样只表示请求时省略该字段。当前 MVP 尚无 SSRF allowlist；managed Run 虽支持数据库权威 RPM/TPM 与累计费用 hard limit，但默认 policy 可关闭限制，且 hard Token/cost 要求显式 input reservation、有限 `max_tokens` 和价格，否则在外发前 fail closed。操作者仍须审查 Provider 地址、题目外发许可、数据政策并独立核对真实账单。
+真实 Key 会且只会在创建/替换模型时进入本机 API 请求体，随后以 AES-256-GCM 密文落库；它不应进入 Git、Issue、日志、截图、URL、命令行或 `VITE_*` 变量。浏览器不会直接调用 Provider。Model Schema 会拒绝 `base_url` query，拒绝远端明文 HTTP（仅 loopback 可用 HTTP），并将 `default_parameters` 限定为 `temperature`、`top_p`、`max_tokens`、`seed` 四个严格校验的生成字段；Responses/Messages 的非空 `seed`、Messages 的 `temperature>1` 和 `max_tokens=null` 会在外发前稳定拒绝。当前 MVP 尚无 SSRF allowlist；managed Run 虽支持数据库权威 RPM/TPM 与累计费用 hard limit，但默认 policy 可关闭限制，且 hard Token/cost 要求显式 input reservation、有限 `max_tokens` 和价格，否则在外发前 fail closed。操作者仍须审查 Provider 地址、题目外发许可、数据政策并独立核对真实账单。
 
 治理 API 只面向可信 loopback：首次 Run/policy apply 前，`GET /api/v1/governance/policy` 不产生隐式写入并返回 `404 governance_policy_not_initialized`；`PUT` 必须提交全部 policy 字段，原子激活一个不可变、内容寻址的版本，不能当作局部 PATCH。Run 创建会在没有 policy 时引导默认版本并冻结其 ID/hash；之后修改 policy 不会追溯改变已提交 Run。完整字段和错误码见 [`docs/API.md`](docs/API.md)，限流、预算、backlog、settlement 与恢复操作见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)；当前 Mock 容量基线见 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md)。
 
@@ -385,7 +393,7 @@ uv run python -m app.db.import_sqlite \
 | `3` | `committed_but_verification_failed` | 目标已提交完整 precommit 快照，但 postcommit 验证或报告失败；停止服务并独立对账 |
 | `4` | `commit_outcome_unknown` | PostgreSQL 未确认 COMMIT；原子事务意味着目标可能为空，也可能已完整提交 |
 
-退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、13 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。当前 head `20260830_0007` 降到 `0006` 会按旧谓词重算 `governance_scopes.overdrawn`，不删除 ledger 或 actual usage；`0006 → 0005` 不删除索引对象。继续跨过 `20260828_0005` 时，只要 `worker_processes` 有事实就会拒绝。先停止 Worker、保存必要事实并显式清空该表后，才能进入 `0005 → 0004`，而 `0004` 原有 ledger/audit downgrade guard 仍继续生效。只有隔离空库用于完整降级/升级往返，处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
+退出码 `3` 或 `4` 后**禁止盲目重试**。应先隔离目标，检查 Alembic head、13 表行数/主键集/canonical hash 和工具已输出的对账证据；非空目标会拒绝再次导入。工具不提供 PostgreSQL → SQLite 反向同步，回滚依赖保留的 SQLite 源/备份或单独验证的导出流程。当前 head `20260830_0008` 降到 `0007` 会把 `models.provider_type` 从 `VARCHAR(18)` 收回 `VARCHAR(17)`，并恢复旧 Provider 类型 check 与远程配置 check；存在 `openai_responses` 或 `anthropic_messages` Model 时会在 DDL 前拒绝。`0007 → 0006` 按旧谓词重算 `governance_scopes.overdrawn`，不删除 ledger 或 actual usage；`0006 → 0005` 不删除索引对象。继续跨过 `20260828_0005` 时，只要 `worker_processes` 有事实就会拒绝。先停止 Worker、保存必要事实并显式清空该表后，才能进入 `0005 → 0004`，而 `0004` 原有 ledger/audit downgrade guard 仍继续生效。只有隔离空库用于完整降级/升级往返，处理见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)。
 
 ## Audit retention 维护
 
@@ -424,7 +432,7 @@ uv run llmbenchlab-audit-retention delete \
 - 服务仅限可信 loopback 本机；Host allowlist 与 Nginx 请求流式转发不能替代公网认证、授权或 KMS。
 - `VITE_*` 会进入浏览器构建产物，永远不能用于存放秘密。
 - Benchmark ZIP 会做路径、文件类型、大小、压缩比、Schema 和题数校验，但导入者仍需审查来源、许可证、敏感数据和提示注入风险。
-- 任意 OpenAI-compatible `base_url` 存在 SSRF 与数据外发风险；公开部署前必须加入地址策略、出站隔离、鉴权和费用控制。
+- 任意远程 Provider `base_url` 都存在 SSRF 与数据外发风险；公开部署前必须加入地址策略、出站隔离、鉴权和费用控制。
 - SQLite/PostgreSQL 会保存题目、参考答案、原始回答和错误证据；数据库、volume、导入源与备份需使用最小权限和加密存储保护。
 
 威胁模型、秘密轮换和公开部署前门槛见 [`docs/SECURITY.md`](docs/SECURITY.md)。
@@ -436,7 +444,7 @@ uv run llmbenchlab-audit-retention delete \
 - 取消是协作式的；已经发出的上游请求可能要等到返回或超时。
 - at-least-once 恢复不保证 Provider 调用或计费 exactly-once；数据库只保留一份幂等的 Response/费用证据。
 - managed Web/API Run 已有可配置的本地 admission/预算/背压，但默认限制可关闭；它不覆盖 `legacy_unmanaged` 直连 CLI，也不提供端到端账单保证、Provider 幽灵请求终止或远端 exactly-once。
-- OpenAI-compatible 只实现 Chat Completions 共同子集，不保证覆盖各供应商私有参数和响应扩展。
+- 远程 Adapter 只实现 Chat Completions、OpenAI Responses 与 Anthropic Messages 的文本生成共同子集，不支持 tools、多模态，也不保证覆盖供应商私有参数和响应扩展。
 - 真 SSE 可避免慢生成在完成前长时间没有响应字节，但 Worker 到 Provider 之间的 Cloudflare/Caddy/其他 Gateway 仍有独立的缓冲、空闲或绝对总时长配置；Run 的 `read_timeout_seconds` 不会改写这些代理限制。
 - 当前标准数据垂直切片只含 MMLU-Pro 和 GPQA-Diamond 客观选择题转换器；IFEval 专用规则 Evaluator、代码沙箱和完整标准 Benchmark 插件体系尚未交付，也不执行任何不可信代码。
 - 全量真实 CLI 评测可能产生大量 Token、时间和费用；它当前只有预检、显式确认、限题与 1–4 有界并发，不继承 Web/API managed Run 的 RPM/TPM 或全局费用 hard limit。

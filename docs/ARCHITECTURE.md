@@ -30,7 +30,7 @@ flowchart LR
     Reports[本地完整报告]
     Env[进程环境变量]
     Keyring[部署 AES keyring]
-    Upstream[OpenAI-compatible API]
+    Upstream[Chat / Responses / Messages API]
     Git[本地 Git 元数据]
 
     User --> Browser
@@ -117,7 +117,7 @@ flowchart TB
     AttemptLedger --> DB
     Runner --> DB
     Adapters -->|Mock: 无网络| Runner
-    Adapters -->|OpenAI-compatible: HTTPS remote / HTTP loopback| Provider
+    Adapters -->|三类显式远程协议: HTTPS remote / HTTP loopback| Provider
     PinnedSources -->|固定 revision / SHA| LocalCLI
     LocalCLI -->|复用 Dataset、Run、Lease、Runner| DB
     LocalCLI -->|发现 / canary / generate| Provider
@@ -133,7 +133,7 @@ flowchart TB
 | Dataset Loader | 限制文件、解析、逐字段校验、稳定 Hash | 下载远程数据或执行数据集代码 |
 | Standard Dataset Converters | 固定下载/缓存 MMLU-Pro、GPQA，校验源 Hash 并生成 dataset-v1 ZIP | 接受任意 URL、解释许可或执行题目代码 |
 | Trusted-local CLI | prepare、Provider preflight/确认、创建/恢复 `legacy_unmanaged` Run、驱动 Runner、导出报告 | 提供公网 API、保存明文 Key、继承 Web/API governance 或多租户调度 |
-| Provider Preflight | 推导 `/models`、拒绝 Key 反射、确定模型、执行最小可解析且返回模型一致的 Chat canary | 猜测多个付费目标或证明供应商完全兼容 |
+| Provider Preflight | 推导 `/models`、拒绝 Key 反射、确定模型、按显式 Chat Completions / Responses / Messages 协议执行最小可解析且返回模型一致的 canary | 猜测多个付费目标、跨协议 fallback 或证明供应商完全兼容 |
 | Report Exporter | 分页读取终态证据，从计划题与 Responses 派生唯一指标集并原子写出三文件 | 覆盖已有报告、充当访问控制或修改 Run |
 | Redis queue | 提供低延迟、at-least-once 通知和 ACK/PEL | 保存权威状态、租约、取消或结果 |
 | WorkerService | 数据库对账、消费/确认通知、优雅停机 | 改变评分协议或用 Redis 裁决状态 |
@@ -217,7 +217,7 @@ sequenceDiagram
         R->>M: generate(messages, config, request-local governance context)
         M->>D: reserve：四层 scope/bucket/ledger 原子 admission
         M->>D: mark send_started（成功后才允许外发）
-        M->>M: 打开 Provider SSE，持续消费 token/心跳/usage 至 [DONE]
+        M->>M: 打开 Provider SSE，消费至 Chat [DONE] / Responses response.completed / Messages message_stop
         alt 生成成功且非空
             M-->>R: ModelGenerationResult
             R->>E: evaluate(raw_response, reference, config)
@@ -257,7 +257,7 @@ Redis 通知和 ACK 都可重复，所以系统是 at-least-once；数据库中�
 
 1. `prepare` 下载固定源、校验并转换；不读取 Key 或连接 Provider。
 2. `run` 强制选择 `--limit` 或 `--full`，从环境变量/隐藏输入取得 Key，使用兼容根路径调用 `GET /models`；远端只允许 HTTPS，HTTP 仅允许 loopback，发现请求只接受 identity 编码且正文上限 2 MiB，多模型时不猜测目标，任何模型 ID 反射当前 Key 都使预检失败。
-3. CLI 输出 host、模型、题数、剩余 Run attempts 和最大 Chat HTTP 尝试数并要求确认；上界按 `(缺失题数 × 剩余 Run attempts + 1 个 canary) × 3` 包含 HTTP retries，再执行一个最小可解析、可能计费的 canary。若成功体明确返回其他模型名，canary 失败。
+3. CLI 输出 host、显式协议、模型、题数、剩余 Run failed-attempt 预算和最大 Provider HTTP 尝试数并要求确认；这里的剩余预算严格为 `max_attempts - failed_attempt_count`，不把 cooperative yield 或仍有效的成功领取误算为失败。请求上界按 `(缺失题数 × 剩余 failed-attempt 预算 + 1 个 canary) × 3` 包含 HTTP retries，再通过所选 Adapter 的 endpoint/headers/parser 执行一个最小可解析、可能计费的 canary。若成功体明确返回其他模型名，canary 失败。
 4. 通过 preflight 后才持久化 Benchmark、Model 和带脱敏 preflight/完整配置快照的 pending Run，并在同一进程用独立 lease owner 驱动现有 Runner。
 5. Runner 先启动租约心跳，再通过工作线程加载和物化数据库快照，避免大题集同步加载阻塞事件循环；随后以固定 `min(concurrency, question_count)` 个消费者协程从迭代器取题，不为 12,032 题一次性创建 task。Response 仍逐题短事务、fencing 与幂等。
 6. `resume` 重新确认/canary；若旧的未完成租约已经过期，本地 Runner 会执行 fenced reclaim，而不是等待已经停止的外部 Worker。恢复时跳过已有 Response，只执行缺失题。`report` 仅读取终态数据库事实，不接触 Provider。
@@ -308,6 +308,12 @@ classDiagram
     class OpenAICompatibleAdapter {
         +generate(messages, generation_config) ModelGenerationResult
     }
+    class OpenAIResponsesAdapter {
+        +generate(messages, generation_config) ModelGenerationResult
+    }
+    class AnthropicMessagesAdapter {
+        +generate(messages, generation_config) ModelGenerationResult
+    }
     class ModelGenerationResult {
         +text: string
         +input_tokens: integer or null
@@ -320,6 +326,8 @@ classDiagram
 
     ModelAdapter <|.. MockModelAdapter
     ModelAdapter <|.. OpenAICompatibleAdapter
+    ModelAdapter <|.. OpenAIResponsesAdapter
+    ModelAdapter <|.. AnthropicMessagesAdapter
     ModelAdapter --> ModelGenerationResult
 ```
 
@@ -329,16 +337,21 @@ classDiagram
 generate(messages, generation_config, *, attempt_context=None) -> ModelGenerationResult
 ```
 
-`messages` 是已经应用 Run 快照 Prompt 的消息数组；`generation_config` 至少承载 `temperature`、`top_p`、`max_tokens` 和 `seed`。`max_tokens` 为 `1..131072` 的数字时由 Adapter 原样发送，为 `null` 时不发送该字段并由 Provider 选择默认预算；这不等于无限输出。Prompt 渲染只在 manifest `system` 含非空白内容时插入 system message；空 system 被省略。当前 GPQA-Diamond 固定 `zero-shot-cot-answer-line-v1`，要求模型推理后在末行输出 `Answer: X`；MMLU-Pro 与 GPQA 的标准 system 都为空。上述 profile/省略规则属于模型输入身份，必须随模板与 Dataset Hash 一起比较。
+`messages` 是已经应用 Run 快照 Prompt 的消息数组；`generation_config` 承载 nullable `temperature`、`top_p`、`max_tokens` 和 `seed`。Chat 把有限 `max_tokens` 原样发送，Responses 映射为 `max_output_tokens`，二者的 `null` 表示省略字段并由 Provider 选择默认预算；Messages 则要求有限值。Responses/Messages 在请求和 Model 默认都没有显式采样值时，把 `temperature/top_p/seed` 冻结为 `null` 并从 Provider payload 省略；两者拒绝非空 `seed`，Messages 的非空 `temperature` 还限制为 `0..1`。Prompt 渲染只在 manifest `system` 含非空白内容时插入 system message；Messages Adapter 把这条初始 system instruction 提升为顶层 `system`，其他消息保持有序。空 system 被省略。当前 GPQA-Diamond 固定 `zero-shot-cot-answer-line-v1`，要求模型推理后在末行输出 `Answer: X`；MMLU-Pro 与 GPQA 的标准 system 都为空。上述 profile/省略规则属于模型输入身份，必须随模板与 Dataset Hash 一起比较。
 
 `attempt_context` 是 request-local、只含 run/question/model/provider opaque scope、lease token、execution generation、attempt ordinal 与数值预留的非秘密对象；可选 controller 在 Adapter 内围住每一个真实 HTTP retry，保证一次 `generate()` 的多个 attempt 不会被漏记。controller 不接触 Key、header、Prompt 或响应正文。
 
 Adapter Registry 根据 `provider_type` 选择实现：
 
 - `mock`：使用输入中稳定标识或 Demo 题目映射产生可预测回答，不读取密钥且不得发起网络请求；latency、Token、usage shape 与模拟错误等全部确定性本地配置先验证，非法配置不会调用 reserve/mark/finish hook，成功与模拟 Provider 错误仍走同一三阶段治理语义。
-- `openai_compatible`：校验 `base_url` 和 `remote_model_name`，并要求恰好一种凭据输入：environment Run 在调用前按 `api_key_env` 读取，stored Run 由 Worker 传入已解密的 `SecretStr`。Adapter 不读取数据库或 keyring。远端 URL 必须为 HTTPS，HTTP 仅允许 loopback；请求声明 `Accept-Encoding: identity` 并拒绝压缩响应。Chat payload 显式发送 `stream:true` 与 `stream_options.include_usage:true`，request-local parser 支持任意字节/UTF-8 分块、SSE comment 心跳、多 `data` 行、role/null delta、usage-only 尾块和 `[DONE]`，并只聚合 `delta.content`；推理扩展字段不混入评测答案。看到 finish reason 不会提前返回，HTTP 干净 EOF 却缺少 `[DONE]` 不作成功；忽略 stream 请求而返回普通 JSON 的 Provider 继续兼容。普通 JSON 成功体上限 4 MiB，SSE wire/单事件/聚合 content 上限分别为 64 MiB/1 MiB/4 MiB，非 2xx 错误体上限 64 KiB。对 429、部分 5xx 和暂时性 transport 错误仍执行快照内有上限的指数退避；明显的 4xx 配置错误不重试。
+- 三类远程 Adapter 共用 `base_url`/模型/凭据、HTTPS（HTTP 仅 loopback）、identity-only、禁 redirect、有界读取、有限 retry、attempt ledger 和聚合后当前-Key 脱敏边界。根地址分别追加 `/chat/completions`、`/responses`、`/messages`；匹配的完整 endpoint 原样使用，其他已知协议后缀在外发前拒绝。environment Run 在调用前按 `api_key_env` 读取，stored Run 由 Worker 传入已解密的 `SecretStr`；Adapter 不读取数据库或 keyring。
+- `openai_compatible`：保留 Chat Completions 向后兼容值。payload 显式发送 `stream:true` 与 `stream_options.include_usage:true`；request-local parser 支持任意字节/UTF-8 分块、SSE comment、多 `data` 行、role/null delta、usage-only 尾块和 `[DONE]`，只聚合 `delta.content`。
+- `openai_responses`：发送 Responses `input` 与 `max_output_tokens`，按 `response.output_text.delta` 聚合文本，以 `response.completed` 为成功终止证据；普通 JSON 从 `output` 文本项提取答案并归一化 `input_tokens/output_tokens`。
+- `anthropic_messages`：使用 `x-api-key`、`anthropic-version` 和 Messages payload，按 `content_block_delta` 聚合文本，以 `message_stop` 为成功终止证据；普通 JSON从 `content[].text` 提取答案，usage 从 `message_start`/`message_delta` 或最终对象归一化且不重复求和。
 
-Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error`、`invalid_provider_stream`、`provider_stream_error`、`incomplete_provider_stream`、`empty_response` 和 `output_truncated`。Provider 以 `finish_reason="length"` 返回空内容时，Adapter 直接产生 `output_truncated`；返回非空内容但 Evaluator 无法解析有效最终答案时，Runner 根据同一 finish reason 把普通 parse error 提升为 `output_truncated`，并保留已有 raw response、usage、延迟与成本证据。最终 `httpx.TransportError` 转成安全 `AdapterError` 时不保留可达 request/Authorization 的 `__cause__` 或 `__context__`。日志和持久化错误不得包含 Authorization、密钥值、原始 SSE 行/事件或完整敏感响应头。SSE content 先聚合再执行当前 Key 的精确替换，避免 Key 横跨 delta 时泄漏。Provider 返回证据会递归检查成功内容、raw usage 的对象键和 JSON 标量，以及 provider request ID、返回模型名、system fingerprint 和 finish reason；其中出现的当前 Key 会先做精确替换。这不是对任意敏感内容的通用 DLP，也不扫描与 Provider 响应无关的固定数据。
+看到 finish reason 不会提前返回，HTTP 干净 EOF 却缺少各协议终止事件不作成功。普通 JSON 成功体上限 4 MiB，SSE wire/单事件/聚合 content 上限分别为 64 MiB/1 MiB/4 MiB，非 2xx 错误体上限 64 KiB。对 429、部分 5xx 和暂时性 transport 错误仍执行快照内有上限的指数退避；明显的 4xx 配置错误不重试。协议不根据 URL/模型名猜测，也不在失败后 fallback，Run snapshot 的 Adapter 类型决定恢复语义。
+
+Adapter 将供应商错误映射为稳定的内部分类，例如 `authentication_error`、`rate_limited`、`provider_4xx`、`provider_5xx`、`connect_timeout`、`read_timeout`、`network_error`、`invalid_provider_stream`、`provider_stream_error`、`incomplete_provider_stream`、`empty_response` 和 `output_truncated`。除既有 retryable HTTP/transport 分类外，Responses 的 rate-limit/server typed error，以及 Messages 的 `rate_limit_error`、`api_error`、`overloaded_error`、`timeout_error` 才允许重试；Messages 的 HTTP `529` 也写入冻结 retry status。未知流内错误 fail closed，每个重试都使用独立 attempt ledger 行。Provider 以 `finish_reason="length"` 返回空内容时，Adapter 直接产生 `output_truncated`；返回非空内容但 Evaluator 无法解析有效最终答案时，Runner 根据同一 finish reason 把普通 parse error 提升为 `output_truncated`，并保留已有 raw response、usage、延迟与成本证据。最终 `httpx.TransportError` 转成安全 `AdapterError` 时不保留可达 request/`Authorization`/`x-api-key` 的 `__cause__` 或 `__context__`。日志和持久化错误不得包含秘密 header、密钥值、原始 SSE 行/事件或完整敏感响应头。SSE content 先聚合再执行当前 Key 的精确替换，避免 Key 横跨 delta 时泄漏。Provider 返回证据会递归检查成功内容、raw usage 的对象键和 JSON 标量，以及 provider request ID、返回模型名、system fingerprint 和 finish reason；其中出现的当前 Key 会先做精确替换。这不是对任意敏感内容的通用 DLP，也不扫描与 Provider 响应无关的固定数据。
 
 ## Evaluator 架构
 
@@ -534,7 +547,7 @@ Runner 从 Run 快照读取模型连接配置、凭据来源、价格、生成�
 
 每条 EvaluationResponse 除 raw/parsed/reference/score/error/usage 外，可保存经过长度、字符与当前 Key 精确反射检查的 `provider_request_id`、`returned_model`、`system_fingerprint`、`finish_reason` 和 `http_attempt_count`；任一不安全字符串归一化为 `null`，报告只导出这些 typed 字段，不持久化任意 raw usage object。
 
-Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `temperature`、`top_p`、`max_tokens`、`seed`。创建 Run 时显式字段覆盖 Model 默认，省略字段才使用 Model 默认；显式 `max_tokens:null` 也是覆盖值，不会回退。`generation` 块因此只包含实际执行值，不把未转发的 Provider 扩展伪装成有效参数。通用 API 保留 protocol-v1 的 `max_tokens=256` 和读取超时 `60s` 默认；没有对应 Model 默认且用户尚未手动修改时，Web 根据已知 Benchmark 提交可编辑的显式建议：Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s`。
+Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `temperature`、`top_p`、`max_tokens`、`seed`。创建 Run 时显式字段覆盖 Model 默认，省略字段才使用 Model 默认；显式 `max_tokens:null` 也是覆盖值，不会回退。为兼容旧 Chat 客户端，请求 Schema 继续以 `temperature=0/top_p=1/seed=42` 为默认；Responses/Messages 若请求和 Model 默认都未提供这些采样字段，则 Run 构建时归一化为 `null` 并从上游 payload 省略。`generation` 块因此只包含实际执行值，不把未转发的 Provider 扩展伪装成有效参数。通用 API 保留 protocol-v1 的 `max_tokens=256` 和读取超时 `60s` 默认；没有对应 Model 默认且用户尚未手动修改时，Web 根据已知 Benchmark 提交可编辑的显式输出建议：Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s`。Messages 始终使用有限输出上限。
 
 React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 条为一页显示所有状态，支持状态筛选，并在当前页存在 active Run 时轮询；列表和 Run Detail 都以持久化 Run ID 建立链接。Run Detail 对 `GET /runs/{id}/responses` 使用每页 100 条的 offset 分页，而不是只加载大型正式 Benchmark 的前 100 条；详情页页码与全 Run 进度读取相互独立。Run Detail 还显式展示 `managed/delayed/exhausted/legacy_unmanaged` 治理状态，只将封闭的稳定 reason 映射为人类可读文案，`governance_not_before` 以 UTC 显示，未知值不原样反射。
 
@@ -564,7 +577,7 @@ React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 
 
 带凭据的目标 DSN 必须通过 `--target-env` 从受控环境读取；`--target` 拒绝 URL password 和 password query。COMMIT 未获得 PostgreSQL 确认时退出 `4`/`commit_outcome_unknown`；由于事务原子性，目标可能为空，也可能是完整的 precommit 快照。COMMIT 已确认但连接收尾、postcommit 快照/对账或报告失败时退出 `3`/`committed_but_verification_failed`；这时目标已提交完整 precommit 快照，不会自动回滚。两种结果都禁止盲目重试，必须保持目标离线，按已输出摘要独立检查目标是空还是完整提交。非空目标会拒绝再次导入，工具也不提供 PostgreSQL 到 SQLite 的反向同步。
 
-Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`20260828_0005` 增加 `worker_processes` 与 audit retention/exporter 扫描索引；schema-equivalent `20260829_0006` 只条件补齐早期 `0004` 变体缺少的三个 canonical 索引；当前 data-only head `20260830_0007` 不改 schema、ledger 或 actual usage，只按显式 hard reservation 语义重算 `governance_scopes.overdrawn`。`0007` upgrade/downgrade 均在任何更新前拒绝 `reserved/send_started` active reservation；downgrade 只恢复旧派生谓词。兼容 preflight 仍以精确 fingerprint、integrity/FK、索引定义和 single-active 数据约束 fail closed。`0006 → 0005` 不删除 canonical 对象；后续两个 downgrade guard 都在第一条有损 DDL 前拒绝可能丢失的事实：0005 拒绝任意 Worker generation，0004 拒绝 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 证据。隔离空数据库分别验证 `0005 ↔ 0004` 与 `0004 ↔ 0003`；已使用环境应优先向前修复，或恢复经核验的旧备份并单独保留新 schema 证据。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
+Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`20260828_0005` 增加 `worker_processes` 与 audit retention/exporter 扫描索引；schema-equivalent `20260829_0006` 只条件补齐早期 `0004` 变体缺少的三个 canonical 索引；data-only `20260830_0007` 不改 schema、ledger 或 actual usage，只按显式 hard reservation 语义重算 `governance_scopes.overdrawn`；当前 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并同时替换 Provider 类型 check 与远程配置 check，旧 Model 不改写。`0008 → 0007` 在新协议 Model 存在时于 DDL 前拒绝；`0007` upgrade/downgrade 均在任何更新前拒绝 `reserved/send_started` active reservation，且 downgrade 只恢复旧派生谓词。兼容 preflight 仍以精确 fingerprint、integrity/FK、索引定义和 single-active 数据约束 fail closed；无版本但 metadata-current 的 SQLite 仍先 stamp `0006`，使 data-only `0007` 真实执行后再进入 `0008`。`0006 → 0005` 不删除 canonical 对象；后续两个 downgrade guard 都在第一条有损 DDL 前拒绝可能丢失的事实：0005 拒绝任意 Worker generation，0004 拒绝 policy/scope/bucket/question-execution/ledger/audit 或新 Run/Response 证据。隔离空数据库分别验证 `0005 ↔ 0004` 与 `0004 ↔ 0003`；已使用环境应优先向前修复，或恢复经核验的旧备份并单独保留新 schema 证据。完整流程见 [`OPERATIONS.md`](./OPERATIONS.md)。
 
 ## 错误处理与可观察性
 

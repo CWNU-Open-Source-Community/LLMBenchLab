@@ -1,4 +1,8 @@
-export type ProviderType = "mock" | "openai_compatible";
+export type ProviderType =
+  | "mock"
+  | "openai_compatible"
+  | "openai_responses"
+  | "anthropic_messages";
 export type CredentialSource = "none" | "environment" | "stored";
 export type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type GovernanceRunStatus = "legacy_unmanaged" | "managed" | "delayed" | "exhausted";
@@ -115,8 +119,8 @@ export interface EvaluationRun {
 export interface RunPayload {
   model_id: string;
   benchmark_id: string;
-  temperature: number;
-  top_p: number;
+  temperature: number | null;
+  top_p: number | null;
   max_tokens: number | null;
   seed: number | null;
   system_prompt?: string | null;

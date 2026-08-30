@@ -5,7 +5,7 @@
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 当前计划：[Phase 2 恢复与运维闭环](plans/2026-08-28-phase-2-recovery-operations.md)
 > 当前日志：[2026-08-28 P2-07 工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)
-> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)，exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
+> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)，exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md) / [ADR-0019](decisions/ADR-0019-explicit-provider-api-protocol-adapters.md)
 > 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md)
 
 ## 当前事实
@@ -14,7 +14,7 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 当前 P2-06 已按 [ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 实现：
 
-- P2-06 的 `20260828_0005` 新增 `worker_processes` 和 bounded audit scan indexes；`20260829_0006` 仅修复早期 `0004` 三索引缺口。当前应用 head `20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn，不改变 13 表 schema/importer/archive 合同、never-delete ledger 或 actual usage。SQLite→PostgreSQL importer 继续做 13 表精确 digest，拒绝 live generation 并复制 stopped/stale facts；表非空时 `0005 -> 0004` 在 DDL 前拒绝。
+- P2-06 的 `20260828_0005` 新增 `worker_processes` 和 bounded audit scan indexes；`20260829_0006` 仅修复早期 `0004` 三索引缺口，`20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn。当前应用 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并替换 Provider 类型 check 与远程配置 check；它不改写旧 Model，也不改变 13 表/importer/archive event 合同、never-delete ledger 或 actual usage。SQLite→PostgreSQL importer 继续做 13 表精确 digest，拒绝 live generation 并复制 stopped/stale facts；表非空时 `0005 -> 0004` 在 DDL 前拒绝。
 - 长运行 Worker 注册唯一 generation，只在真实 scan/claim/lease-heartbeat/progress 后按 DB UTC 合并刷新；`/tasks/metrics` 和 exporter 只公开 expected/registered/live/stalled/shortfall 与聚合时间。dependency probe 固定声明不检查 main-loop progress。
 - `GET /api/v1/metrics/prometheus` 输出固定 Prometheus text `0.0.4` gauge，使用一个 DB-time 快照、有界 15 分钟 audit 与 1 小时 latency 窗口、固定 enum label、整次 fail-closed 和每 API 进程 single-flight。
 - `deploy/observability/` 提供固定八条告警规则、抓取示例与对应 Operations Runbook；仓库不部署 Prometheus、Alertmanager、OTel 或通知发送器。
@@ -51,6 +51,17 @@ PostgreSQL 16 跨 Benchmark/唯一 lease 回归 `2 passed`，隔离 Compose 的 
 四个必需 job 全绿，因此本维护为 `completed`。本文件的下一独立任务仍是下面的 P2-07
 最小只读 verifier。
 
+## 进行中：Provider API 三协议适配
+
+[ADR-0019](decisions/ADR-0019-explicit-provider-api-protocol-adapters.md) 与
+[独立计划](plans/2026-08-30-provider-api-protocols.md) 已把旧 `openai_compatible`
+保留为 Chat Completions，并新增显式 `openai_responses` / `anthropic_messages`。
+Adapter、Model/API/Run snapshot、Worker/CLI preflight、`0008` migration 与 Web 表单已实现；
+本地 backend `1079 passed, 36 skipped`、frontend `72 passed`、lint、Mock smoke、build、
+Compose config 和隔离 PostgreSQL 16 migration 门禁均通过，未调用真实 Provider。
+当前只剩 commit、普通 push、exact-SHA CI 与证据文档收尾；完成后下一独立任务仍是
+下面的 P2-07 最小只读 verifier。
+
 ## 已完成：建立 P2-07 工作包
 
 1. 已按 AGENTS/PLANS 新建独立执行计划与工作日志，记录目标、非目标、验收、风险和实施步骤。
@@ -62,7 +73,7 @@ PostgreSQL 16 跨 Benchmark/唯一 lease 回归 `2 passed`，隔离 Compose 的 
 
 P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最小只读 verifier 切片开始，之后才依次完成：
 
-- PostgreSQL backup → 空目标 restore → Alembic `20260830_0007` exact head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
+- PostgreSQL backup → 空目标 restore → Alembic `20260830_0008` exact head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
 - 数据库与数据库外 keyring 独立备份/恢复：匹配 keyring 能解密，缺失/错误 keyring fail closed；日志/证据不得回显 Key 或 envelope。
 - Redis 重建/consumer group 恢复、Worker 扩缩、八条告警响应、dead-letter、commit outcome unknown、governance integrity 与 remaining cancel/retry/lease/budget crash matrix 的真实 PostgreSQL/Redis 演练。
 - audit archive 作为数据库恢复后的精确校验/补回工具参与演练，但不得把 archive 自身 restore 冒充整库、PITR、RPO/RTO 或 WORM 认证。
