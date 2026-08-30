@@ -1,7 +1,7 @@
 # 修复观测 Token 估算误触发全局 overdraw 执行计划
 
 - Owner: Codex
-- Status: in_progress
+- Status: completed
 - Created: 2026-08-30
 - Updated: 2026-08-30
 - Related phase: [Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
@@ -44,7 +44,7 @@ OpenCode Go `hy3` 的 managed Run 在 15 题中成功完成 7 题后以 `governa
 3. [completed] 修正前端文案并补充 governance/runner/migration/frontend 回归；frontend `39 passed`。
 4. [completed] 停止本地服务，备份并迁移当前 SQLite；head=`0007`，四层误判 `4→0`，旧事实保持。
 5. [completed] 运行目标/完整测试、`make lint`、frontend build、Mock smoke、Compose config 与双方言 migration；完整结果见下表和工作日志。
-6. [in_progress] 实现 SHA `c6212db…` 已 push；首次精确 SHA CI 的 backend、PostgreSQL/Redis integration、frontend 三项成功，real-Compose job 暴露验收脚本对合法 nullable conservative settlement 执行 `float(None)`。最小兼容修正与本地 9/9 Compose 验收已通过，修正 commit/push 和新的精确 SHA CI 待完成。
+6. [completed] 实现 SHA `c6212db…` 已 push；首次精确 SHA CI 的 backend、PostgreSQL/Redis integration、frontend 三项成功，real-Compose job 暴露验收脚本对合法 nullable conservative settlement 执行 `float(None)`。修正 SHA `cb00924…` 已 push，本地与远端 9/9 Compose 验收及精确 SHA CI 4/4 全部成功。
 
 ## Risks
 
@@ -67,7 +67,7 @@ OpenCode Go `hy3` 的 managed Run 在 15 题中成功完成 7 题后以 `governa
 | Current DB | backup + migrate + SQL/API check | 4 scopes overdrawn→0，历史 7 Responses/usage 不变 | head=`0007`；scope `4→0`；7 Responses/7 ledger、407 input/599 output 保留；13 业务表行数一致；`quick_check=ok`、FK=0 |
 | Full gates | `make test`、`make lint`、build、smoke、Compose config | 全部通过 | backend `946 passed, 33 skipped`；frontend `39 passed`；`make lint` exit 0；Mock smoke `1 passed`；frontend build 与 `docker compose config` 通过 |
 | Compose acceptance correction | `make phase2-acceptance` | nullable hard-bound seam 与其余故障矩阵通过 | `9/9 passed`，隔离容器、卷和网络清理通过；目标脚本单测 `16 passed` |
-| Remote | push + exact-SHA GitHub Actions | 必需 jobs 全绿 | `c6212db…` run `33270167616` 为 3/4；real-Compose 因 acceptance-only `float(None)` 失败，修正后的精确 SHA 待执行 |
+| Remote | push + exact-SHA GitHub Actions | 必需 jobs 全绿 | 首次 `c6212db…` run `33270167616` 的 acceptance-only `float(None)` 失败已保留；修正 SHA `cb00924ea3ba3d01ce5bc322b7eabdae1345baf3` 的 [run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 成功 |
 
 ## Rollback
 

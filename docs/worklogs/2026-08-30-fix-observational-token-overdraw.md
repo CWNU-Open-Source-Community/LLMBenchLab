@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2](../phases/PHASE-2-RELIABILITY.md)
 - 关联计划：[执行计划](../plans/2026-08-30-fix-observational-token-overdraw.md)
 - 关联 ADR：[ADR-0018](../decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
-- 当前状态：in_progress
+- 当前状态：completed
 
 ## 初始仓库状态
 
@@ -41,7 +41,7 @@
 - [x] 当前数据库四层误判解除，旧 Run 仍 failed/exhausted且 7 条 Response/407 input/599 output 保留。
 - [x] 前端不再把所有 overdrawn 描述为 conservative settlement。
 - [x] 目标/完整测试、`make lint`、frontend build、smoke、部署配置和双方言迁移验证通过。
-- [ ] 独立 commit 已 push，精确 SHA CI 必需 jobs 全部成功。
+- [x] 独立 commit 已 push，精确 SHA CI 必需 jobs 全部成功。
 
 ## 假设与风险
 
@@ -55,7 +55,7 @@
 2. [completed] 建立 ADR-0018、执行计划与本日志。
 3. [completed] 实现代码、迁移与回归测试，并完成本地完整与真实基础设施验证。
 4. [completed] 执行当前数据库维护迁移和只读事实验证。
-5. [in_progress] 文档收尾、审查、修正 commit/push/exact-SHA CI。
+5. [completed] 文档收尾、审查、修正 commit/push/exact-SHA CI。
 
 ## 已确认事实
 
@@ -87,6 +87,6 @@
 - 已将 conservative settlement 验收改为逐维精确比较 nullable/numeric reserved→actual，并加入 null、numeric、mismatch 回归。目标脚本测试 `16 passed`；完整 `make phase2-acceptance` 为 `9/9 passed`，此前失败场景通过，最终 cleanup 的 container/volume/network 均为空。第一次本地尝试在业务场景前被 Docker Hub 镜像代理 `docker.1panel.live` 的 403 阻断；随后仅使用临时匿名 Docker 配置与公共缓存补齐本机基础镜像，不修改全局 Docker 配置，实际验收成功。
 - 当前个人 SQLite 已由一致性备份 `backend/data/llmbenchlab-pre-0007-20260830.db`（SHA-256 `3fcf7f4980e935a78a3d7b66351cb3556f6cbba5e37d348a82d9252d4d962792`）和 migration 入口自动备份共同保护后迁移到 `20260830_0007`；两份备份均收紧为 `0600`。四层 `overdrawn` scope 从 4 降为 0，旧 Run 仍为 `failed/exhausted`，7 Responses、7 ledger、407 input/599 output 全部保留，13 张业务表行数迁移前后一致，`quick_check=ok`、foreign-key violation=0。
 - 开发 API/Worker/Web 已重新启动；`/api/v1/health` 为 `ok`，任务 metrics 为 active Provider attempt `0`、overdrawn scope `0`、live Worker `1`。真实 PostgreSQL/Redis 回归使用的两个精确临时容器已停止并由 `--rm` 清除。
-- 未调用真实 Provider。首个实现 SHA 的远程门禁如实保留为 3/4；nullable acceptance 修正尚待形成新 commit/push 并取得新的 exact-SHA 4/4 证据，因此任务仍为 `in_progress`，最后一项验收保持未勾选。
+- 未调用真实 Provider。首个实现 SHA 的远程门禁如实保留为 3/4；nullable acceptance 修正 commit `cb00924ea3ba3d01ce5bc322b7eabdae1345baf3` 已普通 push，其精确 SHA [run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 四个必需 job 全部成功，包括 real-Compose 9/9 场景与 evidence upload。本维护仓库级闭环完成。
 
 最终独立审查未发现 Blocker/High/Medium。剩余 Low 覆盖缺口是：seeded historical overdraw 与 active-reservation rollback 的长期自动回归目前在 SQLite，真实 PostgreSQL 已执行空库双方言 SQL 往返但未持久化同构数据 fixture；importer/capacity 的 provenance wiring 也分别由 helper/SQL 文本目标测试覆盖，尚无另一个端到端 historical row 场景。这些不改变当前修复结论，后续若扩充集成门禁可合并为一个串行 PostgreSQL fixture。
