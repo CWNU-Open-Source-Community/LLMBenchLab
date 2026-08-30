@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 
 from app.schemas.base import ORMModel
 from app.security import normalize_http_attempt_count, normalize_provider_metadata
@@ -66,3 +66,19 @@ class EvaluationResponseList(ORMModel):
     total: int
     offset: int
     limit: int
+    known_input_tokens: int = Field(
+        ge=0,
+        description="Sum of non-null input tokens across every Response in the Run.",
+    )
+    known_output_tokens: int = Field(
+        ge=0,
+        description="Sum of non-null output tokens across every Response in the Run.",
+    )
+    input_token_reported_responses: int = Field(
+        ge=0,
+        description="Run-wide Response count with non-null input tokens.",
+    )
+    output_token_reported_responses: int = Field(
+        ge=0,
+        description="Run-wide Response count with non-null output tokens.",
+    )

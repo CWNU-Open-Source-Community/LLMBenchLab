@@ -28,6 +28,8 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 [Observational Token overdraw 修复](plans/2026-08-30-fix-observational-token-overdraw.md) 已完成。ADR-0018 已把非显式 input 估算与 hard reservation 分离，并把 data-only head 定为 `20260830_0007`；该 revision 只重算 `governance_scopes.overdrawn`，upgrade/downgrade 均拒绝 active reservation，历史 ledger/actual/Response/Run 终态保持。本地完整验证、当前个人 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与 [exact-SHA CI run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 均通过。P2-07 前置阻碍已解除，但本次任务到此停止。
 
+[Run Detail 错题与部分 Token 展示修复](plans/2026-08-30-fix-run-detail-metrics.md) 正在交付：它只扩充 Responses 读取 API 和页面证据表达，不改变 protocol-v1 精确 Token、成绩、历史数据、migration 或 P2-07 范围。完成本地/远程门禁后，下一独立切片仍是本文件定义的 P2-07 最小只读 recovery verifier。
+
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；随后的兼容修复已在自动备份后将当时重建库前进到 `0006` 并通过 startup/check。
 
 ## 已完成：建立 P2-07 工作包

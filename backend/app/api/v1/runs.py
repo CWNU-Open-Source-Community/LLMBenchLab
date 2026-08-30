@@ -375,14 +375,20 @@ def list_responses(
     pagination: PaginationDep,
 ) -> EvaluationResponseList:
     _get_run_or_404(session, run_id)
-    total = (
-        session.scalar(
-            select(func.count())
-            .select_from(EvaluationResponse)
-            .where(EvaluationResponse.run_id == run_id)
-        )
-        or 0
-    )
+    usage_summary = session.execute(
+        select(
+            func.count(EvaluationResponse.id),
+            func.coalesce(func.sum(EvaluationResponse.input_tokens), 0),
+            func.count(EvaluationResponse.input_tokens),
+            func.coalesce(func.sum(EvaluationResponse.output_tokens), 0),
+            func.count(EvaluationResponse.output_tokens),
+        ).where(EvaluationResponse.run_id == run_id)
+    ).one()
+    total = int(usage_summary[0] or 0)
+    known_input_tokens = int(usage_summary[1] or 0)
+    input_token_reported_responses = int(usage_summary[2] or 0)
+    known_output_tokens = int(usage_summary[3] or 0)
+    output_token_reported_responses = int(usage_summary[4] or 0)
     rows = session.execute(
         select(EvaluationResponse, Question)
         .join(Question, Question.id == EvaluationResponse.question_id)
@@ -423,5 +429,12 @@ def list_responses(
         for response, question in rows
     ]
     return EvaluationResponseList(
-        items=items, total=total, offset=pagination.offset, limit=pagination.limit
+        items=items,
+        total=total,
+        offset=pagination.offset,
+        limit=pagination.limit,
+        known_input_tokens=known_input_tokens,
+        known_output_tokens=known_output_tokens,
+        input_token_reported_responses=input_token_reported_responses,
+        output_token_reported_responses=output_token_reported_responses,
     )

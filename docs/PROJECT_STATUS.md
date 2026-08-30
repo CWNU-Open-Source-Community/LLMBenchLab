@@ -23,7 +23,7 @@
 - OpenAI-compatible SSE、严格 `[DONE]`、JSON fallback、identity-only、wire/event/content/error 上限、idle read timeout、bounded error 与精确当前-Key 脱敏。
 - Web write-only `api_key`、AES-256-GCM `model_credentials`、数据库外 API/Worker 共享 keyring、legacy `api_key_env`、origin/active-Run 门禁和 fail-closed repair/remove 路径。
 - MMLU-Pro test 与 GPQA-Diamond 固定 revision/SHA 转换、可信本地 `llmbenchlab-evaluate prepare/run/resume/report`、请求上界确认和原子终态报告。该 CLI 仍要求独占数据库，未受 Phase 2 managed budget 保护。
-- React 中文界面覆盖 Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail、Leaderboard；Run 列表全状态筛选/分页/活动轮询，详情逐题分页，关键桌面/平板/移动布局已修复。
+- React 中文界面覆盖 Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail、Leaderboard；Run 列表全状态筛选/分页/活动轮询，详情逐题分页，关键桌面/平板/移动布局已修复。Run Detail 现区分未得分、普通答错与执行异常，并在精确 Token 未知时显示 Run-wide 已知小计、输入/输出覆盖率和“不完整”提示。
 
 ## 已通过候选门禁的 Phase 2 切片
 
@@ -78,6 +78,12 @@
 - 应用 Alembic head 已前进到 data-only `20260830_0007`。该 migration 不改 schema、ledger、actual usage、Response、audit 或 Run 终态，只重算 `governance_scopes.overdrawn`；upgrade/downgrade 在任何更新前拒绝 active reservation。前端 overdrawn 文案改为“实际用量曾被判定超过预留”，既适用于新 hard overdraw，也不会误述升级前保留的历史终态。
 - 本地验证已完成：backend `946 passed, 33 skipped`，真实 PostgreSQL+Redis integration `33 passed`，双方言 migration upgrade/downgrade/upgrade/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、real-Compose `9/9` 与 Compose config 均通过。当前个人 SQLite 已到 `0007`；四层 scope `overdrawn` 从 4 降为 0，7 Responses/7 ledger、407 input/599 output、13 张业务表行数均保留，`quick_check=ok`、FK=0。未调用真实 Provider。首次实现 SHA 的 acceptance-only `float(None)` 失败已保留，最终修正 SHA `cb00924…` 的 run `33271095910` 4/4 成功，因此本维护为 `completed`。
 
+## 2026-08-30 Run Detail 错题与部分 Token 展示修复（`in_progress`）
+
+- 目标 Run `a3de7e4d-40b2-4d8c-994b-c713047393ae` 的 198 条证据实际为正确 179、普通答错 17、执行异常 2；旧页面把只统计异常的 `error_questions=2` 标成“错误题”。页面现显示未得分 19，并明确拆分三类数量；当前页也分别统计未得分与执行异常。
+- 196/198 条 Response 有 usage，已知输入 45,509、输出 4,561,625。protocol-v1 精确 Run Token 继续因两条缺失而保持 `null`；Responses API 追加分页无关的输入/输出已知小计和独立覆盖数，页面显示“已知小计”和“完整总量未知”，不会修改历史数据或冒充 Provider 账单。
+- API/UI、OpenAPI、零/全/部分/非对称 usage、合法零 Token、分页、并行快照竞态与页内错题拆分的目标测试已通过；完整本地门禁、commit/push 与精确 SHA CI 尚待完成。本维护不改变 Phase 2/3 或 P2-07 状态。
+
 ## 状态与后续
 
 - P2-06：状态为 `completed`；实现、clean-SHA Compose evidence、实现 commit 与 evidence closeout 文档 commit 的 push 和精确 SHA CI 均已完成。
@@ -85,6 +91,7 @@
 - 本地数据恢复与静默启动：状态为 `completed`；实现 commit `5075bdb5e9b53f527a43e5aff7b7d2c7b48c5c9b` 已 push，精确 SHA run `33265171953` 4/4 成功。
 - 已下载标准评测集本地加载：状态为 `completed`；三个现有正式 ZIP 已导入并完成本地数据库/API/目标测试验证，`0163b67…` 的 run `33266167547` 4/4 成功。
 - observational Token overdraw 修复：状态为 `completed`；目标 head `0007`、本地完整验证、当前库迁移、最终修正 commit/push 与 exact-SHA CI 4/4 均完成。
+- Run Detail 错题与部分 Token 展示修复：状态为 `in_progress`；目标实现与回归已完成，完整本地/远程门禁尚待完成。
 - P2-07：状态为 `planned`，已建立 [ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)、[独立计划](plans/2026-08-28-phase-2-recovery-operations.md) 和 [工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的功能实现尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。P2-07 recovery-manifest-v1 的尚未实施 exact head 现为 `20260830_0007`。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
@@ -128,6 +135,7 @@
 | 2026-08-30 本地恢复/静默启动 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、恢复库 digest/quick/FK/head 与真实 API/Web 读取通过 | 默认库恢复 `1/1/15/1/15`；`5075bdb…` 的 run `33265171953` 4/4 成功，不改变 P2-07 |
 | 2026-08-30 标准评测集本地加载 | 三个 ZIP Loader 校验通过；API 导入 `201/201/201`；数据库/API 对账为 `4` Benchmarks、`24,277` Questions；`quick_check=ok`、FK `0`、head `0006`；目标测试 `40 passed` | 本地加载完成，原 Model/Run/Response 保持；`0163b67…` 的 run `33266167547` 4/4 成功，无 Provider 调用 |
 | 2026-08-30 observational overdraw 修复 | backend `946 passed, 33 skipped`；真实 PG+Redis integration `33 passed`；双方言 migration 往返/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、real-Compose `9/9`、Compose config 与当前库 backup/migrate/check 通过 | 当前 SQLite head=`20260830_0007`，scope `4→0`，7 Responses/7 ledger/407 input/599 output、13 表行数、quick/FK 保持；无真实 Provider；`cb00924…` 的 run `33271095910` 4/4 成功 |
+| 2026-08-30 Run Detail 指标修复（本地门禁） | backend API/Smoke 目标 `11 passed`、frontend Run Detail/format `20 passed`；完整 backend `951 passed, 33 skipped`、frontend `47 passed`；lint/build/Mock smoke/Compose config/实页验收通过 | 目标 Run 19/17/2、已知 Token `45,509/4,561,625` 和 `196/198` 覆盖可见；无真实 Provider；commit/push 与精确 SHA CI 待完成 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见上方独立行 |
 | P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见上方独立行 |
@@ -154,7 +162,8 @@
 - [本地数据恢复与静默启动](worklogs/2026-08-30-restore-data-quiet-startup.md)
 - [加载已下载的标准评测集](worklogs/2026-08-30-load-downloaded-benchmarks.md)
 - [修复 observational Token overdraw](worklogs/2026-08-30-fix-observational-token-overdraw.md)
+- [修复 Run Detail 错题与部分 Token 展示](worklogs/2026-08-30-fix-run-detail-metrics.md)
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。observational Token overdraw 修复已完成本地验证、个人 SQLite 受控迁移、commit/push 和 exact-SHA CI 4/4，仓库级闭环完成。后续入口恢复为 P2-07 最小只读 recovery verifier，但本次不继续实施。P2-06 已完成仓库级收尾，P2-07 仍为 `planned`；Phase 2 与 Phase 3 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 提供后续任务入口。当前先完成 Run Detail 错题与部分 Token 展示修复的完整门禁；之后入口仍为 P2-07 最小只读 recovery verifier。P2-06 已完成仓库级收尾，P2-07 仍为 `planned`；Phase 2 与 Phase 3 继续保持 `in_progress`。

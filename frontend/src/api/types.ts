@@ -149,6 +149,13 @@ export interface EvaluationResponse {
   created_at: string;
 }
 
+export interface EvaluationResponseList extends ListResponse<EvaluationResponse> {
+  known_input_tokens: number;
+  known_output_tokens: number;
+  input_token_reported_responses: number;
+  output_token_reported_responses: number;
+}
+
 export interface LeaderboardEntry {
   run_id: string;
   model_id: string;

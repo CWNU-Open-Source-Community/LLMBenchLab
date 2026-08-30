@@ -1,7 +1,7 @@
 import type {
   Benchmark,
   DashboardSummary,
-  EvaluationResponse,
+  EvaluationResponseList,
   EvaluationRun,
   LeaderboardEntry,
   ListResponse,
@@ -110,7 +110,7 @@ export const api = {
   createRun: (payload: RunPayload) => request<EvaluationRun>("/runs", { method: "POST", body: JSON.stringify(payload) }),
   cancelRun: (id: string) => request<EvaluationRun>(`/runs/${id}/cancel`, { method: "POST" }),
   responses: (runId: string, params: { offset?: number; limit?: number } = {}) =>
-    request<ListResponse<EvaluationResponse>>(
+    request<EvaluationResponseList>(
       `/runs/${runId}/responses${query({ offset: params.offset, limit: params.limit ?? 100 })}`,
     ),
   leaderboard: (params: { model_id?: string; benchmark_id?: string; order?: string } = {}) =>

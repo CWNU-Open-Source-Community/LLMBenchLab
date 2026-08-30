@@ -78,6 +78,8 @@
 
 同日的 OpenCode Go `hy3` Run 又暴露 observational input estimate 被错误写成 hard reservation：7 个 attempt 全部 actual settlement，第七次 estimate/actual 为 59/75，而所有 hard policy/Run override 均为 `null`，四层 scope 却被标记 overdrawn。ADR-0018/`0007` 修正这一派生语义并把 UI 文案改为“实际用量曾被判定超过预留”；旧 ledger、actual usage、7 条 Response 和 failed/exhausted Run 终态不改写。本地完整门禁、当前 SQLite 迁移、最终 SHA `cb00924…` 的 real-Compose 9/9 与精确 SHA CI 4/4 均通过，仓库级闭环完成。
 
+同日的 Run Detail 维护又修正了两个只读展示缺口：`error_questions` 继续只表示执行异常，页面改用 `completed_questions - correct_questions` 显示全部未得分并拆出普通答错；Responses API 追加分页无关的输入/输出已知 Token 小计和独立覆盖数，使精确 Run Token 为 `null` 时仍可显示明确不完整的证据。该维护不改 protocol-v1、数据库 schema、历史 Response/Run、治理 ledger 或 P2-07 范围；并行 Run/Responses 快照不一致时页面保守显示已知小计，不把旧值标成当前完整总量。
+
 ## 验收标准与当前结论
 
 - [x] 可靠执行基础：API/Worker restart、真实 lease-owner `SIGKILL`、Redis stop/start、duplicate delivery、pending/running cancel 和 lease takeover 有历史真实 PostgreSQL/Redis/Compose 证据。
@@ -91,6 +93,7 @@
 - [x] **P2-06 仓库级闭环完成**：clean implementation commit `9a20676dcf545040782f04c166205d0043345753` 已 push，clean capacity/9/9 acceptance 与 [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 通过；evidence-doc commit `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 也精确 4/4 通过。
 - [x] **0004 历史索引兼容修复完成**：schema-equivalent `20260829_0006`、仅允许三个已知索引缺失子集的可重入 SQLite preflight、PostgreSQL `0005` metadata 白名单控制流、重复 active/额外 drift 拒绝、真实失败备份副本升级及本地门禁均通过；实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 的 [run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 4/4 成功。historical PG missing-index 分支仍仅有 Mock 回归，标准 CI 真实 PG 只覆盖 fresh canonical 分支。
 - [x] **Observational overdraw 修复完成**：目标行为与 `0007` migration 已通过本地完整测试、双方言 migration 和当前个人 SQLite 验真；最终修正 SHA [`cb00924ea3ba3d01ce5bc322b7eabdae1345baf3`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/cb00924ea3ba3d01ce5bc322b7eabdae1345baf3) 的 [run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 成功。
+- [ ] **Run Detail 指标维护交付中**：API/UI 与零/全/部分/非对称 usage、页内错题拆分及并行快照回归已实现并通过目标测试；完整本地门禁、commit/push 与精确 SHA CI 尚待完成。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
 ## 已实际运行的中间证据

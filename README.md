@@ -32,14 +32,14 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - **固定标准数据集供应链**：MMLU-Pro test/validation 与 GPQA-Diamond 使用固定 revision、源文件 SHA-256、转换器版本和确定性 profile/选项重排；第三方题目只落在 Git 忽略的本地 `artifacts/`。
 - **真实模型本地入口**：`llmbenchlab-evaluate prepare/run/resume/report` 完成下载、模型发现、付费 canary、显式确认、有界执行、缺失题恢复和全量证据导出；Key 只来自环境变量或隐藏输入，远端 Provider 必须使用 HTTPS，明文 HTTP 仅允许 loopback。
 - **确定性评分**：内置三类 Evaluator；解析失败和单题调用失败严格计 0 分，并保留错误证据。
-- **可解释指标**：严格总分 `score`、完成率 `completion_rate` 和已回答准确率 `answered_accuracy` 分开呈现，避免把缺失回答隐藏在成功样本中。
+- **可解释指标**：严格总分 `score`、完成率 `completion_rate` 和已回答准确率 `answered_accuracy` 分开呈现，避免把缺失回答隐藏在成功样本中；Run Detail 另把“未得分”拆成普通答错与执行异常，避免把 `error_questions` 误读为全部错题。
 - **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复；大快照加载移出事件循环，已领取 Run 在物化题目时仍可续租。
 - **幂等与恢复**：同一 Run/Question 只有一条计分证据；租约心跳、有限 attempt、退避、取消、过期接管和 dead-letter 都由数据库裁决，Redis 不是状态数据库。
 - **数据库权威治理**：Web/API admission 把版本化完整 policy 冻结进 Run；global/provider/model/run 四层并发、RPM/TPM 和累计预算在固定锁序中共同裁决，backlog 满时在提交前稳定拒绝，Token/cost hard limit 缺少显式上界或价格时 fail closed。非显式输入估算不会冒充 hard reservation；actual usage 仍保留，只有实际用量超过显式预留才触发对应 overdraw。
 - **逐 Provider attempt 账本与公平调度**：每次 HTTP attempt 先 reserve、再持久化 `send_started`、最后 actual/conservative settlement；可证明未发送的 release 保留终态 ledger，另起 generation 并重试当前未发送 ordinal，不重置之前已发送的 HTTP retry。Worker 每个 lease 只新增有界 question quantum，按最久未获服务顺序 cooperative yield，不把让出误计为失败。
 - **可审计观测与受控保留**：typed、应用 append-only audit 以稳定 event key 去重；`/tasks/history` 在同一读取快照中校验 retained audit 后给出 counters 与 Run latency，`/metrics/prometheus` 用固定 gauge/enum label、硬样本上限和进程内 single-flight 暴露同源快照。Worker generation 只在真实 scan/claim/lease-heartbeat/progress 后按数据库 UTC 合并刷新，dependency probe 仍明确不检查主循环。八条 Prometheus 规则附固定 Runbook；`llmbenchlab-audit-retention` 提供 canonical JSONL archive、离线 verify、reconcile、精确 restore/delete，默认不删除且不把普通 hash 冒充 WORM。Run created/finished、credential audit 和逐题 Provider 元数据继续遵守非秘密边界。
 - **可复现记录**：持久化模型参数、Prompt、Benchmark Hash、协议版本、代码 commit（可用时）、raw response、parsed answer、参考答案快照和逐题评分。
-- **七个前端页面**：Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail 和 Leaderboard；评测记录页可找回全部状态的 Run，详情证据按 100 条分页。Run Detail 会明确区分 `managed`、`delayed`、`exhausted` 和 `legacy_unmanaged`，对可公开的稳定 reason 给出中文说明并以 UTC 显示最早重调度时间；未知 reason 不原样反射。
+- **七个前端页面**：Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail 和 Leaderboard；评测记录页可找回全部状态的 Run，详情证据按 100 条分页。Run Detail 会明确区分 `managed`、`delayed`、`exhausted` 和 `legacy_unmanaged`，对可公开的稳定 reason 给出中文说明并以 UTC 显示最早重调度时间；未知 reason 不原样反射。精确 Run Token 因部分 usage 缺失而未知时，页面仍显示全量 Response 的已知小计、输入/输出覆盖率与“完整总量未知”，不会把部分证据冒充账单真值。
 - **Web 只写凭据**：用户可在 Models 表单直接粘贴 API Key；API 不把凭据流中的原值复制到公开 Model/Run-model 字段，数据库只保存由独立 keyring 加密的 AES-GCM 密文。旧 `api_key_env` 模型仍兼容；Provider 返回证据会递归检查对象键/JSON 标量，当前 Key 的精确回显会在进入 Runner/持久化前替换为 `[REDACTED]`。这不是对无关 Benchmark/Question 内容的全局字面扫描。
 - **开发交付完整**：Alembic、Ruff、pytest、ESLint、TypeScript、Vitest、Vite production build、GitHub Actions、Makefile，以及 PostgreSQL、Redis、API、Worker、frontend 和一次性 migrate 组成的 Docker Compose。
 

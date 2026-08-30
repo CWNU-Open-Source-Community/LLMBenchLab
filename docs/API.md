@@ -1138,16 +1138,26 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444
   ],
   "total": 15,
   "offset": 0,
-  "limit": 100
+  "limit": 100,
+  "known_input_tokens": 120,
+  "known_output_tokens": 30,
+  "input_token_reported_responses": 15,
+  "output_token_reported_responses": 15
 }
 ```
+
+四个 usage 汇总字段都针对该 Run 的**全部** Response，不受当前 `offset`/`limit` 影响：
+
+- `known_input_tokens` / `known_output_tokens` 分别汇总对应列中所有非 `null` 值；没有已知值时返回 `0`。
+- `input_token_reported_responses` / `output_token_reported_responses` 分别统计对应 Token 字段非 `null` 的 Response 数；合法的 `0` Token 仍计为已上报。两项计数彼此独立，相等不代表必然来自同一批 Response。
+- 这些字段是可审计的已知小计与覆盖证据，不是精确 Provider 账单。`RunRead.input_tokens/output_tokens` 继续遵守 protocol-v1 的 all-or-nothing 语义：任一逐题 usage 缺失时，精确 Run Token 保持 `null`，不会由部分小计回填。
 
 请求失败、空回答或解析失败的记录仍会出现，`score=0`，并填写 `error_type` 与
 `error_message`；上游 usage 缺失时 Token 和费用为 `null`。非法 SSE UTF-8/JSON/字段映射为 `invalid_provider_stream`，200 SSE 内的上游 error 映射为 `provider_stream_error`，HTTP 干净结束却缺少 `[DONE]` 映射为 `incomplete_provider_stream`；已收到的部分 content 不会作为成功答案持久化。真实 transport 异常仍按 Run 快照的 protocol-v1 有限策略重试，因此仍可能重复上游计算或计费。若 Provider 返回 `finish_reason="length"`，空输出以及未能解析出有效最终答案的非空输出都会归类为 `output_truncated`，而不是泛化成 `empty_response` 或 `parse_error`；非空输出仍保存在 `raw_response`。成功内容若精确反射当前 Key，会在写入 `raw_response` 前替换为 `[REDACTED]`。
 
 逐题 transport 证据只保存并返回固定字段：Provider request ID、返回模型名、system fingerprint、finish reason 与实际 HTTP attempt 数；不会保存或返回任意 raw usage 对象。四个字符串必须是短、无空白的安全 opaque token，任何超长、控制字符、凭据形态或脱敏占位值都会 fail closed 为 `null`。这些值用于关联和诊断，不改变评分，也不把本地 Response 幂等扩展为 Provider exactly-once。可信本地报告的 `responses.jsonl` 导出同一组固定字段，并再次执行报告级 secret scrub 与安全字符边界。
 
-Web Run Detail 固定以 `limit=100` 请求一页逐题证据，并用 `offset` 提供上一页/下一页导航；它不会把大型正式 Benchmark 截止在前 100 条。Run 不存在返回 `404 run_not_found`；分页非法返回 `422`。
+Web Run Detail 固定以 `limit=100` 请求一页逐题证据，并用 `offset` 提供上一页/下一页导航；它不会把大型正式 Benchmark 截止在前 100 条。页面以 `completed_questions - correct_questions` 显示“未得分”，再用 `error_questions` 拆出执行异常，其余为普通答错；当前页同样分别显示未得分与执行异常。精确 Run Token 与 Response 汇总来自同一可核对快照时显示精确值；否则显示“已知小计”、输入/输出各自覆盖率和“完整总量未知”。Run 不存在返回 `404 run_not_found`；分页非法返回 `422`。
 
 ### 6.7 `GET /runs/{run_id}/audit`
 

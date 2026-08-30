@@ -253,6 +253,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - SQLite 并发测试断言 Model PATCH 与 Run create 在读取 Model 前以 `BEGIN IMMEDIATE` 串行化；PostgreSQL integration 断言两条路径共用 Model row `FOR UPDATE` 锁。SQLite 竞争期间允许请求短暂等待，这仍只是低并发本地模式；生产/并发评测门禁使用 PostgreSQL。
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
 - Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。生成边界测试覆盖兼容默认 `max_tokens=256`、显式 `null`、数字上限 `131072`、读取超时默认 `60s`/上限 `1800s`，并断言最终 generation 与 `execution.timeouts_seconds.read` 快照。
+- Response 列表的 Run-wide usage summary 覆盖零 Response、完整 usage、部分/非对称 usage、合法零 Token 和跨页一致性；输入/输出已知小计与非 `null` 计数各自独立，部分 usage 不会回填 protocol-v1 的精确 Run Token。
 - Web stored Key 纵向用例通过模拟 SSE 验证 API 写入→Worker 解密→Adapter 聚合→逐题/Run Token 持久化→报告脱敏；另一用例保留 JSON fallback，并断言 Run 的空闲读取超时和 stream payload 到达 Provider request。
 - Response/API/report 纵向用例验证安全归一化的 provider request ID、returned model、system fingerprint、finish reason 和 HTTP attempt count；过长/控制字符/非标值 fail closed 为 `null`，raw usage object 不作为任意持久化字段暴露。
 - Runner 诊断测试覆盖非空但无法解析且 `finish_reason="length"` 时的 `output_truncated`，并确认普通解析失败仍保持 `parse_error`；两者都不改变严格计零语义。
@@ -368,6 +369,7 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 - New Run 的 GPQA `8192/600s` 初始建议、MMLU-Pro official/direct 切换建议、手动预算不被覆盖、“应用建议”恢复、`max_tokens:null` Provider 托管提交，以及数字 `131072`/超时 `1800s` DOM 上限。
 - Runs 主导航、20 条 offset 分页、状态筛选、active Run 定时刷新、错误/空状态和详情链接。
 - Run Detail 返回 Runs 列表、终态停止轮询、逐题每页 100 条的 offset 导航，以及跨页序号/总数显示。
+- Run Detail 把全局和当前页的未得分与执行异常分开显示；Token 测试覆盖精确 Run 总量、部分已知小计、输入/输出非对称覆盖、零 usage、零 Response，以及并行 Run/Response 快照不一致时的保守降级。
 - Run Detail 显示 `managed`、`delayed`、`exhausted`、`legacy_unmanaged` 治理状态，稳定 closed reason 使用受控文案，`not_before` 明确按 UTC 格式化；未知 reason 只显示安全兜底，不反射服务端原值。
 
 所有 fetch 与 Recharts 均在进程内 stub，没有真实网络；这些组件测试不会调用真实 Provider，也不会验证 Provider 实际接受某个输出长度或读取超时。Benchmark Demo 导入与完整 raw/parsed/reference/score/error 证据仍以离线后端 Smoke 和手工验收补充，不能把 DOM/API stub 结果描述成真实模型兼容性验证。

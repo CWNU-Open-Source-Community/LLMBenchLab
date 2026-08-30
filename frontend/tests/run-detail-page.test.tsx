@@ -1,9 +1,9 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EvaluationResponse, EvaluationRun } from "../src/api/types";
+import type { EvaluationResponse, EvaluationResponseList, EvaluationRun } from "../src/api/types";
 import { RunDetailPage } from "../src/pages/RunDetailPage";
 
 const apiMocks = vi.hoisted(() => ({
@@ -128,6 +128,10 @@ describe("RunDetailPage", () => {
       total: 198,
       offset: 0,
       limit: 100,
+      known_input_tokens: 1000,
+      known_output_tokens: 2000,
+      input_token_reported_responses: 198,
+      output_token_reported_responses: 198,
     });
   });
 
@@ -142,10 +146,208 @@ describe("RunDetailPage", () => {
     expect(await screen.findByRole("heading", { name: "Frozen Model" })).toBeInTheDocument();
     expect(apiMocks.run).toHaveBeenCalledWith("run-001");
     expect(apiMocks.responses).toHaveBeenCalledWith("run-001", { offset: 0, limit: 100 });
-    expect(screen.getByText("显示 1–1 / 共 198 条 · 本页 0 条错误")).toBeInTheDocument();
+    expect(screen.getByText("显示 1–1 / 共 198 条 · 本页 0 条未得分 · 0 条执行异常"))
+      .toBeInTheDocument();
     expect(screen.queryByText(/共 1 条/)).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "评测记录" })).toHaveAttribute("href", "/runs");
     expect(screen.getByText("数据库治理已启用")).toBeInTheDocument();
+  });
+
+  it("separates ordinary wrong answers from exceptional responses", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      correct_questions: 179,
+      error_questions: 2,
+      score: 90.404,
+    }));
+
+    renderPage();
+
+    const metric = (await screen.findByText("未得分")).closest("article");
+    expect(metric).not.toBeNull();
+    expect(within(metric!).getByText("19")).toBeInTheDocument();
+    expect(within(metric!).getByText("普通答错 17 · 执行异常 2 · 正确 179"))
+      .toBeInTheDocument();
+    expect(screen.queryByText("错误题")).not.toBeInTheDocument();
+  });
+
+  it("separates unscored and exceptional responses on the current page", async () => {
+    apiMocks.responses.mockResolvedValue({
+      items: [
+        { ...responseFixture(1), score: 0, parsed_answer: "B" },
+        {
+          ...responseFixture(2),
+          score: 0,
+          raw_response: null,
+          parsed_answer: null,
+          error_type: "output_truncated",
+          error_message: "Provider stream ended early",
+        },
+        responseFixture(3),
+      ],
+      total: 3,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 30,
+      known_output_tokens: 15,
+      input_token_reported_responses: 3,
+      output_token_reported_responses: 3,
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("显示 1–3 / 共 3 条 · 本页 2 条未得分 · 1 条执行异常"))
+      .toBeInTheDocument();
+  });
+
+  it("shows the known token subtotal and coverage when the exact total is unknown", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      correct_questions: 179,
+      error_questions: 2,
+      input_tokens: null,
+      output_tokens: null,
+    }));
+    apiMocks.responses.mockResolvedValue({
+      items: [responseFixture(1)],
+      total: 198,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 45_509,
+      known_output_tokens: 4_561_625,
+      input_token_reported_responses: 196,
+      output_token_reported_responses: 196,
+    });
+
+    renderPage();
+
+    const metric = (await screen.findByText("Token")).closest("article");
+    expect(metric).not.toBeNull();
+    expect(within(metric!).getByText("已知小计 460.7万")).toBeInTheDocument();
+    expect(within(metric!).getByText(/输入 4.6万 \/ 输出 456.2万/)).toBeInTheDocument();
+    expect(within(metric!).getByText(/输入\/输出覆盖各 196\/198 题，完整总量未知/))
+      .toBeInTheDocument();
+  });
+
+  it("keeps the exact Run token total authoritative when it is available", async () => {
+    apiMocks.responses.mockResolvedValue({
+      items: [responseFixture(1)],
+      total: 198,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 1000,
+      known_output_tokens: 2000,
+      input_token_reported_responses: 198,
+      output_token_reported_responses: 198,
+    });
+
+    renderPage();
+
+    const metric = (await screen.findByText("Token")).closest("article");
+    expect(metric).not.toBeNull();
+    expect(within(metric!).getByText("3,000")).toBeInTheDocument();
+    expect(within(metric!).getByText("输入 1,000 / 输出 2,000")).toBeInTheDocument();
+    expect(within(metric!).queryByText(/完整总量未知/)).not.toBeInTheDocument();
+  });
+
+  it("uses the response subtotal when parallel Run and evidence snapshots disagree", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      status: "running",
+      total_questions: 200,
+      completed_questions: 198,
+      finished_at: null,
+    }));
+    apiMocks.responses.mockResolvedValue({
+      items: [responseFixture(1)],
+      total: 199,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 1010,
+      known_output_tokens: 2005,
+      input_token_reported_responses: 199,
+      output_token_reported_responses: 199,
+    });
+
+    renderPage();
+
+    const metric = (await screen.findByText("Token")).closest("article");
+    expect(metric).not.toBeNull();
+    expect(within(metric!).getByText("已知小计 3,015")).toBeInTheDocument();
+    expect(within(metric!).getByText(/输入\/输出覆盖各 199\/199 题，完整总量未知/))
+      .toBeInTheDocument();
+  });
+
+  it("does not invent a known token subtotal when no response reports usage", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({ input_tokens: null, output_tokens: null }));
+    apiMocks.responses.mockResolvedValue({
+      items: [responseFixture(1)],
+      total: 3,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 0,
+      known_output_tokens: 0,
+      input_token_reported_responses: 0,
+      output_token_reported_responses: 0,
+    });
+
+    renderPage();
+
+    const metric = (await screen.findByText("Token")).closest("article");
+    expect(metric).not.toBeNull();
+    expect(within(metric!).getByText("—")).toBeInTheDocument();
+    expect(within(metric!).getByText("输入/输出覆盖均为 0/3 题，完整总量未知"))
+      .toBeInTheDocument();
+    expect(within(metric!).queryByText(/已知小计 0/)).not.toBeInTheDocument();
+  });
+
+  it("shows an empty usage state before the first response is stored", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      status: "pending",
+      completed_questions: 0,
+      correct_questions: 0,
+      error_questions: 0,
+      input_tokens: null,
+      output_tokens: null,
+      started_at: null,
+      finished_at: null,
+    }));
+    apiMocks.responses.mockResolvedValue({
+      items: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 0,
+      known_output_tokens: 0,
+      input_token_reported_responses: 0,
+      output_token_reported_responses: 0,
+    });
+
+    renderPage();
+
+    const metric = (await screen.findByText("Token")).closest("article");
+    expect(metric).not.toBeNull();
+    expect(within(metric!).getByText("—")).toBeInTheDocument();
+    expect(within(metric!).getByText("暂无逐题 usage")).toBeInTheDocument();
+  });
+
+  it("reports input and output coverage separately when providers omit one side", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({ input_tokens: null, output_tokens: null }));
+    apiMocks.responses.mockResolvedValue({
+      items: [responseFixture(1)],
+      total: 3,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 30,
+      known_output_tokens: 5,
+      input_token_reported_responses: 2,
+      output_token_reported_responses: 1,
+    });
+
+    renderPage();
+
+    const metric = (await screen.findByText("Token")).closest("article");
+    expect(metric).not.toBeNull();
+    expect(within(metric!).getByText("已知小计 35")).toBeInTheDocument();
+    expect(within(metric!).getByText(/输入覆盖 2\/3 题 · 输出覆盖 1\/3 题/))
+      .toBeInTheDocument();
   });
 
   it("shows a delayed backpressure reason and the earliest database time explicitly in UTC", async () => {
@@ -216,6 +418,10 @@ describe("RunDetailPage", () => {
         total: 198,
         offset,
         limit: 100,
+        known_input_tokens: 1000,
+        known_output_tokens: 2000,
+        input_token_reported_responses: 198,
+        output_token_reported_responses: 198,
       });
     });
     const user = userEvent.setup();
@@ -232,23 +438,27 @@ describe("RunDetailPage", () => {
     });
     expect(await screen.findByText("gpqa-101")).toBeInTheDocument();
     expect(screen.getByText("101", { selector: ".question-index" })).toBeInTheDocument();
-    expect(screen.getByText("显示 101–101 / 共 198 条 · 本页 0 条错误"))
+    expect(screen.getByText("显示 101–101 / 共 198 条 · 本页 0 条未得分 · 0 条执行异常"))
       .toBeInTheDocument();
   });
 
   it("does not let polling supersede a slower evidence page request", async () => {
     const nextRun = deferred<EvaluationRun>();
-    const nextEvidence = deferred<{
-      items: EvaluationResponse[];
-      total: number;
-      offset: number;
-      limit: number;
-    }>();
+    const nextEvidence = deferred<EvaluationResponseList>();
     apiMocks.run
       .mockResolvedValueOnce(runFixture({ status: "running", finished_at: null }))
       .mockReturnValueOnce(nextRun.promise);
     apiMocks.responses
-      .mockResolvedValueOnce({ items: [responseFixture(1)], total: 198, offset: 0, limit: 100 })
+      .mockResolvedValueOnce({
+        items: [responseFixture(1)],
+        total: 198,
+        offset: 0,
+        limit: 100,
+        known_input_tokens: 1000,
+        known_output_tokens: 2000,
+        input_token_reported_responses: 198,
+        output_token_reported_responses: 198,
+      })
       .mockReturnValueOnce(nextEvidence.promise);
     const intervalSpy = vi.spyOn(window, "setInterval");
     const user = userEvent.setup();
@@ -271,6 +481,10 @@ describe("RunDetailPage", () => {
         total: 198,
         offset: 100,
         limit: 100,
+        known_input_tokens: 1000,
+        known_output_tokens: 2000,
+        input_token_reported_responses: 198,
+        output_token_reported_responses: 198,
       });
       await Promise.all([nextRun.promise, nextEvidence.promise]);
     });
@@ -280,7 +494,16 @@ describe("RunDetailPage", () => {
 
   it("returns to the runs list when the run does not exist", async () => {
     apiMocks.run.mockResolvedValue(null);
-    apiMocks.responses.mockResolvedValue({ items: [], total: 0, offset: 0, limit: 100 });
+    apiMocks.responses.mockResolvedValue({
+      items: [],
+      total: 0,
+      offset: 0,
+      limit: 100,
+      known_input_tokens: 0,
+      known_output_tokens: 0,
+      input_token_reported_responses: 0,
+      output_token_reported_responses: 0,
+    });
     renderPage();
 
     expect(await screen.findByText("Run 不存在")).toBeInTheDocument();
