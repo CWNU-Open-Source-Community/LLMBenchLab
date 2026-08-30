@@ -1,7 +1,7 @@
 # Provider API 三协议适配执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed
 - Created: 2026-08-30
 - Updated: 2026-08-30
 - Related phase: [Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
@@ -56,7 +56,7 @@
 4. [completed] 文档与完整本地门禁
    - Files/modules: README、API、ARCHITECTURE、SECURITY、TESTING、状态/阶段/Changelog/Next Task/工作日志
    - Validation: lint、完整 test、migration、Mock smoke、frontend build、Compose config、diff/秘密检查通过。
-5. [in_progress] 提交、push 与精确 SHA CI
+5. [completed] 提交、push 与精确 SHA CI
    - Files/modules: Git/Actions
    - Validation: 普通 push；该精确 commit 的四个必需 job 全部成功。
 
@@ -79,7 +79,7 @@
 | 前端 | `cd frontend && npm test` | 协议选择和参数 UX 通过 | `72 passed` |
 | 完整门禁 | `make lint && make test && make smoke` | 零失败、无真实 Provider | 通过；backend `1079 passed, 36 skipped`，frontend `72 passed`，Mock smoke `1 passed, 7 deselected` |
 | 构建/部署静态检查 | `cd frontend && npm run build`; `docker compose config --quiet` | exit 0 | 均为 exit 0；保留既有 Vite chunk warning |
-| 远程门禁 | GitHub Actions exact SHA | 4/4 required jobs success | 待执行 |
+| 远程门禁 | GitHub Actions exact SHA | 4/4 required jobs success | 实现 SHA [`6943aa29a154c82bdfbe5efb2578c916c3cbf632`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/6943aa29a154c82bdfbe5efb2578c916c3cbf632) 已普通 push；[run `33304667092`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33304667092) 四个必需 job 全部成功 |
 
 ## Rollback
 
@@ -97,7 +97,7 @@
 
 - Changed files: Adapter、Model/API/Runner/CLI/preflight、`0008` migration、Models/New Run UI、自动化测试与合同/运维文档
 - Commands run: 目标 pytest、`make lint`、`make test`、`make smoke`、frontend build、Compose config、隔离 PostgreSQL 16 migration 往返
-- Acceptance evidence: 本地门禁全绿；精确 SHA 远程证据待步骤 5 完成
+- Acceptance evidence: 本地门禁全绿；实现 SHA `6943aa29a154c82bdfbe5efb2578c916c3cbf632` 的 exact-SHA Actions run `33304667092` 4/4 全绿
 - Not run: 真实 Provider（有意不运行）
 - Known issues: Responses/Messages 仅覆盖纯文本评测共同子集；未对真实 OpenCode Go 当日模型、额度或账单做自动化验证
 

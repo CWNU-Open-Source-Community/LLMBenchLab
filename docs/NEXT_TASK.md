@@ -51,7 +51,7 @@ PostgreSQL 16 跨 Benchmark/唯一 lease 回归 `2 passed`，隔离 Compose 的 
 四个必需 job 全绿，因此本维护为 `completed`。本文件的下一独立任务仍是下面的 P2-07
 最小只读 verifier。
 
-## 进行中：Provider API 三协议适配
+## 已完成：Provider API 三协议适配
 
 [ADR-0019](decisions/ADR-0019-explicit-provider-api-protocol-adapters.md) 与
 [独立计划](plans/2026-08-30-provider-api-protocols.md) 已把旧 `openai_compatible`
@@ -59,8 +59,10 @@ PostgreSQL 16 跨 Benchmark/唯一 lease 回归 `2 passed`，隔离 Compose 的 
 Adapter、Model/API/Run snapshot、Worker/CLI preflight、`0008` migration 与 Web 表单已实现；
 本地 backend `1079 passed, 36 skipped`、frontend `72 passed`、lint、Mock smoke、build、
 Compose config 和隔离 PostgreSQL 16 migration 门禁均通过，未调用真实 Provider。
-当前只剩 commit、普通 push、exact-SHA CI 与证据文档收尾；完成后下一独立任务仍是
-下面的 P2-07 最小只读 verifier。
+完整本地门禁与隔离 PostgreSQL 16 迁移验证均通过；实现 SHA
+[`6943aa29a154c82bdfbe5efb2578c916c3cbf632`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/6943aa29a154c82bdfbe5efb2578c916c3cbf632)
+已普通 push，[exact-SHA Actions run `33304667092`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33304667092)
+四个必需 job 全部成功。该维护现为 `completed`；下一独立任务回到下面的 P2-07 最小只读 verifier。
 
 ## 已完成：建立 P2-07 工作包
 

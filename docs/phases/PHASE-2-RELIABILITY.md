@@ -68,7 +68,7 @@
 | P2-02 PostgreSQL 迁移 | `slice_delivered` | 历史 `0002`～`0004` 与 12 表 importer 已通过精确 SHA 远程门禁；`9a20676…` 增加 `0005` / 13 表 importer、live Worker preflight 和 populated downgrade guard，clean Compose 与远程实现门禁已通过 |
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；`9a20676…` 增加 generation 级 DB-time scan/claim/lease-heartbeat/progress 与 stale 聚合，dependency probe 仍只表示 capability |
 | P2-03 日常多 Worker入口维护 | `completed` | 本地 PostgreSQL 多进程与 Compose 默认双 Worker入口、SQLite fail-fast、fresh/watermark scan、all/running scale direction、五 gauges 与跨 Benchmark PG lease 回归已通过本地/远程门禁；不改变 P2-07 或 Phase 2 总状态 |
-| Provider API 三协议维护 | `in_progress` | ADR-0019、`openai_responses` / `anthropic_messages` Adapter、`0008` 列宽与两个 check 变更、CLI/Web 显式协议与 MockTransport 合同已实现；本地完整门禁和隔离 PostgreSQL 16 往返通过，等待 commit/push/exact-SHA CI；不改变 protocol-v1、P2-07 或 Phase 2 总状态 |
+| Provider API 三协议维护 | `completed` | ADR-0019、`openai_responses` / `anthropic_messages` Adapter、`0008` 列宽与两个 check 变更、CLI/Web 显式协议与 MockTransport 合同已实现；本地完整门禁和隔离 PostgreSQL 16 往返通过，实现 `6943aa29…` 已 push 且 exact-SHA run `33304667092` 4/4；不改变 protocol-v1、P2-07 或 Phase 2 总状态 |
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
 | P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
 | P2-05 observational overdraw 维护 | `completed` | ADR-0018 与 data-only `0007` 只重算 overdrawn 并保留 ledger/actual/Response/Run，active reservation 时拒绝；本地完整验证、当前库迁移和最终 SHA `cb00924…` 的 CI 4/4 均通过 |

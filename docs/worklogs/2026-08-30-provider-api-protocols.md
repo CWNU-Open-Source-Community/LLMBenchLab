@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 2 — Reliability](../phases/PHASE-2-RELIABILITY.md)
 - 关联计划：[执行计划](../plans/2026-08-30-provider-api-protocols.md)
 - 关联 ADR：[ADR-0019](../decisions/ADR-0019-explicit-provider-api-protocol-adapters.md)
-- 最终状态：in_progress（本地实现与门禁完成，等待 commit/push/exact-SHA CI）
+- 最终状态：completed（实现提交已普通 push，exact-SHA CI 四个必需 job 全绿）
 
 ## 初始仓库状态
 
@@ -43,7 +43,7 @@ OpenCode Go 按模型要求 `/chat/completions`、`/responses` 或 `/messages`�
 - [x] 已知错误 endpoint、unsupported seed、Messages null max tokens 在外发前失败
 - [x] Model API、Run snapshot、Worker/CLI 与 Web 可显式选择三类 Adapter
 - [x] 双方言 migration、完整 lint/test/Mock smoke/build/Compose config 通过
-- [ ] 普通 push 后精确 SHA GitHub Actions 四个必需 job 全绿
+- [x] 普通 push 后精确 SHA GitHub Actions 四个必需 job 全绿
 
 ## 假设
 
@@ -65,7 +65,7 @@ OpenCode Go 按模型要求 `/chat/completions`、`/responses` 或 `/messages`�
 2. [completed] 实现后端三协议、迁移与执行链联动
 3. [completed] 实现前端协议与参数 UX
 4. [completed] 文档、完整本地门禁与技术/安全终审
-5. [in_progress] commit、普通 push 与 exact-SHA CI
+5. [completed] commit、普通 push 与 exact-SHA CI
 
 ## 实际修改
 
@@ -107,6 +107,7 @@ OpenCode Go 按模型要求 `/chat/completions`、`/responses` 或 `/messages`�
 | `docker compose config --quiet` | Compose 静态配置 | 0 | 通过 |
 | 高置信 staged-candidate 秘密扫描 | 检查本次 modified/untracked 文件中的真实 Key/私钥格式 | 1（无匹配） | 仅更宽的初筛命中明确命名的测试 canary/secret marker；高置信格式无匹配 |
 | 隔离 PostgreSQL 16：preflight、`upgrade head`、`check`、populated downgrade、清空后 downgrade/upgrade/check | 验证真实 PostgreSQL `0008` 约束与回滚门禁 | 0/预期拒绝/0 | 新类型存在时 downgrade 以 RuntimeError 在 DDL 前拒绝；清空两条测试 Model 后往返与 check 通过；测试容器已停止并删除 |
+| `git commit`、普通 `git push`；`gh run watch 33304667092 --exit-status` | 发布实现并验证精确 SHA | 0 | 实现 SHA `6943aa29a154c82bdfbe5efb2578c916c3cbf632` 已 push；backend、backend integration、real-Compose reliability、frontend 四个必需 job 全部成功 |
 
 ## 测试结果
 
@@ -116,12 +117,11 @@ OpenCode Go 按模型要求 `/chat/completions`、`/responses` 或 `/messages`�
 
 ## 未运行验证
 
-- 远程 exact-SHA CI：等待 commit/push 后执行。
 - 真实 Provider：按安全规则有意不运行。
 
 ## 未完成项
 
-- commit、普通 push、exact-SHA CI 与证据文档收尾。
+- 无；证据文档作为独立收尾提交，提交后同样接受 exact-SHA CI 门禁。
 
 ## 已知问题与限制
 
@@ -134,16 +134,16 @@ OpenCode Go 按模型要求 `/chat/completions`、`/responses` 或 `/messages`�
 - 真实 API 调用：否
 - 日志/API 脱敏：三协议 malformed JSON/SSE、oversized、transport 与反射假 Key 回归通过，安全异常不保留原始 Provider cause/context
 - 危险 Git 操作（force push/reset 等）：无
-- 阶段 push：待执行
-- 远程 CI：待 commit/push 后执行
+- 阶段 push：实现 SHA `6943aa29a154c82bdfbe5efb2578c916c3cbf632` 已普通 push
+- 远程 CI：[run `33304667092`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33304667092) 对该实现 SHA 4/4 成功
 - 遗留安全风险：自定义 HTTPS `base_url` 的 SSRF/数据外发风险不变
 
 ## 结果与下一步
 
-本地实现、门禁、最终审查、diff 与秘密检查完成；下一步 commit、普通 push 与精确 SHA CI。
+三协议实现、本地门禁、隔离 PostgreSQL 迁移、最终审查、普通 push 与实现 exact-SHA CI 全部完成。下一独立任务恢复为 P2-07 最小只读 recovery verifier。
 
 ## 最终 Git 状态
 
 ```text
-工作树含本任务未提交改动；等待最终审查与提交
+实现提交后工作树干净；本次仅追加独立 evidence closeout 文档提交
 ```

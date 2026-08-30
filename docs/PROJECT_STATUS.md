@@ -20,12 +20,12 @@ Run Detail 指标维护实现 SHA [`0003e4291769a851005ba46c7e59b156a6b789eb`](h
 
 P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progress-heatmap-live-metrics.md) 状态为 `completed`。公共合同已从初版无可靠提交序的 cursor 改为固定 `512` 题 absolute-position blocks：progress index 在同一数据库读取快照返回 evidence-derived live metrics 与所有 block counts，block payload 只返回 position/outcome/score/latency/usage/cost/error type 白名单。该切片保持 `/api/v1` 与 `llmbenchlab-protocol-v1`，无 migration、ADR 或 SECURITY 边界修改；初版 cursor 失败先行套件记录为 `4 failed` 后已废弃。实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5) 已普通 push 到 `codex/complete-evaluation-workflow` 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)；精确 SHA 的 [GitHub Actions run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) 对 backend、backend-integration、full-stack-reliability、frontend 四个必需 job 全部成功。Phase 3 整体仍为 `in_progress`，P2-07 恢复为下一项且仍为 `planned`。
 
-## 2026-08-30 Provider API 三协议适配（`in_progress`）
+## 2026-08-30 Provider API 三协议适配（`completed`）
 
 - [ADR-0019](decisions/ADR-0019-explicit-provider-api-protocol-adapters.md) 保留 `openai_compatible` 作为 Chat Completions 兼容值，并新增 `openai_responses` 与 `anthropic_messages`。Model API、Run snapshot、Worker/CLI preflight 和 Web 表单都显式携带该类型；不会从模型名/URL 猜测，也不会在失败后跨协议 fallback。
 - 三类 Adapter 各自构造 endpoint、payload、认证 header、普通 JSON 与 typed SSE，并要求 `[DONE]`、`response.completed` 或 `message_stop` 终止。Responses/Messages 不支持的非空 seed、Messages 的空 `max_tokens` 和已知错误 suffix 都在外发前拒绝；typed transient error 才进入既有逐-attempt retry/ledger。
 - Alembic head 为 `20260830_0008`，将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)` 并替换 Provider 类型 check 与远程配置 check；数据库中存在新类型时 downgrade 在 DDL 前 fail closed。隔离 PostgreSQL 16 已通过 upgrade/check、populated downgrade 拒绝和清空后 downgrade/upgrade/check；没有迁移或重启用户当前数据库/服务。
-- 本地门禁已通过：backend `1079 passed, 36 skipped`、frontend `72 passed`、`make lint`、Mock smoke `1 passed, 7 deselected`、frontend build、Compose config 与目标协议/迁移回归均全绿。自动化仅使用 Mock/MockTransport，未调用真实 Provider；当前等待 commit、普通 push 与 exact-SHA CI，完成前状态保持 `in_progress`。
+- 本地门禁已通过：backend `1079 passed, 36 skipped`、frontend `72 passed`、`make lint`、Mock smoke `1 passed, 7 deselected`、frontend build、Compose config 与目标协议/迁移回归均全绿。实现 SHA [`6943aa29a154c82bdfbe5efb2578c916c3cbf632`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/6943aa29a154c82bdfbe5efb2578c916c3cbf632) 已普通 push，[exact-SHA Actions run `33304667092`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33304667092) 四个必需 job 全部成功。自动化仅使用 Mock/MockTransport，未调用真实 Provider；该维护为 `completed`。
 
 ## 已交付基线
 
@@ -128,7 +128,7 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 - observational Token overdraw 修复：状态为 `completed`；目标 head `0007`、本地完整验证、当前库迁移、最终修正 commit/push 与 exact-SHA CI 4/4 均完成。
 - Run Detail 错题与部分 Token 展示修复：状态为 `completed`；实现 SHA `0003e429…` 已 push，PR #5 的精确 SHA CI run `33286730109` 4/4 成功。
 - P3-06 Run Detail 热力图/live metrics：状态为 `completed`；实现 SHA `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已普通 push，PR #5 的精确 SHA CI run `33289522923` 4/4 成功；不改变 protocol-v1 或 Phase 3 整体 `in_progress` 状态。
-- Provider API 三协议适配：状态为 `in_progress`；代码、本地全量门禁和隔离 PostgreSQL 16 迁移验证已完成，等待 commit/push/exact-SHA CI 后收尾。
+- Provider API 三协议适配：状态为 `completed`；代码、本地全量门禁、隔离 PostgreSQL 16 迁移验证、实现 SHA `6943aa29…` 普通 push 与 exact-SHA run `33304667092` 4/4 均已完成。
 - P2-07：状态为 `planned`，已建立 [ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md) / [ADR-0019](decisions/ADR-0019-explicit-provider-api-protocol-adapters.md)、[独立计划](plans/2026-08-28-phase-2-recovery-operations.md) 和 [工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的功能实现尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。P2-07 recovery-manifest-v1 的尚未实施 exact head 现为 `20260830_0008`。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
@@ -176,7 +176,7 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 | 2026-08-30 Run Detail 指标修复 | backend API/Smoke 目标 `11 passed`、frontend Run Detail/format `20 passed`；完整 backend `951 passed, 33 skipped`、frontend `47 passed`；lint/build/Mock smoke/Compose config/实页验收通过 | 目标 Run 19/17/2、已知 Token `45,509/4,561,625` 和 `196/198` 覆盖可见；无真实 Provider；`0003e429…` 的 run `33286730109` 4/4 成功 |
 | P3-06 Run Detail 热力图/live metrics | 初版 cursor 后端 red suite `4 failed`（预期且合同已废弃）；fixed-block backend/frontend target `37/32 passed`（20 Run Detail + 12 heatmap）；完整 backend `964 passed, 33 skipped`、frontend `64 passed`；lint/smoke/build/config/目标 Run 浏览器验收通过 | `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已 push；PR #5 exact-SHA run `33289522923` 4/4；切片 `completed`，Phase 3 仍 `in_progress`，P2-07 为下一任务 |
 | 2026-08-30 多 Worker评测入口 | 启动器/fake Compose `42 passed`；隔离 PostgreSQL 16 首次因未迁移在 fixture setup 报 `UndefinedTable`，迁移到 `0007` 后跨 Benchmark/唯一 lease `2 passed`；终审后的 fresh/watermark 与 exited-replica 回归、真实 Compose `2→1→2` gauges/cleanup 通过 | 完整 backend `1003 passed, 35 skipped`、frontend `64 passed`，lint/Mock smoke/build/config/diff check 全绿；`b06594c…` 的 exact-SHA run `33299883513` 4/4，维护 `completed` |
-| 2026-08-30 Provider API 三协议适配 | 目标协议/API/Runner/CLI/迁移回归通过；完整 backend `1079 passed, 36 skipped`、frontend `72 passed`；lint、Mock smoke、build、config 全绿；隔离 PostgreSQL 16 `0008` 往返与 populated downgrade guard 通过 | 自动化只用 Mock/MockTransport，未调用真实 Provider；等待 implementation exact-SHA CI |
+| 2026-08-30 Provider API 三协议适配 | 目标协议/API/Runner/CLI/迁移回归通过；完整 backend `1079 passed, 36 skipped`、frontend `72 passed`；lint、Mock smoke、build、config 全绿；隔离 PostgreSQL 16 `0008` 往返与 populated downgrade guard 通过 | 自动化只用 Mock/MockTransport，未调用真实 Provider；实现 `6943aa29…` 已 push，exact-SHA run `33304667092` 4/4，维护 `completed` |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见上方独立行 |
 | P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见上方独立行 |
@@ -211,4 +211,4 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 
 ## 当前任务入口
 
-[Provider API 三协议适配计划](plans/2026-08-30-provider-api-protocols.md) 当前处于提交/push/exact-SHA CI 步骤；本地实现和门禁已经完成。该维护闭环后，[NEXT_TASK.md](NEXT_TASK.md) 继续提供 P2-07 最小只读 recovery verifier 入口。P2-07 保持 `planned`，Phase 2 与 Phase 3 继续保持 `in_progress`。
+[Provider API 三协议适配计划](plans/2026-08-30-provider-api-protocols.md) 已完成本地门禁、实现提交/push 与 exact-SHA CI。当前入口回到 [NEXT_TASK.md](NEXT_TASK.md) 的 P2-07 最小只读 recovery verifier。P2-07 保持 `planned`，Phase 2 与 Phase 3 继续保持 `in_progress`。
