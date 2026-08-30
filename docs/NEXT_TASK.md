@@ -1,7 +1,7 @@
 # 下一任务（当前修复完成后）：实施 P2-07 最小恢复验证切片
 
 > 状态：`planned`；P2-07 独立计划、工作日志与 ADR-0016 已建立，功能实现尚未开始
-> 当前前置：P3-06 Run Detail 热力图/live metrics 已完成本地实现与验证，仍以 `in_progress` 等待 commit/push 和远端精确 SHA CI；本文件只定义其完成后的下一任务，不表示 P2-07 已经开始
+> 当前前置：P3-06 Run Detail 热力图/live metrics 已完成实现、普通 push 与精确 SHA CI，状态为 `completed`；P2-07 恢复为下一项但仍是 `planned`，本文件不表示其已经开始
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 当前计划：[Phase 2 恢复与运维闭环](plans/2026-08-28-phase-2-recovery-operations.md)
 > 当前日志：[2026-08-28 P2-07 工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)
@@ -31,7 +31,7 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 [Run Detail 错题与部分 Token 展示修复](plans/2026-08-30-fix-run-detail-metrics.md) 已完成：它只扩充 Responses 读取 API 和页面证据表达，不改变 protocol-v1 精确 Token、成绩、历史数据、migration 或 P2-07 范围。实现 SHA `0003e429…` 已普通 push，[PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5) 的精确 SHA [CI run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 4/4 成功；下一独立切片仍是本文件定义的 P2-07 最小只读 recovery verifier。
 
-[Run Detail 热力图与实时指标](plans/2026-08-30-run-progress-heatmap-live-metrics.md) 是当前插入的 P3-06 `in_progress` 切片。它冻结为固定 `512` 题 absolute-position block index/payload 和后端同快照 evidence-derived live metrics；不改变 `/api/v1`、`llmbenchlab-protocol-v1`、Run 精确 nullable Token/cost、数据库 schema 或 P2-07 范围。初版 cursor 的 4 个 red tests 因没有数据库单调提交序列已在实现前废弃。本地 fixed-block 实现与验证已完成：backend/frontend target `37/32 passed`（Run Detail `20` + heatmap `12`），完整 backend `964 passed, 33 skipped`、frontend `64 passed`，lint、Mock smoke、build、Compose config 与目标 198 题 Run 的三档宽度/键盘/Tooltip/console 实页验收均通过；12,032/20,000 题为自动化虚拟化边界。仅 commit/push、最终 SHA 和远端 exact-SHA CI 待收尾。只有该远端门禁完成并留下证据后，执行入口才回到下面的 P2-07 verifier；P2-07 继续为 `planned`。
+[Run Detail 热力图与实时指标](plans/2026-08-30-run-progress-heatmap-live-metrics.md) 是已完成的 P3-06 切片。它冻结为固定 `512` 题 absolute-position block index/payload 和后端同快照 evidence-derived live metrics；不改变 `/api/v1`、`llmbenchlab-protocol-v1`、Run 精确 nullable Token/cost、数据库 schema 或 P2-07 范围。初版 cursor 的 4 个 red tests 因没有数据库单调提交序列已在实现前废弃。本地 fixed-block 验证为 backend/frontend target `37/32 passed`（Run Detail `20` + heatmap `12`），完整 backend `964 passed, 33 skipped`、frontend `64 passed`；lint、Mock smoke、build、Compose config 与目标 198 题 Run 的三档宽度/键盘/Tooltip/console 实页验收均通过，12,032/20,000 题仅为自动化虚拟化边界。实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5) 已普通 push 到 `codex/complete-evaluation-workflow` 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)，精确 SHA [Actions run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) 的 backend、backend-integration、full-stack-reliability、frontend 四个 job 全部成功。执行入口现回到下面的 P2-07 verifier；P2-07 继续为 `planned`。
 
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；随后的兼容修复已在自动备份后将当时重建库前进到 `0006` 并通过 startup/check。
 
@@ -62,12 +62,12 @@ P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最�
 ## Definition of Done
 
 - P2-06 已完成，不再重复其资格或证据门禁。
-- 当前 P3-06 热力图/live metrics 的 fixed-block 目标回归、完整本地门禁、目标 Run 浏览器验收和 12,032/20,000 自动化虚拟化边界已经完成；仍须完成 commit/push、最终 SHA 记录和远端精确 SHA CI，之后才能把 P2-07 标成 `in_progress`。
+- P3-06 热力图/live metrics 的 fixed-block 目标回归、完整本地门禁、目标 Run 浏览器验收、12,032/20,000 自动化虚拟化边界、实现 commit/push 与精确 SHA CI 已全部完成；P2-07 现在是下一项但仍须在实际实施开始时才标成 `in_progress`。
 - P2-07：backup/restore、Redis 重建、告警处置与约定故障矩阵必须有隔离真实 PostgreSQL/Redis、Mock-only Compose、秘密审查、独立 commit/push 和精确 SHA CI 证据，才能标记 completed。
 - Phase 2：只有 P2-07 也完成后才可评估 `completed`；在此之前保持 `in_progress`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展、WORM 或 Provider exactly-once。
 
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-先确认 P3-06 Run Detail 热力图/live metrics 已按固定 512 题 block 合同完成本地/远程门禁并在状态文档标为完成，再继续执行 docs/NEXT_TASK.md。P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
+P3-06 Run Detail 热力图/live metrics 已按固定 512 题 block 合同完成本地/远程门禁并标为 completed。继续执行 docs/NEXT_TASK.md：P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
 ```

@@ -9,7 +9,7 @@
 - 关联阶段：[Phase 3 — Benchmarks](../phases/PHASE-3-BENCHMARKS.md)
 - 关联计划：[2026-08-30-run-progress-heatmap-live-metrics.md](../plans/2026-08-30-run-progress-heatmap-live-metrics.md)
 - 关联 ADR：无；新增只读进度投影，不改变持久化/协议/安全决定
-- 最终状态：in_progress
+- 最终状态：completed
 
 ## 初始仓库状态
 
@@ -46,7 +46,7 @@
 - [x] 每秒只读轻量 index；只 hydrate 非空或 `response_count` 变化的 512 题 block，index→block 并发提交最终收敛且不漏格。
 - [x] 非空 block 初始同步完成前显示“同步中”，终态先到时仍追齐全部目标 count；hidden 暂停、visible 恢复同步。
 - [x] 现有分页、取消、治理、终态停止轮询和目标历史 Run 展示不回归。
-- [ ] API/架构/用户/测试/状态文档一致且本地门禁全绿；远端精确 SHA CI 尚待 commit/push 后执行。
+- [x] API/架构/用户/测试/状态文档一致，本地门禁全绿，实施 commit 已普通 push 且远端精确 SHA CI 4/4 成功。
 
 ## 假设
 
@@ -69,7 +69,7 @@
 1. [completed] 冻结 API/UI 合同并添加失败测试；初版 cursor red tests 已失败，合同已在实现前切换为 fixed blocks。
 2. [completed] 实现后端轻量 progress index/block API 与同快照 live metrics。
 3. [completed] 实现虚拟化热力图、Tooltip、独立轮询和实时指标。
-4. [in_progress] 文档、本地目标/完整门禁与浏览器验收已完成；剩余 commit/push、最终 SHA 记录和远端精确 SHA CI。
+4. [completed] 文档、本地目标/完整门禁、浏览器验收、普通 push、最终 SHA 记录和远端精确 SHA CI 均已完成。
 
 ## 实际修改
 
@@ -78,8 +78,7 @@
 | 本计划与工作日志 | 冻结范围、fixed-block 性能/竞态/协议边界和验收 | AGENTS/PLANS 强制流程 |
 | 后端 progress Schema/service/routes、共享证据聚合、日志合同与测试 | 固定 512 block index/payload、同快照 live metrics、typed 边界和固定白名单 | 运行中动态指标与大型 Run 轻量同步 |
 | 前端 API types/client、`useRunProgress`、`RunProgressHeatmap`、Run Detail/CSS 与测试 | block reducer/poller、终态追齐、虚拟化 ARIA grid、Tooltip 与响应式布局 | 四态进度和动态指标 UI |
-| README/API/TESTING/REQUIREMENTS/ARCHITECTURE/Phase/Roadmap/Status/Changelog/NEXT_TASK | 按实现与实际本地证据同步产品/API/测试/状态边界 | 强制文档同步；最终 SHA/远端 CI 待收尾 |
-| `docs/BENCHMARK_PROTOCOL.md` | 修正逐题 Provider transport metadata 已持久化的既有文档漂移 | 与实现、API 和 SECURITY 的既有事实对齐；不改变 protocol-v1 |
+| README/API/TESTING/REQUIREMENTS/ARCHITECTURE/Phase/Roadmap/Status/Changelog/NEXT_TASK | 按实现、本地证据与精确 SHA 远端门禁同步产品/API/测试/状态边界 | 强制文档与仓库级 closeout 已完成 |
 
 ## 决定、偏差与发现
 
@@ -114,6 +113,8 @@
 | `cd frontend && npm run build` | production build | 0 | 通过 |
 | `docker compose config --quiet` | Compose 配置 | 0 | 通过 |
 | 可信 loopback 浏览器验收 | 目标历史 Run、响应式、键盘、Tooltip 与 console | 0 | 179/17/2、Token/覆盖正确；desktop/768/375 无横向溢出；console 无 warning/error |
+| `git commit`、普通 `git push` | 固化并推送实现树 | 0 | 实现 commit [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5) 已 push 到 `codex/complete-evaluation-workflow`，进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5) |
+| GitHub Actions exact-SHA gate | 验证远端精确实现 SHA | 0 | [run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) completed/success；backend、backend-integration、full-stack-reliability、frontend 4/4 成功 |
 
 ## 测试结果
 
@@ -121,14 +122,15 @@
 - 失败：初版 cursor 后端 red tests `4 failed`（预期且已废弃）；fixed-block 实现后的目标/完整回归零失败
 - Lint/typecheck/build：`make lint` 与 frontend production build 通过
 - Smoke/Docker：Mock smoke `1 passed, 7 deselected`；`docker compose config --quiet` 通过
+- 远端：实现 SHA `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 的 Actions run `33289522923` 四个必需 job 全部成功
 
 ## 未运行验证
 
-- 仅 commit/push 后的远端精确 SHA CI 尚未运行。12,032/20,000 题是自动化虚拟化边界测试；没有把它写成大型真实 Run 的手工 DevTools 性能/内存测量。
+- 未调用真实 Provider。12,032/20,000 题是自动化虚拟化边界测试；没有把它写成大型真实 Run 的手工 DevTools 性能/内存测量。
 
 ## 未完成项
 
-- 本地实现、文档、目标/完整门禁与目标 Run 浏览器验收已完成；仅 commit/push、最终 SHA 记录和远端 exact-SHA CI 待完成。
+- 本 P3-06 切片无未完成项；Phase 3 其余 IFEval、Plugin SDK、代码题/沙箱、分组 UI 与红队范围继续单独追踪。
 
 ## 已知问题与限制
 
@@ -136,20 +138,20 @@
 
 ## 安全检查
 
-- 真实密钥扫描：本地范围/秘密复核通过；提交前按流程复核 staged diff
+- 真实密钥扫描：本地范围/秘密与 staged diff 复核通过
 - 真实 API 调用：否；计划内仅 Mock/Stub 与本地只读页面
 - 日志/API 脱敏：progress 合同禁止 question/external ID、prompt/choices/raw/parsed/reference/error message 与 Provider metadata；只返回 absolute position 和指标白名单
 - 危险 Git 操作（force push/reset 等）：无
-- 阶段 push：待完成
-- 远程 CI：待完成
+- 阶段 push：完成；实现 commit `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已普通 push
+- 远程 CI：完成；精确 SHA run `33289522923` 四个必需 job 全部成功
 - 遗留安全风险：与现有 Run 证据相同，仅适合可信 loopback；见 `docs/SECURITY.md`
 
 ## 结果与下一步
 
-`in_progress`。本地实现、验证与浏览器闭环已完成；下一步仅为提交、push、记录最终 SHA 并等待该精确 SHA 的远端 CI。Phase 3/P3-06 在远端门禁完成前保持 `in_progress`，P2-07 仍是既定下一可靠性切片。
+`completed`。本地实现、验证、浏览器闭环、普通 push 与精确 SHA CI 均已完成；P3-06 切片关闭。Phase 3 整体仍为 `in_progress`，P2-07 恢复为既定下一可靠性切片且保持 `planned`。
 
 ## 最终 Git 状态
 
 ```text
-本地实现与验证已完成；工作树待提交，远端精确 SHA CI 待运行。
+实现 commit 99791964621165c9cc7ec36b4b2d27fe04e6acd5 已普通 push 到 codex/complete-evaluation-workflow；PR #5 的精确 SHA Actions run 33289522923 四个必需 job 全部成功。
 ```

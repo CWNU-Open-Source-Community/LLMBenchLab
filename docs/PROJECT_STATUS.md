@@ -7,7 +7,7 @@
 - Phase 0 — 项目治理和架构：`completed`（2026-08-24）
 - Phase 1 — MVP 垂直链路：`completed`（2026-08-25）
 - Phase 2 — 可靠性与任务执行：`in_progress`（可靠基础、治理/审计、P2-01 单机资格与 P2-06 已完整交付；P2-07 工作包已建立，状态为 `planned`，功能尚未实现）
-- Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（可信本地 MMLU-Pro/GPQA-Diamond 已交付；P3-06 Run Detail 热力图/live metrics 已完成本地实现/验证，待精确 SHA CI）
+- Phase 3 — 标准 Benchmark 与代码评测：`in_progress`（可信本地 MMLU-Pro/GPQA-Diamond 与 P3-06 Run Detail 热力图/live metrics 切片已交付；IFEval、沙箱与完整插件体系仍未完成）
 - Phase 4–6：`planned`
 
 ## 当前版本与远程边界
@@ -18,7 +18,7 @@
 
 Run Detail 指标维护实现 SHA [`0003e4291769a851005ba46c7e59b156a6b789eb`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/0003e4291769a851005ba46c7e59b156a6b789eb) 已普通 push 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)；其精确 SHA 的 [GitHub Actions run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 对 backend、真实 PostgreSQL/Redis integration、real-Compose acceptance 和 frontend 四个 job 全部成功，因此该维护为 `completed`。它不改变 Phase 2/3 或 P2-07 状态。
 
-P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progress-heatmap-live-metrics.md) 当前为 `active/in_progress`。公共合同已从初版无可靠提交序的 cursor 改为固定 `512` 题 absolute-position blocks：progress index 在同一数据库读取快照返回 evidence-derived live metrics 与所有 block counts，block payload 只返回 position/outcome/score/latency/usage/cost/error type 白名单。该切片保持 `/api/v1` 与 `llmbenchlab-protocol-v1`，无 migration、ADR 或 SECURITY 边界修改；初版 cursor 失败先行套件记录为 `4 failed` 后已废弃。fixed-block 本地实现与验证已经完成，剩余提交 SHA、push 和远端精确 SHA CI。
+P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progress-heatmap-live-metrics.md) 状态为 `completed`。公共合同已从初版无可靠提交序的 cursor 改为固定 `512` 题 absolute-position blocks：progress index 在同一数据库读取快照返回 evidence-derived live metrics 与所有 block counts，block payload 只返回 position/outcome/score/latency/usage/cost/error type 白名单。该切片保持 `/api/v1` 与 `llmbenchlab-protocol-v1`，无 migration、ADR 或 SECURITY 边界修改；初版 cursor 失败先行套件记录为 `4 failed` 后已废弃。实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5) 已普通 push 到 `codex/complete-evaluation-workflow` 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)；精确 SHA 的 [GitHub Actions run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) 对 backend、backend-integration、full-stack-reliability、frontend 四个必需 job 全部成功。Phase 3 整体仍为 `in_progress`，P2-07 恢复为下一项且仍为 `planned`。
 
 ## 已交付基线
 
@@ -29,7 +29,7 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 - MMLU-Pro test 与 GPQA-Diamond 固定 revision/SHA 转换、可信本地 `llmbenchlab-evaluate prepare/run/resume/report`、请求上界确认和原子终态报告。该 CLI 仍要求独占数据库，未受 Phase 2 managed budget 保护。
 - React 中文界面覆盖 Dashboard、Models、Benchmarks、Evaluation Runs、New Run、Run Detail、Leaderboard；Run 列表全状态筛选/分页/活动轮询，详情逐题分页，关键桌面/平板/移动布局已修复。Run Detail 现区分未得分、普通答错与执行异常，并在精确 Token 未知时显示 Run-wide 已知小计、输入/输出覆盖率和“不完整”提示。
 
-## P3-06 Run Detail 热力图/live metrics（`in_progress`）
+## P3-06 Run Detail 热力图/live metrics（`completed`）
 
 - 用户 Run `a3de7e4d-40b2-4d8c-994b-c713047393ae` 的只读证据对账为 total/completed/correct/error=`198/198/179/2`；198 条 Response 中 `score < 1` 为 19、`error_type` 非空为 2，因此互斥四态应为通过 179、普通答错 17、执行异常 2、未执行 0。旧卡片显示“错误题 2”实际只反映执行异常，已复现原问题。
 - 同一 Run 的已知 input/output Token 为 `45,509 / 4,561,625`，各自覆盖 `196/198`；平均延迟为 `181,454.235 ms`。Run 精确 input/output/cost 仍为 `null`，新 UI 只能显示 known subtotal + reported coverage，不能把两条缺失 usage 当 0 或回填账单真值。这里未记录任何 Response 正文。
@@ -37,7 +37,7 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 - 前端已实现虚拟化 ARIA grid、非仅颜色图例、hover/focus/tap 等价详情和独立 block reducer/poller；非空 block 追齐前显示“同步中”，terminal 先到仍追齐，当前 Responses 页码与 progress 更新互不重置。
 - 本地证据：backend target `37 passed`；frontend target `32 passed`（Run Detail `20` + heatmap `12`）；完整 backend `964 passed, 33 skipped`、frontend `64 passed`；`make lint`、Mock smoke `1 passed, 7 deselected`、frontend build 与 `docker compose config --quiet` 通过。终态且 progress 已 reconciled 时只做一次最终 Run/当前 evidence 页刷新；同路由切换 `runId` 会把 evidence offset 重置为 0。12,032/20,000 题是自动化虚拟化边界，不是大型真实 Run 的手工 DevTools 性能测量。
 - 目标 Run 实页显示通过 179、普通答错 17、执行异常 2、未执行 0，Token `45,509 / 4,561,625`、输入/输出覆盖均为 `196/198`；desktop/768/375 无横向溢出，console 无 warning/error，键盘与 Tooltip 验收通过。
-- 状态仍为 `in_progress`：本地实现、回归和浏览器验收已完成，仅 commit/push、最终实现 SHA 与 exact-SHA CI 待完成。P2-07 仍为本切片完成后的下一独立任务。
+- 实现 SHA `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已普通 push，PR #5 的 exact-SHA Actions run `33289522923` 四个必需 job 全部成功，因此本切片为 `completed`。Phase 3 整体仍为 `in_progress`；P2-07 恢复为下一独立任务并保持 `planned`。
 
 ## 已通过候选门禁的 Phase 2 切片
 
@@ -106,6 +106,7 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 - 已下载标准评测集本地加载：状态为 `completed`；三个现有正式 ZIP 已导入并完成本地数据库/API/目标测试验证，`0163b67…` 的 run `33266167547` 4/4 成功。
 - observational Token overdraw 修复：状态为 `completed`；目标 head `0007`、本地完整验证、当前库迁移、最终修正 commit/push 与 exact-SHA CI 4/4 均完成。
 - Run Detail 错题与部分 Token 展示修复：状态为 `completed`；实现 SHA `0003e429…` 已 push，PR #5 的精确 SHA CI run `33286730109` 4/4 成功。
+- P3-06 Run Detail 热力图/live metrics：状态为 `completed`；实现 SHA `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已普通 push，PR #5 的精确 SHA CI run `33289522923` 4/4 成功；不改变 protocol-v1 或 Phase 3 整体 `in_progress` 状态。
 - P2-07：状态为 `planned`，已建立 [ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)、exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)、[独立计划](plans/2026-08-28-phase-2-recovery-operations.md) 和 [工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)。PostgreSQL backup/restore、数据库与 keyring 配对恢复、Redis 重建、Worker 扩缩/告警处置和剩余故障矩阵的功能实现尚未开始；P2-06 的 audit archive 自身 restore 不能替代整库恢复认证。P2-07 recovery-manifest-v1 的尚未实施 exact head 现为 `20260830_0007`。
 - Phase 3：IFEval、通用 Dataset Plugin SDK、代码题 schema/隔离沙箱、完整分组 UI 和安全红队；Phase 4–6 尚未开始。
 
@@ -150,7 +151,7 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 | 2026-08-30 标准评测集本地加载 | 三个 ZIP Loader 校验通过；API 导入 `201/201/201`；数据库/API 对账为 `4` Benchmarks、`24,277` Questions；`quick_check=ok`、FK `0`、head `0006`；目标测试 `40 passed` | 本地加载完成，原 Model/Run/Response 保持；`0163b67…` 的 run `33266167547` 4/4 成功，无 Provider 调用 |
 | 2026-08-30 observational overdraw 修复 | backend `946 passed, 33 skipped`；真实 PG+Redis integration `33 passed`；双方言 migration 往返/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、real-Compose `9/9`、Compose config 与当前库 backup/migrate/check 通过 | 当前 SQLite head=`20260830_0007`，scope `4→0`，7 Responses/7 ledger/407 input/599 output、13 表行数、quick/FK 保持；无真实 Provider；`cb00924…` 的 run `33271095910` 4/4 成功 |
 | 2026-08-30 Run Detail 指标修复 | backend API/Smoke 目标 `11 passed`、frontend Run Detail/format `20 passed`；完整 backend `951 passed, 33 skipped`、frontend `47 passed`；lint/build/Mock smoke/Compose config/实页验收通过 | 目标 Run 19/17/2、已知 Token `45,509/4,561,625` 和 `196/198` 覆盖可见；无真实 Provider；`0003e429…` 的 run `33286730109` 4/4 成功 |
-| P3-06 Run Detail 热力图/live metrics | 初版 cursor 后端 red suite `4 failed`（预期且合同已废弃）；fixed-block backend/frontend target `37/32 passed`（20 Run Detail + 12 heatmap）；完整 backend `964 passed, 33 skipped`、frontend `64 passed`；lint/smoke/build/config/目标 Run 浏览器验收通过 | 本地完成、远端 exact-SHA CI 待运行；`in_progress`，不改变 protocol-v1；P2-07 仍是下一任务 |
+| P3-06 Run Detail 热力图/live metrics | 初版 cursor 后端 red suite `4 failed`（预期且合同已废弃）；fixed-block backend/frontend target `37/32 passed`（20 Run Detail + 12 heatmap）；完整 backend `964 passed, 33 skipped`、frontend `64 passed`；lint/smoke/build/config/目标 Run 浏览器验收通过 | `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已 push；PR #5 exact-SHA run `33289522923` 4/4；切片 `completed`，Phase 3 仍 `in_progress`，P2-07 为下一任务 |
 | 最新本地 `make lint` | Ruff/format、ESLint、TypeScript 通过 | 本地冻结树通过 |
 | P2-01 冻结树 `make test` | 后端 `829 passed, 29 skipped`；前端 `38 passed` | v2 实现历史冻结树通过；当前 P2-06 全量见上方独立行 |
 | P2-01 真实 PostgreSQL/Redis integration | `29/29 passed` | v2 实现历史冻结树通过；当前 P2-06 integration 见上方独立行 |
@@ -182,4 +183,4 @@ P3-06 的 [Run Detail 热力图/live metrics 计划](plans/2026-08-30-run-progre
 
 ## 当前任务入口
 
-[NEXT_TASK.md](NEXT_TASK.md) 提供当前 P3-06 热力图/live metrics 远端收尾后的后续任务入口。该切片本地实现与验证已经完成，但在 commit/push 和精确 SHA CI 前仍保持 `in_progress`；远端门禁完成后恢复为 P2-07 最小只读 recovery verifier。P2-06 已完成仓库级收尾，P2-07 仍为 `planned`；Phase 2 与 Phase 3 继续保持 `in_progress`。
+[NEXT_TASK.md](NEXT_TASK.md) 现提供 P3-06 热力图/live metrics 完成后的 P2-07 最小只读 recovery verifier 入口。P3-06 实现、push 与精确 SHA CI 已完成并标为 `completed`；P2-07 恢复为下一项但仍为 `planned`。Phase 2 与 Phase 3 继续保持 `in_progress`。

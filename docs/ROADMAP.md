@@ -31,7 +31,7 @@
 | Phase 0 | 项目治理和架构 | 可执行的需求、架构、协议、ADR 与持续文档流程 | `completed` | [PHASE-0-GOVERNANCE.md](phases/PHASE-0-GOVERNANCE.md) |
 | Phase 1 | MVP 垂直链路 | Mock 模型到 Run、逐题结果与排行榜的离线闭环 | `completed` | [PHASE-1-MVP.md](phases/PHASE-1-MVP.md) |
 | Phase 2 | 可靠性与任务执行 | 可靠 Worker、治理/审计、P2-01、P2-06 与 observational overdraw 维护已交付；P2-07 工作包已建立但功能尚未实现 | `in_progress` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
-| Phase 3 | 标准 Benchmark 与代码评测 | 已有 MMLU-Pro/GPQA 可信本地切片；P3-06 Run Detail 热力图/live metrics 已完成本地实现/验证、待精确 SHA CI，IFEval、沙箱与完整插件体系待完成 | `in_progress` | [PHASE-3-BENCHMARKS.md](phases/PHASE-3-BENCHMARKS.md) |
+| Phase 3 | 标准 Benchmark 与代码评测 | 已有 MMLU-Pro/GPQA 可信本地切片；P3-06 Run Detail 热力图/live metrics 已完成实现、push 与精确 SHA CI，IFEval、沙箱与完整插件体系待完成 | `in_progress` | [PHASE-3-BENCHMARKS.md](phases/PHASE-3-BENCHMARKS.md) |
 | Phase 4 | Judge、Arena 与长上下文 | 可校准 Judge、Pairwise Judge、个人 Arena 和长上下文评测 | `planned` | [PHASE-4-JUDGE-ARENA.md](phases/PHASE-4-JUDGE-ARENA.md) |
 | Phase 5 | Agent、私有与 Live Benchmark | 工具调用轨迹、隔离私有集和持续更新的 Live Benchmark | `planned` | [PHASE-5-AGENT-LIVE.md](phases/PHASE-5-AGENT-LIVE.md) |
 | Phase 6 | 公共发布 | 多用户、鉴权、运维加固和正式版本发布 | `planned` | [PHASE-6-PUBLIC-RELEASE.md](phases/PHASE-6-PUBLIC-RELEASE.md) |
@@ -314,12 +314,14 @@
 
 `in_progress`（2026-08-27 开始）。MMLU-Pro 与 GPQA-Diamond 已有固定 revision/SHA、
 可复现转换、受限 real-Provider CLI 和证据派生分组报告切片。P3-06 的固定 512 题 absolute-position
-block progress API、后端同快照 live metrics 与虚拟化四态 Run Detail 已完成本地实现与验证；定向
-backend/frontend `37/32 passed`（Run Detail `20` + heatmap `12`），完整 backend `964 passed, 33 skipped`、frontend `64 passed`，lint、
-Mock smoke、build、Compose config 和目标 198 题 Run 的三档宽度/键盘/Tooltip/console 实页验收通过。
-12,032/20,000 题边界为自动化虚拟化验证。初版 cursor 合同因没有数据库单调提交序列而在实现前废弃；
-最终实现 SHA 与精确 SHA CI 尚待收尾。IFEval、正式
-Plugin SDK、代码题模型、安全沙箱、分组 UI、完整数据卡/红队及全部阶段验收仍未完成。
+block progress API、后端同快照 live metrics 与虚拟化四态 Run Detail 已完成；定向 backend/frontend
+`37/32 passed`（Run Detail `20` + heatmap `12`），完整 backend `964 passed, 33 skipped`、frontend
+`64 passed`，lint、Mock smoke、build、Compose config 和目标 198 题 Run 的三档宽度/键盘/Tooltip/console
+实页验收通过。12,032/20,000 题边界为自动化虚拟化验证。初版 cursor 合同因没有数据库单调提交序列
+而在实现前废弃；最终实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5)
+已普通 push 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)，精确 SHA [Actions run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923)
+四个必需 job 全部成功，因此 P3-06 切片为 `completed`。IFEval、正式 Plugin SDK、代码题模型、安全沙箱、
+分组 UI、完整数据卡/红队及全部阶段验收仍未完成，所以 Phase 3 整体保持 `in_progress`。
 
 ## 7. Phase 4：Judge、Arena 与长上下文
 

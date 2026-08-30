@@ -1,7 +1,7 @@
 # Run Detail 热力图与实时指标执行计划
 
 - Owner: Codex
-- Status: active
+- Status: completed
 - Created: 2026-08-30
 - Updated: 2026-08-30
 - Related requirements: FR-API-05、FR-API-08、FR-UI-05、FR-UI-07、US-04、US-05、NFR-PERF-02、NFR-PERF-03、NFR-REL-01、NFR-UX-01、TST-03
@@ -66,7 +66,7 @@ Question 已有 Benchmark 内唯一 `position`，EvaluationResponse 对 `(run_id
 3. [completed] **实现热力图与实时指标**
    - Files/modules: 前端 API types/client、独立 Heatmap 组件、Run Detail、CSS。
    - Validation: hover/focus Tooltip、绿红黑白、计数、实时准确率/完成率/Token/cost、分页并发与终态停止测试通过。
-4. [in_progress] **文档、完整验证、真实页面与交付闭环**
+4. [completed] **文档、完整验证、真实页面与交付闭环**
    - Files/modules: README/API/ARCHITECTURE/TESTING/CHANGELOG/ROADMAP/PROJECT_STATUS/PHASE-3/NEXT_TASK/计划/工作日志。
    - Validation: 目标测试、lint、完整 test、Mock smoke、frontend build、Compose config、真实浏览器验收、秘密/diff 检查、commit/push 与精确 SHA CI 全绿。
 
@@ -91,7 +91,8 @@ Question 已有 Benchmark 内唯一 `position`，EvaluationResponse 对 `(run_id
 | 部署配置 | `docker compose config --quiet` | exit 0 | 通过 |
 | 实页交互 | Browser 打开历史 198 题 Run | 状态/指标、四种颜色、Tooltip、移动宽度、console 无错 | Run `a3de7e4d-40b2-4d8c-994b-c713047393ae` 显示 179 passed / 17 wrong / 2 error，Token `45,509 / 4,561,625`、覆盖 `196/198`；desktop/768/375 无横向溢出，console 无 warning/error，键盘与 Tooltip 通过 |
 | 大型虚拟化 | 前端自动化使用 12,032 / 20,000 题 fixture | DOM 节点有界且键盘定位正确 | 通过；这是自动化组件验证，不是 12,032/20,000 题实页浏览器性能测量 |
-| 安全与范围 | `git diff --check`、staged diff、秘密扫描、`git status --short` | 无凭据/正文泄漏、无无关改动 | 本地范围/秘密/diff 复核通过；提交前按流程重复确认 staged tree |
+| 安全与范围 | `git diff --check`、staged diff、秘密扫描、`git status --short` | 无凭据/正文泄漏、无无关改动 | 本地范围/秘密/diff 与实现提交前 staged tree 复核通过 |
+| 远端精确 SHA 门禁 | 普通 push 后检查 PR 与 GitHub Actions | backend、backend-integration、full-stack-reliability、frontend 全绿 | 实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5) 已 push 到 `codex/complete-evaluation-workflow` 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)；[run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) 4/4 成功 |
 
 ## Rollback
 
@@ -110,8 +111,9 @@ Question 已有 Benchmark 内唯一 `position`，EvaluationResponse 对 `(run_id
 - Changed files: 后端 progress Schema/service/routes、共享证据聚合、日志合同与测试；前端 API types/client、polling hook、虚拟化 Heatmap、Run Detail/CSS 与测试；本计划列出的强制文档
 - Commands run: 后端/前端定向测试、`make test`、`make lint`、`make smoke`、frontend build、`docker compose config --quiet`、可信 loopback 浏览器验收
 - Acceptance evidence: backend target `37 passed`；frontend target `32 passed`（Run Detail `20` + heatmap `12`）；完整 backend `964 passed, 33 skipped`、frontend `64 passed`；Smoke `1 passed, 7 deselected`；lint/build/Compose config 通过；目标 Run 实页与三档宽度、键盘/Tooltip/console 验收通过
-- Not run: commit/push 后的远端精确 SHA CI；12,032/20,000 只做了自动化虚拟化边界测试，未将其描述为大型真实 Run 的 DevTools 性能测量
-- Known issues: 无本地阻断；计划保持 `active`，直到提交、push 与远端 exact-SHA CI 完成
+- Remote evidence: commit `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 已普通 push，PR #5 的 exact-SHA Actions run `33289522923` 对四个必需 job 全部成功
+- Not run: 未调用真实 Provider；12,032/20,000 只做了自动化虚拟化边界测试，未将其描述为大型真实 Run 的 DevTools 性能测量
+- Known issues: 本切片无未完成门禁；Phase 3 其余范围继续按 Roadmap 追踪，P2-07 为下一项且仍为 `planned`
 
 ## Decision and discovery log
 
