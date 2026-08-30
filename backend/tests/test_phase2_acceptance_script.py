@@ -34,7 +34,7 @@ def test_migration_acceptance_retains_both_populated_guards_and_empty_round_trip
     assert script.PRE_GOVERNANCE_REVISION == "20260827_0003"
     assert script.GOVERNANCE_REVISION == "20260827_0004"
     assert script.WORKER_PROGRESS_REVISION == "20260828_0005"
-    assert script.DATABASE_HEAD_REVISION == "20260830_0007"
+    assert script.DATABASE_HEAD_REVISION == "20260830_0008"
     assert "postgres_populated_0005_and_0004_downgrade_guards_with_empty_round_trips" in source
     assert "Cannot downgrade Worker progress schema" in source
     assert "Cannot downgrade governance schema" in source

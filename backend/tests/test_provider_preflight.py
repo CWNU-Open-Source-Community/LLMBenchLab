@@ -6,12 +6,14 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from app.adapters import ModelGenerationResult
 from app.models import ProviderType
 from app.providers import (
     ProviderPreflightError,
     discover_models,
     models_url,
     run_chat_canary,
+    run_provider_canary,
     select_remote_model,
 )
 from app.schemas.model import ModelCreate
@@ -39,6 +41,14 @@ class _TrackedAsyncByteStream(httpx.AsyncByteStream):
         (
             "https://provider.example/openai/v1/chat/completions",
             "https://provider.example/openai/v1/models",
+        ),
+        (
+            "https://provider.example/zen/go/v1/responses",
+            "https://provider.example/zen/go/v1/models",
+        ),
+        (
+            "https://provider.example/zen/go/v1/messages",
+            "https://provider.example/zen/go/v1/models",
         ),
         ("http://127.0.0.1:11434/v1/", "http://127.0.0.1:11434/v1/models"),
         ("http://localhost:11434/v1", "http://localhost:11434/v1/models"),
@@ -143,6 +153,123 @@ async def test_discover_models_authenticates_and_returns_sorted_unique_ids() -> 
     }
     assert result.models == ("a-model", "z-model")
     assert result.request_id == "discovery-1"
+
+
+@pytest.mark.asyncio
+async def test_messages_model_discovery_uses_native_headers_and_pagination() -> None:
+    seen: list[dict[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(
+            {
+                "url": str(request.url),
+                "authorization": request.headers.get("authorization"),
+                "x_api_key": request.headers.get("x-api-key"),
+                "anthropic_version": request.headers.get("anthropic-version"),
+                "accept_encoding": request.headers.get("accept-encoding"),
+            }
+        )
+        if request.url.params.get("after_id") is None:
+            return httpx.Response(
+                200,
+                headers={"request-id": "messages-discovery-1"},
+                json={
+                    "data": [{"id": "message-model-b"}],
+                    "has_more": True,
+                    "last_id": "message-model-b",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"id": "message-model-a"}],
+                "has_more": False,
+                "last_id": "message-model-a",
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        result = await discover_models(
+            "https://provider.example/v1/messages",
+            "messages-secret",
+            provider_type=ProviderType.ANTHROPIC_MESSAGES,
+            client=client,
+        )
+
+    assert seen == [
+        {
+            "url": "https://provider.example/v1/models",
+            "authorization": None,
+            "x_api_key": "messages-secret",
+            "anthropic_version": "2023-06-01",
+            "accept_encoding": "identity",
+        },
+        {
+            "url": "https://provider.example/v1/models?after_id=message-model-b",
+            "authorization": None,
+            "x_api_key": "messages-secret",
+            "anthropic_version": "2023-06-01",
+            "accept_encoding": "identity",
+        },
+    ]
+    assert result.models == ("message-model-a", "message-model-b")
+    assert result.request_id == "messages-discovery-1"
+
+
+@pytest.mark.asyncio
+async def test_messages_model_discovery_stops_unbounded_cursor_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.providers.preflight.MAX_DISCOVERY_PAGES", 2)
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={"data": [], "has_more": True, "last_id": f"cursor-{calls}"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(ProviderPreflightError) as caught:
+            await discover_models(
+                "https://provider.example/v1",
+                "messages-secret",
+                provider_type=ProviderType.ANTHROPIC_MESSAGES,
+                client=client,
+            )
+
+    assert calls == 2
+    assert caught.value.code == "model_discovery_too_many_pages"
+
+
+@pytest.mark.asyncio
+async def test_messages_model_discovery_enforces_total_wall_clock_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamps = iter((100.0, 161.0))
+
+    class FakeClock:
+        @staticmethod
+        def monotonic() -> float:
+            return next(timestamps)
+
+    monkeypatch.setattr("app.providers.preflight.time", FakeClock())
+
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("expired discovery must fail before another request")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unexpected_request)) as client:
+        with pytest.raises(ProviderPreflightError) as caught:
+            await discover_models(
+                "https://provider.example/v1",
+                "messages-secret",
+                provider_type=ProviderType.ANTHROPIC_MESSAGES,
+                client=client,
+            )
+
+    assert caught.value.code == "model_discovery_deadline_exceeded"
 
 
 @pytest.mark.asyncio
@@ -305,6 +432,64 @@ async def test_chat_canary_uses_run_fields_and_requires_parseable_a(
     assert result.input_tokens == 9
     assert result.output_tokens == 4
     assert result.attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_provider_canary_builds_the_explicit_protocol_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CANARY_KEY", "secret")
+    seen: dict[str, object] = {}
+
+    class FakeAdapter:
+        async def generate(self, messages, generation_config):
+            seen["messages"] = messages
+            seen["generation"] = generation_config
+            return ModelGenerationResult(
+                text="A",
+                input_tokens=2,
+                output_tokens=1,
+                latency_ms=1.5,
+                provider_request_id="provider-canary",
+                metadata={
+                    "returned_model": "remote-model",
+                    "finish_reason": "end_turn",
+                    "attempts": 1,
+                },
+            )
+
+        async def aclose(self) -> None:
+            seen["closed"] = True
+
+    def fake_build_adapter(provider_type: str, **options):
+        seen["provider_type"] = provider_type
+        seen["options"] = options
+        return FakeAdapter()
+
+    monkeypatch.setattr("app.providers.preflight.build_adapter", fake_build_adapter)
+
+    result = await run_provider_canary(
+        ProviderType.OPENAI_RESPONSES,
+        "https://provider.example/zen/go/v1/responses",
+        "remote-model",
+        "CANARY_KEY",
+        {"temperature": 0, "top_p": 1, "max_tokens": None, "seed": None},
+    )
+
+    assert seen["provider_type"] == "openai_responses"
+    assert seen["options"] == {
+        "base_url": "https://provider.example/zen/go/v1/responses",
+        "remote_model_name": "remote-model",
+        "api_key_env": "CANARY_KEY",
+        "client": None,
+    }
+    assert seen["messages"] == [
+        {"role": "user", "content": "Compatibility check: reply with exactly A."}
+    ]
+    assert seen["generation"] == {"temperature": 0, "top_p": 1, "max_tokens": 16}
+    assert seen["closed"] is True
+    assert result.provider_request_id == "provider-canary"
+    assert result.finish_reason == "end_turn"
 
 
 @pytest.mark.asyncio

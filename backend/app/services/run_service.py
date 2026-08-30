@@ -17,9 +17,12 @@ from app.core.constants import (
     PROTOCOL_VERSION,
     RETRYABLE_PROVIDER_STATUS_CODES,
 )
-from app.models import Benchmark, EvaluationRun, Model, RunStatus
+from app.models import Benchmark, EvaluationRun, Model, ProviderType, RunStatus
 from app.schemas.evaluation_run import EvaluationRunCreate
-from app.schemas.model import model_run_snapshot_values
+from app.schemas.model import (
+    model_run_snapshot_values,
+    validate_provider_generation_parameters,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -63,6 +66,17 @@ def build_evaluation_run(
         )
         for field in ("temperature", "top_p", "max_tokens", "seed")
     }
+    if model.provider_type in {
+        ProviderType.OPENAI_RESPONSES,
+        ProviderType.ANTHROPIC_MESSAGES,
+    }:
+        for field in ("temperature", "top_p", "seed"):
+            if field not in requested_fields and field not in model_defaults:
+                generation[field] = None
+    validate_provider_generation_parameters(model.provider_type, generation)
+    retryable_status_codes = list(RETRYABLE_PROVIDER_STATUS_CODES)
+    if model.provider_type == ProviderType.ANTHROPIC_MESSAGES:
+        retryable_status_codes.append(529)
     snapshot: dict[str, Any] = {
         "generation": generation,
         "model": model_run_snapshot_values(model),
@@ -95,7 +109,7 @@ def build_evaluation_run(
                 "max_attempts": DEFAULT_MAX_RETRIES + 1,
                 "backoff_base_seconds": DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
                 "backoff_cap_seconds": DEFAULT_RETRY_BACKOFF_CAP_SECONDS,
-                "retryable_status_codes": list(RETRYABLE_PROVIDER_STATUS_CODES),
+                "retryable_status_codes": retryable_status_codes,
             },
             "task_delivery": "at_least_once",
             "task_max_attempts": settings.worker_max_attempts,

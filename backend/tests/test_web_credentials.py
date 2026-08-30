@@ -383,6 +383,7 @@ def test_stored_credential_crud_origin_guard_active_run_lock_and_cleanup(client)
         {"base_url": "https://third-provider.example/v1"},
         {"api_key": CANARY},
         {"api_key_env": "LEGACY_PROVIDER_KEY"},
+        {"provider_type": "openai_responses"},
         {"provider_type": "mock"},
     ]
     for update in sensitive_updates:

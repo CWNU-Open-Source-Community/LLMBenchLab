@@ -18,6 +18,7 @@ from app.db.prepare_migrations import (
     GOVERNANCE_REVISION,
     INDEX_REPAIR_REVISION,
     LEGACY_REVISION,
+    OBSERVATIONAL_OVERDRAW_REVISION,
     PHASE_1_REVISION,
     WORKER_PROGRESS_REVISION,
     SchemaPreparationError,
@@ -29,7 +30,7 @@ from app.db.prepare_migrations import (
 from app.db.session import create_database_engine
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
-HEAD_REVISION = "20260830_0007"
+HEAD_REVISION = "20260830_0008"
 WEB_CREDENTIAL_REVISION = CREDENTIAL_REVISION
 RELIABILITY_REVISION = "20260825_0002"
 
@@ -416,6 +417,84 @@ def test_clean_migration_round_trip(tmp_path: Path) -> None:
 
     _run_alembic(database_path, "upgrade", "head")
     assert _read_heads(database_path) == (HEAD_REVISION,)
+
+
+def test_provider_protocol_migration_preserves_chat_and_guards_lossy_downgrade(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "provider-protocols.db"
+    _run_alembic(database_path, "upgrade", LEGACY_REVISION)
+    _insert_legacy_rows(database_path)
+    _run_alembic(database_path, "upgrade", OBSERVATIONAL_OVERDRAW_REVISION)
+
+    _run_alembic(database_path, "upgrade", "head")
+
+    with sqlite3.connect(database_path) as connection:
+        provider_column = next(
+            row
+            for row in connection.execute("PRAGMA table_info(models)")
+            if row[1] == "provider_type"
+        )
+        assert provider_column[2].upper() == "VARCHAR(18)"
+        for model_id, provider_type in (
+            ("model-responses", "openai_responses"),
+            ("model-messages", "anthropic_messages"),
+        ):
+            connection.execute(
+                "INSERT INTO models ("
+                "id, name, provider_type, base_url, remote_model_name, api_key_env, "
+                "credential_source, enabled, input_price_per_million, "
+                "output_price_per_million, default_parameters, created_at, updated_at"
+                ") VALUES (?, ?, ?, 'https://provider.example/v1', 'remote-model', "
+                "'PROVIDER_KEY', 'environment', 1, NULL, NULL, '{}', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (model_id, provider_type, provider_type),
+            )
+        assert connection.execute("SELECT provider_type FROM models ORDER BY id").fetchall() == [
+            ("mock",),
+            ("anthropic_messages",),
+            ("openai_responses",),
+        ]
+
+    failed = _invoke_alembic(
+        database_path,
+        "downgrade",
+        OBSERVATIONAL_OVERDRAW_REVISION,
+    )
+    assert failed.returncode != 0
+    assert "Cannot downgrade while openai_responses or anthropic_messages Models exist" in (
+        failed.stderr
+    )
+    assert _read_heads(database_path) == (HEAD_REVISION,)
+
+    with sqlite3.connect(database_path) as connection:
+        assert (
+            connection.execute(
+                "SELECT COUNT(*) FROM models WHERE provider_type IN "
+                "('openai_responses', 'anthropic_messages')"
+            ).fetchone()[0]
+            == 2
+        )
+        connection.execute(
+            "DELETE FROM models WHERE provider_type IN ('openai_responses', 'anthropic_messages')"
+        )
+
+    _run_alembic(database_path, "downgrade", OBSERVATIONAL_OVERDRAW_REVISION)
+    assert _read_heads(database_path) == (OBSERVATIONAL_OVERDRAW_REVISION,)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute("SELECT id, provider_type FROM models").fetchall() == [
+            ("model-1", "mock")
+        ]
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT INTO models ("
+                "id, name, provider_type, base_url, remote_model_name, api_key_env, "
+                "credential_source, enabled, input_price_per_million, "
+                "output_price_per_million, default_parameters, created_at, updated_at"
+                ") VALUES ('model-rejected', 'Rejected', 'openai_responses', "
+                "'https://provider.example/v1', 'remote-model', 'PROVIDER_KEY', "
+                "'environment', 1, NULL, NULL, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
 
 
 def test_prepare_adopts_legacy_schema_and_preserves_rows(tmp_path: Path) -> None:
@@ -899,7 +978,7 @@ def test_overdraw_repair_preserves_explicit_hard_bound_overdraw(
     ("start_revision", "direction", "target_revision"),
     [
         (INDEX_REPAIR_REVISION, "upgrade", "head"),
-        (HEAD_REVISION, "downgrade", INDEX_REPAIR_REVISION),
+        (OBSERVATIONAL_OVERDRAW_REVISION, "downgrade", INDEX_REPAIR_REVISION),
     ],
 )
 def test_overdraw_repair_refuses_active_reservations_before_mutation(
@@ -952,11 +1031,14 @@ def test_overdraw_repair_refuses_active_reservations_before_mutation(
     ("differences", "expected_row_guard_calls"),
     [
         (
-            (),
+            ("modify_type:models.provider_type:VARCHAR(17)->VARCHAR(18)",),
             0,
         ),
         (
-            ("add_index:evaluation_runs.ix_evaluation_runs_started_at_id",),
+            (
+                "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
+                "modify_type:models.provider_type:VARCHAR(17)->VARCHAR(18)",
+            ),
             1,
         ),
         (
@@ -964,6 +1046,7 @@ def test_overdraw_repair_refuses_active_reservations_before_mutation(
                 "add_index:evaluation_runs.ix_evaluation_runs_finished_at_id",
                 "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
                 "add_index:governance_policies.uq_governance_policies_single_active",
+                "modify_type:models.provider_type:VARCHAR(17)->VARCHAR(18)",
             ),
             1,
         ),
@@ -988,6 +1071,40 @@ def test_prepare_postgresql_0005_accepts_only_canonical_or_known_index_gap(
     engine.dispose.assert_called_once_with()
 
 
+def test_provider_type_difference_fingerprint_includes_exact_source_and_target_width() -> None:
+    difference = (
+        "modify_type",
+        None,
+        "models",
+        "provider_type",
+        {},
+        prepare_migrations_module.sa.String(length=16),
+        prepare_migrations_module.sa.String(length=18),
+    )
+
+    assert prepare_migrations_module._difference_fingerprint(difference) == (
+        "modify_type:models.provider_type:VARCHAR(16)->VARCHAR(18)"
+    )
+
+
+def test_prepare_postgresql_rejects_unexpected_provider_type_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
+        monkeypatch,
+        differences=("modify_type:models.provider_type:VARCHAR(16)->VARCHAR(18)",),
+        source_revision=OBSERVATIONAL_OVERDRAW_REVISION,
+    )
+
+    with pytest.raises(SchemaPreparationError, match="historical database"):
+        prepare_database("postgresql+psycopg://localhost/llmbenchlab_test")
+
+    assert metadata_calls == [connection]
+    connection.execute.assert_not_called()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+
+
 def test_prepare_postgresql_0005_rejects_unknown_drift_with_known_index_gap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -996,6 +1113,7 @@ def test_prepare_postgresql_0005_rejects_unknown_drift_with_known_index_gap(
         differences=(
             "add_index:evaluation_runs.ix_evaluation_runs_started_at_id",
             "add_index:models.ix_models_enabled",
+            "modify_type:models.provider_type:VARCHAR(17)->VARCHAR(18)",
         ),
     )
 
@@ -1013,7 +1131,7 @@ def test_prepare_postgresql_0006_checks_canonical_metadata(
 ) -> None:
     engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
         monkeypatch,
-        differences=(),
+        differences=("modify_type:models.provider_type:VARCHAR(17)->VARCHAR(18)",),
         source_revision=INDEX_REPAIR_REVISION,
     )
 
@@ -1031,7 +1149,10 @@ def test_prepare_postgresql_0006_rejects_metadata_drift(
 ) -> None:
     engine, connection, metadata_calls = _mock_postgresql_historical_preflight(
         monkeypatch,
-        differences=("add_index:models.ix_models_enabled",),
+        differences=(
+            "add_index:models.ix_models_enabled",
+            "modify_type:models.provider_type:VARCHAR(17)->VARCHAR(18)",
+        ),
         source_revision=INDEX_REPAIR_REVISION,
     )
 

@@ -65,6 +65,7 @@ from app.worker_progress import (
 logger = logging.getLogger(__name__)
 
 _OPAQUE_PROVIDER_SCOPE_PATTERN = re.compile(r"[0-9a-f]{64}")
+_REMOTE_PROVIDER_TYPES = frozenset({"openai_compatible", "openai_responses", "anthropic_messages"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -776,7 +777,7 @@ class EvaluationRunner:
                     or model_snapshot.api_key_env is not None
                 ):
                     raise ValueError("run_credential_snapshot_invalid")
-            elif model_snapshot.provider_type == "openai_compatible":
+            elif model_snapshot.provider_type in _REMOTE_PROVIDER_TYPES:
                 if model_snapshot.base_url is None or model_snapshot.remote_model_name is None:
                     raise ValueError("run_model_snapshot_incomplete")
                 if credential_source == "environment":
@@ -1142,7 +1143,7 @@ class EvaluationRunner:
 
         if parse_error is None:
             return None, None
-        if generation_metadata.get("finish_reason") == "length":
+        if generation_metadata.get("finish_reason") in {"length", "max_tokens"}:
             return (
                 "output_truncated",
                 "Provider stopped at the output token limit before a valid final "

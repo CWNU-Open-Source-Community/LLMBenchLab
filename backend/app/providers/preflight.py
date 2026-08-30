@@ -1,4 +1,4 @@
-"""Secret-safe discovery and a minimal billed Chat Completions canary.
+"""Secret-safe discovery and a minimal billed Provider-protocol canary.
 
 These helpers are intentionally used only by the trusted-local CLI.  The API
 key is supplied by the caller and is never returned, logged, or persisted.
@@ -9,6 +9,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -16,13 +17,17 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from app.adapters import AdapterError, OpenAICompatibleAdapter, sanitize_error_message
+from app.adapters import AdapterError, build_adapter, sanitize_error_message
 from app.evaluators import get_evaluator
+from app.models import ProviderType
 
 MAX_DISCOVERY_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_DISCOVERED_MODELS = 10_000
+MAX_DISCOVERY_PAGES = 100
+MAX_DISCOVERY_WALL_SECONDS = 60
 _DISCOVERY_READ_CHUNK_BYTES = 64 * 1024
 _MODEL_ID_RE = re.compile(r"^[^\x00-\x1f\x7f]{1,256}$")
+_KNOWN_ENDPOINT_SUFFIXES = ("/chat/completions", "/responses", "/messages")
 
 
 class ProviderPreflightError(RuntimeError):
@@ -96,9 +101,10 @@ def models_url(base_url: str) -> str:
     """Return the sibling ``/models`` URL for a compatible endpoint."""
 
     scheme, netloc, path, query, fragment = _validated_base_url(base_url)
-    suffix = "/chat/completions"
-    if path.endswith(suffix):
-        path = path[: -len(suffix)]
+    for suffix in _KNOWN_ENDPOINT_SUFFIXES:
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
     return urlunsplit((scheme, netloc, f"{path}/models", query, fragment))
 
 
@@ -131,13 +137,46 @@ async def discover_models(
     base_url: str,
     api_key: str,
     *,
+    provider_type: ProviderType | str = ProviderType.OPENAI_COMPATIBLE,
     client: httpx.AsyncClient | None = None,
 ) -> ModelDiscoveryResult:
-    """Authenticate against ``GET /models`` and return bounded model IDs."""
+    """Authenticate against ``GET /models`` and return bounded model IDs.
+
+    OpenAI-style protocols use bearer authentication. Anthropic Messages uses
+    the same ``x-api-key`` and version headers as its generation endpoint and
+    follows the native ``after_id`` cursor when the Provider paginates models.
+    """
 
     if not api_key:
         raise ProviderPreflightError("missing_api_key", "API key is empty.")
+    try:
+        normalized_provider = (
+            provider_type
+            if isinstance(provider_type, ProviderType)
+            else ProviderType(provider_type)
+        )
+    except ValueError:
+        raise ProviderPreflightError(
+            "invalid_provider_type", "Model discovery requires a known remote protocol."
+        ) from None
+    if normalized_provider == ProviderType.MOCK:
+        raise ProviderPreflightError(
+            "invalid_provider_type", "Model discovery is unavailable for the mock Provider."
+        )
     endpoint = models_url(base_url)
+    headers = {
+        "Accept": "application/json",
+        "Accept-Encoding": "identity",
+    }
+    if normalized_provider == ProviderType.ANTHROPIC_MESSAGES:
+        headers.update(
+            {
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+            }
+        )
+    else:
+        headers["Authorization"] = f"Bearer {api_key}"
     owns_client = client is None
     active_client = client or httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5, read=30, write=10, pool=5),
@@ -145,114 +184,171 @@ async def discover_models(
         trust_env=False,
     )
     try:
-        try:
-            async with active_client.stream(
-                "GET",
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Accept": "application/json",
-                    "Accept-Encoding": "identity",
-                },
-            ) as response:
-                content_encoding = response.headers.get("content-encoding", "identity")
-                if content_encoding.strip().lower() not in {"", "identity"}:
-                    raise ProviderPreflightError(
-                        "unsupported_model_discovery_response_encoding",
-                        "Model discovery returned a compressed response despite the "
-                        "identity-only request.",
-                        status_code=response.status_code,
-                    )
-                content_length = response.headers.get("content-length")
-                if content_length is not None:
-                    try:
-                        declared_length = int(content_length)
-                    except ValueError:
-                        declared_length = None
-                    if (
-                        declared_length is not None
-                        and declared_length > MAX_DISCOVERY_RESPONSE_BYTES
-                    ):
+        model_ids: set[str] = set()
+        request_id: str | None = None
+        after_id: str | None = None
+        seen_cursors: set[str] = set()
+        total_entries = 0
+        total_response_bytes = 0
+        page_count = 0
+        discovery_started = time.monotonic()
+        while True:
+            if page_count >= MAX_DISCOVERY_PAGES:
+                raise ProviderPreflightError(
+                    "model_discovery_too_many_pages",
+                    f"Model discovery exceeded the {MAX_DISCOVERY_PAGES}-page safety limit.",
+                )
+            if time.monotonic() - discovery_started >= MAX_DISCOVERY_WALL_SECONDS:
+                raise ProviderPreflightError(
+                    "model_discovery_deadline_exceeded",
+                    f"Model discovery exceeded the {MAX_DISCOVERY_WALL_SECONDS}-second "
+                    "wall-clock safety limit.",
+                )
+            page_count += 1
+            network_error: str | None = None
+            try:
+                async with active_client.stream(
+                    "GET",
+                    endpoint,
+                    headers=headers,
+                    params={"after_id": after_id} if after_id is not None else None,
+                ) as response:
+                    content_encoding = response.headers.get("content-encoding", "identity")
+                    if content_encoding.strip().lower() not in {"", "identity"}:
                         raise ProviderPreflightError(
-                            "model_discovery_response_too_large",
-                            "Model discovery response exceeds the 2 MiB safety limit.",
+                            "unsupported_model_discovery_response_encoding",
+                            "Model discovery returned a compressed response despite the "
+                            "identity-only request.",
+                            status_code=response.status_code,
                         )
-                content = bytearray()
-                if response.is_stream_consumed:
-                    buffered = response.content
-                    if len(buffered) > MAX_DISCOVERY_RESPONSE_BYTES:
-                        raise ProviderPreflightError(
-                            "model_discovery_response_too_large",
-                            "Model discovery response exceeds the 2 MiB safety limit.",
-                        )
-                    content.extend(buffered)
-                else:
-                    async for chunk in response.aiter_raw(chunk_size=_DISCOVERY_READ_CHUNK_BYTES):
-                        if len(content) + len(chunk) > MAX_DISCOVERY_RESPONSE_BYTES:
+                    content_length = response.headers.get("content-length")
+                    if content_length is not None:
+                        try:
+                            declared_length = int(content_length)
+                        except ValueError:
+                            declared_length = None
+                        if (
+                            declared_length is not None
+                            and total_response_bytes + declared_length
+                            > MAX_DISCOVERY_RESPONSE_BYTES
+                        ):
                             raise ProviderPreflightError(
                                 "model_discovery_response_too_large",
                                 "Model discovery response exceeds the 2 MiB safety limit.",
                             )
-                        content.extend(chunk)
-                response_content = bytes(content)
-        except ProviderPreflightError:
-            raise
-        except httpx.TransportError as exc:
-            raise ProviderPreflightError(
-                "model_discovery_network_error",
-                "Model discovery request failed: " + sanitize_error_message(exc, api_key),
-            ) from exc
-        if response.status_code >= 400:
-            code = (
-                "model_discovery_authentication_error"
-                if response.status_code in {401, 403}
-                else "model_discovery_unsupported"
-                if response.status_code in {404, 405}
-                else "model_discovery_http_error"
-            )
-            raise ProviderPreflightError(
-                code,
-                f"Model discovery returned HTTP {response.status_code}: "
-                f"{_safe_error_detail(response, api_key, response_content)}",
-                status_code=response.status_code,
-            )
-        try:
-            body = json.loads(response_content)
-        except (ValueError, UnicodeError) as exc:
-            raise ProviderPreflightError(
-                "invalid_model_discovery_response",
-                "Model discovery returned a non-JSON response.",
-            ) from exc
-        if not isinstance(body, Mapping) or not isinstance(body.get("data"), list):
-            raise ProviderPreflightError(
-                "invalid_model_discovery_response",
-                "Model discovery response must contain a data array.",
-            )
-        raw_models = body["data"]
-        if len(raw_models) > MAX_DISCOVERED_MODELS:
-            raise ProviderPreflightError(
-                "too_many_discovered_models",
-                f"Model discovery returned more than {MAX_DISCOVERED_MODELS} entries.",
-            )
-        model_ids: set[str] = set()
-        for item in raw_models:
-            if not isinstance(item, Mapping):
-                continue
-            model_id = item.get("id")
-            if isinstance(model_id, str) and _MODEL_ID_RE.fullmatch(model_id):
+                    content = bytearray()
+                    if response.is_stream_consumed:
+                        buffered = response.content
+                        if total_response_bytes + len(buffered) > MAX_DISCOVERY_RESPONSE_BYTES:
+                            raise ProviderPreflightError(
+                                "model_discovery_response_too_large",
+                                "Model discovery response exceeds the 2 MiB safety limit.",
+                            )
+                        content.extend(buffered)
+                    else:
+                        async for chunk in response.aiter_raw(
+                            chunk_size=_DISCOVERY_READ_CHUNK_BYTES
+                        ):
+                            if (
+                                total_response_bytes + len(content) + len(chunk)
+                                > MAX_DISCOVERY_RESPONSE_BYTES
+                            ):
+                                raise ProviderPreflightError(
+                                    "model_discovery_response_too_large",
+                                    "Model discovery response exceeds the 2 MiB safety limit.",
+                                )
+                            content.extend(chunk)
+                    response_content = bytes(content)
+            except ProviderPreflightError:
+                raise
+            except httpx.TransportError as exc:
+                network_error = sanitize_error_message(exc, api_key)
+            if network_error is not None:
+                raise ProviderPreflightError(
+                    "model_discovery_network_error",
+                    "Model discovery request failed: " + network_error,
+                )
+
+            total_response_bytes += len(response_content)
+            if response.status_code >= 400:
+                code = (
+                    "model_discovery_authentication_error"
+                    if response.status_code in {401, 403}
+                    else "model_discovery_unsupported"
+                    if response.status_code in {404, 405}
+                    else "model_discovery_http_error"
+                )
+                raise ProviderPreflightError(
+                    code,
+                    f"Model discovery returned HTTP {response.status_code}: "
+                    f"{_safe_error_detail(response, api_key, response_content)}",
+                    status_code=response.status_code,
+                )
+            invalid_json = False
+            try:
+                body = json.loads(response_content)
+            except (ValueError, UnicodeError):
+                invalid_json = True
+                body = None
+            if invalid_json:
+                raise ProviderPreflightError(
+                    "invalid_model_discovery_response",
+                    "Model discovery returned a non-JSON response.",
+                )
+            if not isinstance(body, Mapping) or not isinstance(body.get("data"), list):
+                raise ProviderPreflightError(
+                    "invalid_model_discovery_response",
+                    "Model discovery response must contain a data array.",
+                )
+            if request_id is None:
+                request_id = _safe_request_id(response, api_key)
+            raw_models = body["data"]
+            total_entries += len(raw_models)
+            if total_entries > MAX_DISCOVERED_MODELS:
+                raise ProviderPreflightError(
+                    "too_many_discovered_models",
+                    f"Model discovery returned more than {MAX_DISCOVERED_MODELS} entries.",
+                )
+            for item in raw_models:
+                if not isinstance(item, Mapping):
+                    continue
+                model_id = item.get("id")
+                if not isinstance(model_id, str) or not _MODEL_ID_RE.fullmatch(model_id):
+                    continue
                 if api_key in model_id:
                     raise ProviderPreflightError(
                         "model_discovery_secret_reflection",
                         "Model discovery returned an unsafe model ID.",
                     )
                 model_ids.add(model_id)
+
+            has_more = body.get("has_more", False)
+            if not isinstance(has_more, bool):
+                raise ProviderPreflightError(
+                    "invalid_model_discovery_response",
+                    "Model discovery has_more must be a boolean.",
+                )
+            if normalized_provider != ProviderType.ANTHROPIC_MESSAGES or not has_more:
+                break
+            last_id = body.get("last_id")
+            if (
+                not isinstance(last_id, str)
+                or not _MODEL_ID_RE.fullmatch(last_id)
+                or last_id in seen_cursors
+                or api_key in last_id
+            ):
+                raise ProviderPreflightError(
+                    "invalid_model_discovery_response",
+                    "Paginated model discovery returned an unsafe or repeated cursor.",
+                )
+            seen_cursors.add(last_id)
+            after_id = last_id
+
         if not model_ids:
             raise ProviderPreflightError(
                 "no_models_discovered", "Model discovery returned no usable model IDs."
             )
-        return ModelDiscoveryResult(
-            models=tuple(sorted(model_ids)), request_id=_safe_request_id(response, api_key)
-        )
+        return ModelDiscoveryResult(models=tuple(sorted(model_ids)), request_id=request_id)
     finally:
         if owns_client:
             await active_client.aclose()
@@ -293,7 +389,8 @@ def select_remote_model(
     )
 
 
-async def run_chat_canary(
+async def run_provider_canary(
+    provider_type: ProviderType | str,
     base_url: str,
     remote_model_name: str,
     api_key_env: str,
@@ -301,13 +398,17 @@ async def run_chat_canary(
     *,
     client: httpx.AsyncClient | None = None,
 ) -> CanaryResult:
-    """Make one minimal billed request using the same request fields as a Run."""
+    """Make one minimal billed request with the Run's explicit Adapter type."""
 
     _validated_base_url(base_url)
-    adapter = OpenAICompatibleAdapter(
-        base_url,
-        remote_model_name,
-        api_key_env,
+    normalized_provider = (
+        provider_type.value if isinstance(provider_type, ProviderType) else str(provider_type)
+    )
+    adapter = build_adapter(
+        normalized_provider,
+        base_url=base_url,
+        remote_model_name=remote_model_name,
+        api_key_env=api_key_env,
         client=client,
     )
     config = {
@@ -315,20 +416,31 @@ async def run_chat_canary(
         for key in ("temperature", "top_p", "seed")
         if generation_config.get(key) is not None
     }
-    config["max_tokens"] = min(int(generation_config.get("max_tokens", 16)), 16)
+    configured_max_tokens = generation_config.get("max_tokens")
+    config["max_tokens"] = (
+        16 if configured_max_tokens is None else min(int(configured_max_tokens), 16)
+    )
+    canary_error: ProviderPreflightError | None = None
     try:
         result = await adapter.generate(
             [{"role": "user", "content": "Compatibility check: reply with exactly A."}],
             config,
         )
     except AdapterError as exc:
-        raise ProviderPreflightError(
+        canary_label = {
+            ProviderType.OPENAI_COMPATIBLE.value: "Chat Completions",
+            ProviderType.OPENAI_RESPONSES.value: "OpenAI Responses",
+            ProviderType.ANTHROPIC_MESSAGES.value: "Anthropic Messages",
+        }.get(normalized_provider, "Provider")
+        canary_error = ProviderPreflightError(
             f"canary_{exc.error_type}",
-            f"Chat Completions canary failed: {exc.error_message}",
+            f"{canary_label} canary failed: {exc.error_message}",
             status_code=exc.status_code,
-        ) from exc
+        )
     finally:
         await adapter.aclose()
+    if canary_error is not None:
+        raise canary_error
 
     returned_model = (
         str(result.metadata["returned_model"])
@@ -370,4 +482,24 @@ async def run_chat_canary(
         output_tokens=result.output_tokens,
         latency_ms=float(result.latency_ms),
         attempts=int(attempts) if isinstance(attempts, int) else 1,
+    )
+
+
+async def run_chat_canary(
+    base_url: str,
+    remote_model_name: str,
+    api_key_env: str,
+    generation_config: Mapping[str, Any],
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> CanaryResult:
+    """Backward-compatible Chat Completions canary entry point."""
+
+    return await run_provider_canary(
+        ProviderType.OPENAI_COMPATIBLE,
+        base_url,
+        remote_model_name,
+        api_key_env,
+        generation_config,
+        client=client,
     )

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,8 +31,20 @@ from app.models import (
 )
 from app.runners.run_leases import CancelDisposition, RunLeaseRepository
 from app.schemas.audit import AuditEventList
+from app.schemas.evaluation_progress import (
+    PROGRESS_BLOCK_SIZE,
+    EvaluationProgressBlock,
+    EvaluationProgressBlockSummary,
+    EvaluationProgressIndex,
+)
 from app.schemas.evaluation_response import EvaluationResponseList
 from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, EvaluationRunRead
+from app.services.run_progress import (
+    RunProgressIntegrityError,
+    load_progress_block,
+    load_progress_index,
+    progress_block_count,
+)
 from app.services.run_service import build_evaluation_run
 from app.task_queue import QueueUnavailable
 
@@ -193,7 +206,17 @@ async def create_run(
             detail={"code": "benchmark_not_found", "message": "Benchmark was not found"},
         )
 
-    run = build_evaluation_run(model, benchmark, payload, settings)
+    try:
+        run = build_evaluation_run(model, benchmark, payload, settings)
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "invalid_provider_generation_parameters",
+                "message": str(exc),
+            },
+        ) from None
     try:
         repository.admit_run(
             session,
@@ -368,6 +391,83 @@ def cancel_run(run_id: str, session: SessionDep, settings: SettingsDep) -> Evalu
     return run
 
 
+def _raise_progress_integrity_error() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": "run_progress_integrity_error",
+            "message": "Persisted Run progress does not match its frozen question plan",
+        },
+    )
+
+
+@router.get(
+    "/{run_id}/progress",
+    response_model=EvaluationProgressIndex,
+    summary="查看 Run 实时进度索引",
+)
+def get_run_progress(
+    run_id: str,
+    response: Response,
+    session: SessionDep,
+) -> EvaluationProgressIndex:
+    response.headers["Cache-Control"] = "no-store"
+    run = _get_run_or_404(session, run_id)
+    try:
+        projection = load_progress_index(session, run)
+    except RunProgressIntegrityError:
+        _raise_progress_integrity_error()
+    metrics = projection.metrics
+    return EvaluationProgressIndex(
+        block_size=PROGRESS_BLOCK_SIZE,
+        total_questions=run.total_questions,
+        completed_questions=metrics.completed_questions,
+        correct_questions=metrics.correct_questions,
+        error_questions=metrics.error_questions,
+        score=metrics.score,
+        completion_rate=metrics.completion_rate,
+        answered_accuracy=metrics.answered_accuracy,
+        average_latency_ms=metrics.average_latency_ms,
+        known_input_tokens=projection.known_input_tokens,
+        known_output_tokens=projection.known_output_tokens,
+        input_token_reported_responses=projection.input_token_reported_responses,
+        output_token_reported_responses=projection.output_token_reported_responses,
+        known_estimated_cost=float(projection.known_estimated_cost),
+        estimated_cost_reported_responses=projection.estimated_cost_reported_responses,
+        blocks=[
+            EvaluationProgressBlockSummary(block_index=index, response_count=count)
+            for index, count in enumerate(projection.block_response_counts)
+        ],
+    )
+
+
+@router.get(
+    "/{run_id}/progress/blocks/{block_index}",
+    response_model=EvaluationProgressBlock,
+    summary="查看 Run 单个进度区块",
+)
+def get_run_progress_block(
+    run_id: str,
+    block_index: Annotated[int, Path(ge=0)],
+    response: Response,
+    session: SessionDep,
+) -> EvaluationProgressBlock:
+    response.headers["Cache-Control"] = "no-store"
+    run = _get_run_or_404(session, run_id)
+    if block_index >= progress_block_count(run.total_questions):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "progress_block_out_of_range",
+                "message": "Run progress block is outside the frozen question plan",
+            },
+        )
+    return EvaluationProgressBlock(
+        block_index=block_index,
+        items=load_progress_block(session, run, block_index),
+    )
+
+
 @router.get("/{run_id}/responses", response_model=EvaluationResponseList, summary="查看逐题结果")
 def list_responses(
     run_id: str,
@@ -375,14 +475,20 @@ def list_responses(
     pagination: PaginationDep,
 ) -> EvaluationResponseList:
     _get_run_or_404(session, run_id)
-    total = (
-        session.scalar(
-            select(func.count())
-            .select_from(EvaluationResponse)
-            .where(EvaluationResponse.run_id == run_id)
-        )
-        or 0
-    )
+    usage_summary = session.execute(
+        select(
+            func.count(EvaluationResponse.id),
+            func.coalesce(func.sum(EvaluationResponse.input_tokens), 0),
+            func.count(EvaluationResponse.input_tokens),
+            func.coalesce(func.sum(EvaluationResponse.output_tokens), 0),
+            func.count(EvaluationResponse.output_tokens),
+        ).where(EvaluationResponse.run_id == run_id)
+    ).one()
+    total = int(usage_summary[0] or 0)
+    known_input_tokens = int(usage_summary[1] or 0)
+    input_token_reported_responses = int(usage_summary[2] or 0)
+    known_output_tokens = int(usage_summary[3] or 0)
+    output_token_reported_responses = int(usage_summary[4] or 0)
     rows = session.execute(
         select(EvaluationResponse, Question)
         .join(Question, Question.id == EvaluationResponse.question_id)
@@ -423,5 +529,12 @@ def list_responses(
         for response, question in rows
     ]
     return EvaluationResponseList(
-        items=items, total=total, offset=pagination.offset, limit=pagination.limit
+        items=items,
+        total=total,
+        offset=pagination.offset,
+        limit=pagination.limit,
+        known_input_tokens=known_input_tokens,
+        known_output_tokens=known_output_tokens,
+        input_token_reported_responses=input_token_reported_responses,
+        output_token_reported_responses=output_token_reported_responses,
     )

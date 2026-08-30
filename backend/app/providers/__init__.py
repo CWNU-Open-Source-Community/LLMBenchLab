@@ -7,6 +7,7 @@ from .preflight import (
     discover_models,
     models_url,
     run_chat_canary,
+    run_provider_canary,
     select_remote_model,
 )
 
@@ -17,5 +18,6 @@ __all__ = [
     "discover_models",
     "models_url",
     "run_chat_canary",
+    "run_provider_canary",
     "select_remote_model",
 ]

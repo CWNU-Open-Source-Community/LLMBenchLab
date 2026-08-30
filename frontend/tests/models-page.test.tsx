@@ -54,6 +54,215 @@ describe("ModelsPage API Key input", () => {
     vi.restoreAllMocks();
   });
 
+  it("creates Responses and Anthropic Messages models with explicit adapter types", async () => {
+    const user = userEvent.setup();
+    const requests: Array<Record<string, unknown>> = [];
+    let items: ModelConfig[] = [];
+    vi.mocked(fetch).mockImplementation(async (_request, init) => {
+      const method = init?.method || "GET";
+      if (method === "POST") {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        requests.push(body);
+        const created: ModelConfig = {
+          ...existingModel,
+          id: `model-${requests.length}`,
+          name: String(body.name),
+          provider_type: body.provider_type as ModelConfig["provider_type"],
+          base_url: String(body.base_url),
+          remote_model_name: String(body.remote_model_name),
+        };
+        items = [...items, created];
+        return jsonResponse(created, 201);
+      }
+      return jsonResponse(modelsResponse(items));
+    });
+
+    render(<ModelsPage />);
+    await screen.findByText("还没有模型");
+
+    await user.click(screen.getByRole("button", { name: "添加模型" }));
+    let dialog = screen.getByRole("dialog");
+    const mockButton = within(dialog).getByRole("button", { name: "Mock" });
+    const chatButton = within(dialog).getByRole("button", { name: "Chat Completions" });
+    const responsesButton = within(dialog).getByRole("button", { name: "OpenAI Responses" });
+    const messagesButton = within(dialog).getByRole("button", { name: "Anthropic Messages" });
+    expect(mockButton).toHaveAttribute("aria-pressed", "true");
+    expect(chatButton).toHaveAttribute("aria-pressed", "false");
+    expect(responsesButton).toHaveAttribute("aria-pressed", "false");
+    expect(messagesButton).toHaveAttribute("aria-pressed", "false");
+
+    await user.click(responsesButton);
+    expect(mockButton).toHaveAttribute("aria-pressed", "false");
+    expect(responsesButton).toHaveAttribute("aria-pressed", "true");
+    expect(within(dialog).getByText(/\/responses/)).toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText(/显示名称/), "Go Responses");
+    await user.type(within(dialog).getByLabelText(/Base URL/), "https://opencode.ai/zen/go/v1");
+    await user.type(within(dialog).getByLabelText(/远端模型名/), "gpt-5.6-luna");
+    await user.type(within(dialog).getByLabelText(/API Key/), "test-responses-key");
+    await user.click(within(dialog).getByRole("button", { name: "添加模型" }));
+
+    await waitFor(() => expect(requests).toHaveLength(1));
+    expect(requests[0]).toEqual(
+      expect.objectContaining({ provider_type: "openai_responses", base_url: "https://opencode.ai/zen/go/v1" }),
+    );
+    expect(await screen.findByText(/OpenAI Responses · gpt-5.6-luna/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "添加模型" }));
+    dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Anthropic Messages" }));
+    expect(within(dialog).getByText(/\/messages/)).toBeInTheDocument();
+    await user.type(within(dialog).getByLabelText(/显示名称/), "Go Messages");
+    await user.type(within(dialog).getByLabelText(/Base URL/), "https://opencode.ai/zen/go/v1");
+    await user.type(within(dialog).getByLabelText(/远端模型名/), "qwen3.8-flash");
+    await user.type(within(dialog).getByLabelText(/API Key/), "test-messages-key");
+    await user.click(within(dialog).getByRole("button", { name: "添加模型" }));
+
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1]).toEqual(expect.objectContaining({ provider_type: "anthropic_messages" }));
+    expect(await screen.findByText(/Anthropic Messages · qwen3.8-flash/)).toBeInTheDocument();
+  });
+
+  it("converts known full endpoints and preserves remote pricing and credentials across protocol switches", async () => {
+    const user = userEvent.setup();
+    const endpointModel: ModelConfig = {
+      ...existingModel,
+      base_url: "https://provider.example/v1/chat/completions",
+      input_price_per_million: 1.25,
+      output_price_per_million: 3.5,
+    };
+    let patchBody: Record<string, unknown> | null = null;
+    vi.mocked(fetch).mockImplementation(async (_request, init) => {
+      const method = init?.method || "GET";
+      if (method === "PATCH") {
+        patchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse({
+          ...endpointModel,
+          provider_type: patchBody.provider_type,
+          base_url: patchBody.base_url,
+        });
+      }
+      return jsonResponse(modelsResponse([endpointModel]));
+    });
+
+    render(<ModelsPage />);
+    await screen.findByText("Existing Compatible Model");
+    await user.click(screen.getByRole("button", { name: "编辑 Existing Compatible Model" }));
+
+    const dialog = screen.getByRole("dialog");
+    const responsesButton = within(dialog).getByRole("button", { name: "OpenAI Responses" });
+    const baseUrlInput = within(dialog).getByLabelText(/Base URL/);
+    const inputPrice = within(dialog).getByLabelText(/输入价格/);
+    const outputPrice = within(dialog).getByLabelText(/输出价格/);
+    const apiKeyInput = within(dialog).getByLabelText(/API Key/);
+
+    await user.click(responsesButton);
+    expect(baseUrlInput).toHaveValue("https://provider.example/v1/responses");
+    expect(inputPrice).toHaveValue(1.25);
+    expect(outputPrice).toHaveValue(3.5);
+    expect(apiKeyInput).not.toBeRequired();
+
+    await user.click(responsesButton);
+    expect(inputPrice).toHaveValue(1.25);
+    expect(outputPrice).toHaveValue(3.5);
+
+    await user.click(within(dialog).getByRole("button", { name: "Anthropic Messages" }));
+    expect(baseUrlInput).toHaveValue("https://provider.example/v1/messages");
+    expect(inputPrice).toHaveValue(1.25);
+    expect(outputPrice).toHaveValue(3.5);
+
+    await user.click(within(dialog).getByRole("button", { name: "保存修改" }));
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchBody).toEqual(
+      expect.objectContaining({
+        provider_type: "anthropic_messages",
+        base_url: "https://provider.example/v1/messages",
+        input_price_per_million: 1.25,
+        output_price_per_million: 3.5,
+      }),
+    );
+    expect(patchBody).not.toHaveProperty("api_key");
+  });
+
+  it.each([
+    {
+      buttonName: "OpenAI Responses",
+      providerType: "openai_responses",
+      expectedDefaults: { temperature: 0.25, max_tokens: null, seed: null },
+    },
+    {
+      buttonName: "Anthropic Messages",
+      providerType: "anthropic_messages",
+      expectedDefaults: { temperature: 0.25, seed: null },
+    },
+  ])(
+    "normalizes hidden generation defaults when switching to $buttonName",
+    async ({ buttonName, providerType, expectedDefaults }) => {
+      const user = userEvent.setup();
+      const modelWithChatDefaults: ModelConfig = {
+        ...existingModel,
+        default_parameters: { temperature: 0.25, max_tokens: null, seed: 1234 },
+      };
+      let patchBody: Record<string, unknown> | null = null;
+      vi.mocked(fetch).mockImplementation(async (_request, init) => {
+        const method = init?.method || "GET";
+        if (method === "PATCH") {
+          patchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return jsonResponse(modelWithChatDefaults);
+        }
+        return jsonResponse(modelsResponse([modelWithChatDefaults]));
+      });
+
+      render(<ModelsPage />);
+      await screen.findByText("Existing Compatible Model");
+      await user.click(screen.getByRole("button", { name: "编辑 Existing Compatible Model" }));
+
+      const dialog = screen.getByRole("dialog");
+      await user.click(within(dialog).getByRole("button", { name: buttonName }));
+      await user.click(within(dialog).getByRole("button", { name: "保存修改" }));
+
+      await waitFor(() => expect(patchBody).not.toBeNull());
+      expect(patchBody).toEqual(
+        expect.objectContaining({
+          provider_type: providerType,
+          default_parameters: expectedDefaults,
+        }),
+      );
+    },
+  );
+
+  it("clears an incompatible Chat temperature default when switching to Anthropic Messages", async () => {
+    const user = userEvent.setup();
+    const modelWithChatTemperature: ModelConfig = {
+      ...existingModel,
+      default_parameters: { temperature: 1.5, max_tokens: 512, seed: 1234 },
+    };
+    let patchBody: Record<string, unknown> | null = null;
+    vi.mocked(fetch).mockImplementation(async (_request, init) => {
+      const method = init?.method || "GET";
+      if (method === "PATCH") {
+        patchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return jsonResponse(modelWithChatTemperature);
+      }
+      return jsonResponse(modelsResponse([modelWithChatTemperature]));
+    });
+
+    render(<ModelsPage />);
+    await screen.findByText("Existing Compatible Model");
+    await user.click(screen.getByRole("button", { name: "编辑 Existing Compatible Model" }));
+
+    const dialog = screen.getByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Anthropic Messages" }));
+    await user.click(within(dialog).getByRole("button", { name: "保存修改" }));
+
+    await waitFor(() => expect(patchBody).not.toBeNull());
+    expect(patchBody).toEqual(
+      expect.objectContaining({
+        provider_type: "anthropic_messages",
+        default_parameters: { max_tokens: 512, seed: null },
+      }),
+    );
+  });
+
   it("requires a masked API Key when creating an OpenAI-compatible model", async () => {
     const user = userEvent.setup();
     const requests: Array<{ method: string; body: Record<string, unknown> }> = [];
@@ -83,7 +292,7 @@ describe("ModelsPage API Key input", () => {
     await screen.findByText("还没有模型");
     await user.click(screen.getByRole("button", { name: "添加模型" }));
     const dialog = screen.getByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "OpenAI-compatible" }));
+    await user.click(within(dialog).getByRole("button", { name: "Chat Completions" }));
 
     const apiKeyInput = within(dialog).getByLabelText(/API Key/) as HTMLInputElement;
     expect(apiKeyInput).toHaveAttribute("type", "password");
@@ -133,7 +342,7 @@ describe("ModelsPage API Key input", () => {
     await screen.findByText("还没有模型");
     await user.click(screen.getByRole("button", { name: "添加模型" }));
     const dialog = screen.getByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "OpenAI-compatible" }));
+    await user.click(within(dialog).getByRole("button", { name: "Chat Completions" }));
     await user.type(within(dialog).getByLabelText(/显示名称/), "Pending Provider");
     await user.type(within(dialog).getByLabelText(/Base URL/), "https://provider.example/v1");
     await user.type(within(dialog).getByLabelText(/远端模型名/), "provider-model");
@@ -313,13 +522,13 @@ describe("ModelsPage API Key input", () => {
     await screen.findByText("还没有模型");
     await user.click(screen.getByRole("button", { name: "添加模型" }));
     let dialog = screen.getByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "OpenAI-compatible" }));
+    await user.click(within(dialog).getByRole("button", { name: "Chat Completions" }));
     let apiKeyInput = within(dialog).getByLabelText(/API Key/);
     await user.type(apiKeyInput, "test-switch-key-567");
     await user.click(within(dialog).getByRole("button", { name: "Mock" }));
     expect(within(dialog).queryByLabelText(/API Key/)).not.toBeInTheDocument();
 
-    await user.click(within(dialog).getByRole("button", { name: "OpenAI-compatible" }));
+    await user.click(within(dialog).getByRole("button", { name: "Chat Completions" }));
     apiKeyInput = within(dialog).getByLabelText(/API Key/);
     expect(apiKeyInput).toHaveValue("");
     await user.type(apiKeyInput, "test-close-key-678");
@@ -328,7 +537,7 @@ describe("ModelsPage API Key input", () => {
 
     await user.click(screen.getByRole("button", { name: "添加模型" }));
     dialog = screen.getByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "OpenAI-compatible" }));
+    await user.click(within(dialog).getByRole("button", { name: "Chat Completions" }));
     expect(within(dialog).getByLabelText(/API Key/)).toHaveValue("");
     expect(storageSet).not.toHaveBeenCalled();
     expect(consoleDebug).not.toHaveBeenCalled();
@@ -362,7 +571,7 @@ describe("ModelsPage API Key input", () => {
     await screen.findByText("还没有模型");
     await user.click(screen.getByRole("button", { name: "添加模型" }));
     const dialog = screen.getByRole("dialog");
-    await user.click(within(dialog).getByRole("button", { name: "OpenAI-compatible" }));
+    await user.click(within(dialog).getByRole("button", { name: "Chat Completions" }));
     await user.type(within(dialog).getByLabelText(/显示名称/), "Unmount Provider");
     await user.type(within(dialog).getByLabelText(/Base URL/), "https://provider.example/v1");
     await user.type(within(dialog).getByLabelText(/远端模型名/), "provider-model");

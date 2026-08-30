@@ -38,6 +38,73 @@ function apiKeyLabel(model: ModelConfig): string {
   return "未配置";
 }
 
+function providerLabel(providerType: ProviderType): string {
+  switch (providerType) {
+    case "mock":
+      return "Mock";
+    case "openai_compatible":
+      return "Chat Completions";
+    case "openai_responses":
+      return "OpenAI Responses";
+    case "anthropic_messages":
+      return "Anthropic Messages";
+  }
+}
+
+const providerEndpointSuffixes = {
+  openai_compatible: "/chat/completions",
+  openai_responses: "/responses",
+  anthropic_messages: "/messages",
+} satisfies Record<Exclude<ProviderType, "mock">, string>;
+
+function endpointSuffix(providerType: ProviderType): string | null {
+  return providerType === "mock" ? null : providerEndpointSuffixes[providerType];
+}
+
+function replaceKnownEndpointSuffix(
+  baseUrl: string | null,
+  providerType: ProviderType,
+): string | null {
+  if (!baseUrl || providerType === "mock") return baseUrl;
+  try {
+    const url = new URL(baseUrl);
+    const normalizedPath = url.pathname.replace(/\/+$/, "");
+    const currentSuffix = Object.values(providerEndpointSuffixes).find((suffix) =>
+      normalizedPath.endsWith(suffix),
+    );
+    if (!currentSuffix) return baseUrl;
+    url.pathname = `${normalizedPath.slice(0, -currentSuffix.length)}${providerEndpointSuffixes[providerType]}`;
+    return url.toString();
+  } catch {
+    return baseUrl;
+  }
+}
+
+function normalizeDefaultParametersForProvider(
+  defaultParameters: Record<string, unknown>,
+  providerType: ProviderType,
+): Record<string, unknown> {
+  if (providerType !== "openai_responses" && providerType !== "anthropic_messages") {
+    return defaultParameters;
+  }
+  const normalized = { ...defaultParameters };
+  if (normalized.seed !== null && normalized.seed !== undefined) {
+    normalized.seed = null;
+  }
+  if (providerType === "anthropic_messages") {
+    if (
+      typeof normalized.temperature === "number" &&
+      normalized.temperature > 1
+    ) {
+      delete normalized.temperature;
+    }
+    if (normalized.max_tokens === null) {
+      delete normalized.max_tokens;
+    }
+  }
+  return normalized;
+}
+
 function providerOrigin(baseUrl: string | null): string | null {
   if (!baseUrl) return null;
   try {
@@ -117,28 +184,42 @@ export function ModelsPage() {
 
   const setProvider = (provider_type: ProviderType) => {
     if (provider_type === "mock") setApiKey("");
-    setPayload((current) => ({
-      ...current,
-      provider_type,
-      ...(provider_type === "mock"
-        ? {
-            base_url: null,
-            remote_model_name: null,
-            input_price_per_million: 0,
-            output_price_per_million: 0,
-          }
-        : { input_price_per_million: null, output_price_per_million: null }),
-    }));
+    setPayload((current) => {
+      if (current.provider_type === provider_type) return current;
+      if (provider_type === "mock") {
+        return {
+          ...current,
+          provider_type,
+          base_url: null,
+          remote_model_name: null,
+          input_price_per_million: 0,
+          output_price_per_million: 0,
+        };
+      }
+      return {
+        ...current,
+        provider_type,
+        base_url: replaceKnownEndpointSuffix(current.base_url, provider_type),
+        default_parameters: normalizeDefaultParametersForProvider(
+          current.default_parameters,
+          provider_type,
+        ),
+        ...(current.provider_type === "mock"
+          ? { input_price_per_million: null, output_price_per_million: null }
+          : {}),
+      };
+    });
   };
 
-  const isCompatible = payload.provider_type === "openai_compatible";
+  const isRemote = payload.provider_type !== "mock";
   const hasExistingCredential =
     editing?.credential_source === "environment" ||
     (editing?.credential_source === "stored" && editing.has_api_key);
   const originalProviderOrigin = providerOrigin(editing?.base_url ?? null);
   const currentProviderOrigin = providerOrigin(payload.base_url);
   const canReuseExistingCredential =
-    editing?.provider_type === "openai_compatible" &&
+    editing?.provider_type !== "mock" &&
+    isRemote &&
     hasExistingCredential &&
     originalProviderOrigin !== null &&
     originalProviderOrigin === currentProviderOrigin;
@@ -146,7 +227,7 @@ export function ModelsPage() {
   const canSave = useMemo(
     () =>
       Boolean(payload.name.trim()) &&
-      (!isCompatible ||
+      (!isRemote ||
         (Boolean(payload.base_url) &&
           Boolean(payload.remote_model_name) &&
           (canReuseExistingCredential || hasSubmittedApiKey))),
@@ -154,7 +235,7 @@ export function ModelsPage() {
       payload.name,
       payload.base_url,
       payload.remote_model_name,
-      isCompatible,
+      isRemote,
       canReuseExistingCredential,
       hasSubmittedApiKey,
     ],
@@ -172,7 +253,7 @@ export function ModelsPage() {
     requestControllerRef.current = requestController;
     try {
       const submittedPayload: ModelPayload =
-        isCompatible && apiKeyForRequest.trim()
+        isRemote && apiKeyForRequest.trim()
           ? { ...payload, api_key: apiKeyForRequest }
           : payload;
       if (editing) {
@@ -256,7 +337,7 @@ export function ModelsPage() {
               <p>
                 {model.provider_type === "mock"
                   ? "Mock · 完全离线"
-                  : `OpenAI-compatible · ${model.remote_model_name}`}
+                  : `${providerLabel(model.provider_type)} · ${model.remote_model_name}`}
               </p>
               <dl>
                 <div>
@@ -321,26 +402,48 @@ export function ModelsPage() {
                 />
               </label>
               <fieldset>
-                <legend>Provider 类型</legend>
+                <legend>Provider 类型与 API 协议</legend>
                 <div className="segmented">
                   <button
                     type="button"
-                    className={!isCompatible ? "selected" : ""}
+                    aria-pressed={!isRemote}
+                    className={!isRemote ? "selected" : ""}
                     onClick={() => setProvider("mock")}
                   >
                     Mock
                   </button>
                   <button
                     type="button"
-                    className={isCompatible ? "selected" : ""}
+                    aria-pressed={payload.provider_type === "openai_compatible"}
+                    className={payload.provider_type === "openai_compatible" ? "selected" : ""}
                     onClick={() => setProvider("openai_compatible")}
                   >
-                    OpenAI-compatible
+                    Chat Completions
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={payload.provider_type === "openai_responses"}
+                    className={payload.provider_type === "openai_responses" ? "selected" : ""}
+                    onClick={() => setProvider("openai_responses")}
+                  >
+                    OpenAI Responses
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={payload.provider_type === "anthropic_messages"}
+                    className={payload.provider_type === "anthropic_messages" ? "selected" : ""}
+                    onClick={() => setProvider("anthropic_messages")}
+                  >
+                    Anthropic Messages
                   </button>
                 </div>
               </fieldset>
-              {isCompatible && (
+              {isRemote && (
                 <div className="form-grid">
+                  <p className="span-2">
+                    填写 API 根地址或匹配的完整 endpoint；当前协议使用{" "}
+                    <code>{endpointSuffix(payload.provider_type)}</code> 端点。
+                  </p>
                   <label className="span-2">
                     Base URL
                     <input
@@ -387,7 +490,7 @@ export function ModelsPage() {
                           ? "当前使用环境变量兼容配置；留空即保留，输入新值则改为安全保存。"
                           : hasExistingCredential && originalProviderOrigin !== currentProviderOrigin
                           ? "Base URL 已更改；为防止旧密钥被发送到新服务，必须重新输入 API Key。"
-                          : "创建 OpenAI-compatible 模型时必须输入至少 8 个可见 ASCII 字符；保存后不会再次显示原文。"}
+                          : "创建远程模型时必须输入至少 8 个可见 ASCII 字符；保存后不会再次显示原文。"}
                     </small>
                   </label>
                   <label>

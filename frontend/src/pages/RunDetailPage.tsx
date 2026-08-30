@@ -1,15 +1,98 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, Ban, CheckCircle2, ChevronDown, Clock3, Copy, Cpu, Hash } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 
 import { api, ApiError } from "../api/client";
-import type { EvaluationResponse, EvaluationRun, GovernanceRunStatus } from "../api/types";
+import type { EvaluationResponse, EvaluationResponseList, EvaluationRun, GovernanceRunStatus } from "../api/types";
 import { EmptyState, ErrorState, LoadingState } from "../components/AsyncState";
 import { PageHeader } from "../components/PageHeader";
+import { RunProgressHeatmap } from "../components/RunProgressHeatmap";
 import { StatusBadge } from "../components/StatusBadge";
+import { useRunProgress } from "../hooks/useRunProgress";
 import { displayAnswer, formatCost, formatLatency, formatPercent, formatTokens, formatTokenTotal, formatUtc8, shortHash } from "../lib/format";
 
 const RESPONSE_PAGE_SIZE = 100;
+
+type ResponseUsageSummary = Pick<
+  EvaluationResponseList,
+  | "total"
+  | "known_input_tokens"
+  | "known_output_tokens"
+  | "input_token_reported_responses"
+  | "output_token_reported_responses"
+>;
+
+function tokenMetric(
+  run: EvaluationRun,
+  usage: ResponseUsageSummary | null,
+  exactEligible: boolean,
+) {
+  const exactSnapshot = exactEligible
+    && usage != null
+    && usage.total > 0
+    && run.input_tokens != null
+    && run.output_tokens != null
+    && run.completed_questions === usage.total
+    && usage.input_token_reported_responses === usage.total
+    && usage.output_token_reported_responses === usage.total
+    && run.input_tokens === usage.known_input_tokens
+    && run.output_tokens === usage.known_output_tokens;
+  if (exactSnapshot) {
+    return {
+      value: formatTokenTotal(run.input_tokens, run.output_tokens),
+      detail: `输入 ${formatTokens(run.input_tokens)} / 输出 ${formatTokens(run.output_tokens)}`,
+    };
+  }
+  if (!usage || usage.total === 0) {
+    return { value: "—", detail: "暂无逐题 usage" };
+  }
+  const inputReported = usage.input_token_reported_responses;
+  const outputReported = usage.output_token_reported_responses;
+  if (inputReported === 0 && outputReported === 0) {
+    return { value: "—", detail: `输入/输出覆盖均为 0/${usage.total} 题，完整总量未知` };
+  }
+  const coverage = inputReported === outputReported
+    ? `输入/输出覆盖各 ${inputReported}/${usage.total} 题`
+    : `输入覆盖 ${inputReported}/${usage.total} 题 · 输出覆盖 ${outputReported}/${usage.total} 题`;
+  return {
+    value: `已知小计 ${formatTokens(usage.known_input_tokens + usage.known_output_tokens)}`,
+    detail: `输入 ${inputReported ? formatTokens(usage.known_input_tokens) : "—"} / 输出 ${outputReported ? formatTokens(usage.known_output_tokens) : "—"} · ${coverage}，完整总量未知`,
+  };
+}
+
+function costMetric(
+  run: EvaluationRun,
+  progress: ReturnType<typeof useRunProgress>["index"],
+  exactEligible: boolean,
+) {
+  if (!progress) {
+    return {
+      value: formatCost(run.estimated_cost),
+      detail: "按快照价格；缺失 usage 时未知",
+    };
+  }
+  const exactSnapshot = exactEligible
+    && progress.completed_questions > 0
+    && run.estimated_cost != null
+    && progress.estimated_cost_reported_responses === progress.completed_questions
+    && Math.abs(run.estimated_cost - progress.known_estimated_cost) < 1e-9;
+  if (exactSnapshot) {
+    return { value: formatCost(run.estimated_cost), detail: "终态精确总量；按冻结价格快照估算" };
+  }
+  if (progress.completed_questions === 0) {
+    return { value: "—", detail: "暂无逐题 usage" };
+  }
+  if (progress.estimated_cost_reported_responses === 0) {
+    return {
+      value: "—",
+      detail: `费用覆盖 0/${progress.completed_questions} 题，完整总量未知`,
+    };
+  }
+  return {
+    value: `已知小计 ${formatCost(progress.known_estimated_cost)}`,
+    detail: `费用覆盖 ${progress.estimated_cost_reported_responses}/${progress.completed_questions} 题，完整总量未知`,
+  };
+}
 
 function snapshotLabel(run: EvaluationRun, group: "model" | "benchmark", key: string): string {
   const value = run.model_parameters_snapshot[group];
@@ -110,18 +193,26 @@ function runStatusHeading(run: EvaluationRun): string {
   return "运行已进入终态";
 }
 
-export function RunDetailPage() {
-  const { runId = "" } = useParams();
+function RunDetailPageContent({ runId }: { runId: string }) {
   const [run, setRun] = useState<EvaluationRun | null>(null);
   const [responses, setResponses] = useState<EvaluationResponse[]>([]);
   const [responseOffset, setResponseOffset] = useState(0);
   const [responseTotal, setResponseTotal] = useState(0);
+  const [responseUsage, setResponseUsage] = useState<ResponseUsageSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  const [loadIdleVersion, setLoadIdleVersion] = useState(0);
   const requestSequence = useRef(0);
   const requestsInFlight = useRef(0);
+  const finalRefreshDone = useRef(false);
+  const finalRefreshPending = useRef(false);
   const terminal = run ? ["completed", "failed", "cancelled"].includes(run.status) : false;
+  const runProgress = useRunProgress(
+    runId,
+    run?.status ?? null,
+    run?.completed_questions ?? null,
+  );
   const load = useCallback(async (quiet = false) => {
     // Do not let a timer tick supersede a slower page navigation request. A
     // user-triggered load may still supersede an older poll.
@@ -138,23 +229,49 @@ export function RunDetailPage() {
       setRun(current);
       setResponses(evidence.items);
       setResponseTotal(evidence.total);
+      setResponseUsage({
+        total: evidence.total,
+        known_input_tokens: evidence.known_input_tokens,
+        known_output_tokens: evidence.known_output_tokens,
+        input_token_reported_responses: evidence.input_token_reported_responses,
+        output_token_reported_responses: evidence.output_token_reported_responses,
+      });
     } catch (reason) {
       if (requestId === requestSequence.current) {
         setError(reason instanceof ApiError ? reason.message : "无法读取 Run。");
       }
     } finally {
       requestsInFlight.current -= 1;
+      if (requestsInFlight.current === 0 && finalRefreshPending.current) {
+        setLoadIdleVersion((current) => current + 1);
+      }
       if (!quiet && requestId === requestSequence.current) setLoading(false);
     }
   }, [responseOffset, runId]);
   useEffect(() => { void load(); }, [load]);
-  useEffect(() => () => { requestSequence.current += 1; }, []);
+  useEffect(() => () => {
+    requestSequence.current += 1;
+    finalRefreshPending.current = false;
+  }, []);
   useEffect(() => {
     if (!run || terminal) return;
     const timer = window.setInterval(() => void load(true), 1000);
     return () => window.clearInterval(timer);
   }, [load, run, terminal]);
-  const progress = run?.total_questions ? Math.min(100, run.completed_questions / run.total_questions * 100) : 0;
+  useEffect(() => {
+    if (!terminal || !runProgress.reconciled || finalRefreshDone.current) return;
+    if (requestsInFlight.current > 0) {
+      finalRefreshPending.current = true;
+      return;
+    }
+    finalRefreshPending.current = false;
+    finalRefreshDone.current = true;
+    void load(true);
+  }, [load, loadIdleVersion, runProgress.reconciled, terminal]);
+  const latestMetrics = runProgress.index ?? run;
+  const progress = latestMetrics?.total_questions
+    ? Math.min(100, latestMetrics.completed_questions / latestMetrics.total_questions * 100)
+    : 0;
   const copyId = () => void navigator.clipboard?.writeText(runId);
   const cancel = async () => {
     setCancelling(true);
@@ -162,7 +279,8 @@ export function RunDetailPage() {
     catch (reason) { setError(reason instanceof ApiError ? reason.message : "取消失败。"); }
     finally { setCancelling(false); }
   };
-  const errors = useMemo(() => responses.filter((item) => item.error_type), [responses]);
+  const pageUnscored = responses.filter((item) => item.score !== 1).length;
+  const pageExceptions = responses.filter((item) => item.error_type).length;
   const responseStart = responseTotal ? responseOffset + 1 : 0;
   const responseEnd = Math.min(responseOffset + responses.length, responseTotal);
   const governance = run ? governanceNotice(run) : null;
@@ -170,21 +288,42 @@ export function RunDetailPage() {
   if (loading) return <LoadingState label="正在读取运行证据" />;
   if (error && !run) return <ErrorState message={error} retry={() => void load()} />;
   if (!run) return <EmptyState title="Run 不存在" message="该运行可能已被移除，或链接不完整。" action={<Link className="secondary-button" to="/runs">返回评测记录</Link>} />;
+  const metricSnapshot = runProgress.index ?? run;
+  const liveUsage: ResponseUsageSummary | null = runProgress.index ? {
+    total: runProgress.index.completed_questions,
+    known_input_tokens: runProgress.index.known_input_tokens,
+    known_output_tokens: runProgress.index.known_output_tokens,
+    input_token_reported_responses: runProgress.index.input_token_reported_responses,
+    output_token_reported_responses: runProgress.index.output_token_reported_responses,
+  } : responseUsage;
+  const exactEligible = terminal && (!runProgress.index || runProgress.reconciled);
+  const unscored = Math.max(0, metricSnapshot.completed_questions - metricSnapshot.correct_questions);
+  const ordinaryWrong = Math.max(0, unscored - metricSnapshot.error_questions);
+  const tokens = tokenMetric(run, liveUsage, exactEligible);
+  const cost = costMetric(run, runProgress.index, exactEligible);
   return <>
     <PageHeader eyebrow="EVALUATION EVIDENCE" title={snapshotLabel(run, "model", "name")} description={`${snapshotLabel(run, "benchmark", "slug")} · ${run.protocol_version}`} actions={<><Link className="secondary-button" to="/runs"><ArrowLeft size={14} /> 评测记录</Link><button className="secondary-button" onClick={copyId}><Copy size={14} /> 复制 Run ID</button>{!terminal && <button className="danger-button" disabled={cancelling} onClick={() => void cancel()}><Ban size={14} /> {cancelling ? "取消中…" : "取消 Run"}</button>}</>} />
     {error && <ErrorState message={error} retry={() => void load()} />}
     <section className="run-status-panel panel">
-      <div className="run-status-head"><div><StatusBadge status={run.status} /><h2>{runStatusHeading(run)}</h2><p>创建于 {formatUtc8(run.created_at)}</p></div><div className="score-block"><span>严格总分</span><strong>{run.score == null ? "—" : run.score.toFixed(1)}</strong><small>/ 100</small></div></div>
-      <div className="progress-row"><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><span>{run.completed_questions} / {run.total_questions} 题 · {progress.toFixed(0)}%</span></div>
+      <div className="run-status-head"><div><StatusBadge status={run.status} /><h2>{runStatusHeading(run)}</h2><p>创建于 {formatUtc8(run.created_at)}</p></div><div className="score-block"><span>严格总分</span><strong>{metricSnapshot.score == null ? "—" : metricSnapshot.score.toFixed(1)}</strong><small>/ 100</small></div></div>
+      <div className="progress-row"><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><span>{metricSnapshot.completed_questions} / {metricSnapshot.total_questions} 题 · {progress.toFixed(0)}%</span></div>
       {governance && <div className={`governance-notice governance-${governance.tone}`} aria-live="polite">{governance.tone === "managed" ? <CheckCircle2 size={15} /> : <AlertTriangle size={15} />}<span><strong>{governance.title}</strong><small>{governance.detail}</small></span></div>}
       {run.error_message && <div className="run-error"><AlertTriangle size={15} />{run.error_message}</div>}
     </section>
-    <section className="run-metrics"><article><span><CheckCircle2 size={14} /> 回答准确率</span><strong>{formatPercent(run.answered_accuracy)}</strong><small>仅可评答案</small></article><article><span>完成率</span><strong>{formatPercent(run.completion_rate)}</strong><small>成功非空响应</small></article><article><span><Clock3 size={14} /> 平均延迟</span><strong>{formatLatency(run.average_latency_ms)}</strong><small>已报告题目</small></article><article><span><Cpu size={14} /> Token</span><strong>{formatTokenTotal(run.input_tokens, run.output_tokens)}</strong><small>输入 {formatTokens(run.input_tokens)} / 输出 {formatTokens(run.output_tokens)}</small></article><article><span>估算成本</span><strong>{formatCost(run.estimated_cost)}</strong><small>按快照价格；缺失 usage 时未知</small></article><article><span>错误题</span><strong>{run.error_questions}</strong><small>正确 {run.correct_questions}</small></article></section>
+    <section className="run-metrics"><article><span><CheckCircle2 size={14} /> 回答准确率</span><strong>{formatPercent(metricSnapshot.answered_accuracy)}</strong><small>仅可评答案</small></article><article><span>完成率</span><strong>{formatPercent(metricSnapshot.completion_rate)}</strong><small>成功非空响应</small></article><article><span><Clock3 size={14} /> 平均延迟</span><strong>{formatLatency(metricSnapshot.average_latency_ms)}</strong><small>已报告题目</small></article><article><span><Cpu size={14} /> Token</span><strong>{tokens.value}</strong><small>{tokens.detail}</small></article><article><span>估算成本</span><strong>{cost.value}</strong><small>{cost.detail}</small></article><article><span>未得分</span><strong>{unscored}</strong><small>普通答错 {ordinaryWrong} · 执行异常 {metricSnapshot.error_questions} · 正确 {metricSnapshot.correct_questions}</small></article></section>
+    {runProgress.index && runProgress.ready
+      ? <><RunProgressHeatmap index={runProgress.index} items={runProgress.cells} syncing={runProgress.syncing} />{runProgress.error && <section className="panel run-progress-local-state" role="status"><div><strong>热力图部分数据同步失败</strong><span>{runProgress.error}</span></div><button type="button" className="secondary-button" onClick={runProgress.refresh}>立即重试</button></section>}</>
+      : <section className="panel run-progress-local-state" aria-busy={runProgress.syncing}><div><strong>{runProgress.error ? "题目进度暂不可用" : "正在同步题目进度"}</strong><span>{runProgress.error ?? "正在读取轻量进度块，不会下载题目或回答正文。"}</span></div>{runProgress.error && <button type="button" className="secondary-button" onClick={runProgress.refresh}>立即重试</button>}</section>}
     <section className="panel evidence-panel">
-      <div className="panel-heading"><div><span className="section-index">EVIDENCE</span><h2>逐题结果</h2></div><span className="evidence-count">显示 {responseStart}–{responseEnd} / 共 {responseTotal} 条 · 本页 {errors.length} 条错误</span></div>
+      <div className="panel-heading"><div><span className="section-index">EVIDENCE</span><h2>逐题结果</h2></div><span className="evidence-count">显示 {responseStart}–{responseEnd} / 共 {responseTotal} 条 · 本页 {pageUnscored} 条未得分 · {pageExceptions} 条执行异常</span></div>
       {responses.length ? <div className="evidence-list">{responses.map((response, index) => <details key={response.id} className={response.error_type ? "response-item response-error" : "response-item"}><summary><span className="question-index">{String(responseOffset + index + 1).padStart(2, "0")}</span><span className="question-summary"><strong>{response.question_external_id}</strong><small>{response.question_type} · {response.evaluator_name}</small></span><span className={`point ${response.score === 1 ? "correct" : "wrong"}`}>{response.score === 1 ? "1 / 1" : "0 / 1"}</span><ChevronDown size={17} /></summary><div className="response-body"><div className="prompt-box"><span>题目</span><p>{response.prompt}</p>{response.choices && <ul>{Object.entries(response.choices).map(([key, value]) => <li key={key}><b>{key}</b>{value}</li>)}</ul>}</div><div className="answer-grid"><div><span>原始回答</span><pre>{response.raw_response || "—"}</pre></div><div><span>解析答案</span><strong>{displayAnswer(response.parsed_answer)}</strong></div><div><span>标准答案</span><strong>{displayAnswer(response.reference_answer_snapshot)}</strong></div></div>{response.error_type && <div className="response-error-message"><AlertTriangle size={15} /><span><strong>{response.error_type}</strong>{response.error_message}</span></div>}<footer><span>{formatLatency(response.latency_ms)}</span><span>{formatTokens(response.input_tokens)} in / {formatTokens(response.output_tokens)} out</span><span>{formatCost(response.estimated_cost)}</span></footer></div></details>)}</div> : <div className="inline-empty">{terminal ? "该 Run 没有逐题结果。" : "等待第一道题完成，页面会每秒自动更新。"}</div>}
       {responseTotal > RESPONSE_PAGE_SIZE && <nav className="evidence-pagination" aria-label="逐题结果分页"><button className="secondary-button" type="button" disabled={responseOffset === 0} onClick={() => setResponseOffset((current) => Math.max(0, current - RESPONSE_PAGE_SIZE))}>上一页</button><span>{responseStart}–{responseEnd} / {responseTotal}</span><button className="secondary-button" type="button" disabled={responseOffset + RESPONSE_PAGE_SIZE >= responseTotal} onClick={() => setResponseOffset((current) => current + RESPONSE_PAGE_SIZE)}>下一页</button></nav>}
     </section>
     <section className="snapshot-layout"><article className="panel"><div className="panel-heading"><div><span className="section-index">CONFIG</span><h2>评测配置快照</h2></div></div><pre className="json-view">{JSON.stringify(run.model_parameters_snapshot, null, 2)}</pre></article><article className="panel immutable-list"><div className="panel-heading"><div><span className="section-index">IDENTITY</span><h2>复现标识</h2></div></div><dl><div><dt><Hash size={14} /> Dataset SHA-256</dt><dd title={run.benchmark_hash_snapshot}>{shortHash(run.benchmark_hash_snapshot, 20)}</dd></div><div><dt>Git commit</dt><dd>{shortHash(run.code_commit_sha, 12)}</dd></div><div><dt>开始时间</dt><dd>{formatUtc8(run.started_at)}</dd></div><div><dt>结束时间</dt><dd>{formatUtc8(run.finished_at)}</dd></div></dl></article></section>
   </>;
+}
+
+export function RunDetailPage() {
+  const { runId = "" } = useParams();
+  return <RunDetailPageContent key={runId} runId={runId} />;
 }

@@ -189,6 +189,50 @@ def _response() -> EvaluationResponse:
     )
 
 
+def _add_second_due_run(postgres_store) -> None:
+    with postgres_store() as session, session.begin():
+        benchmark = Benchmark(
+            id="benchmark-pg-b",
+            slug="postgres-lease-fixture-b",
+            name="PostgreSQL lease fixture B",
+            version="1.0.0",
+            description="fixture",
+            dimension="general",
+            language="en",
+            license="MIT",
+            source="local",
+            evaluator_type="exact_match",
+            evaluator_config={},
+            prompt_template={},
+            dataset_hash="postgres-lease-hash-b",
+            question_count=1,
+        )
+        session.add_all(
+            [
+                benchmark,
+                Question(
+                    id="question-pg-b",
+                    benchmark_id=benchmark.id,
+                    external_id="q1",
+                    position=0,
+                    question_type="exact_match",
+                    prompt="Two?",
+                    reference_answer="two",
+                ),
+                EvaluationRun(
+                    id="run-pg-b",
+                    model_id="model-pg",
+                    benchmark_id=benchmark.id,
+                    status=RunStatus.PENDING,
+                    model_parameters_snapshot={},
+                    benchmark_hash_snapshot=benchmark.dataset_hash,
+                    prompt_template_snapshot={},
+                    total_questions=1,
+                ),
+            ]
+        )
+
+
 def _full_policy(**overrides: object) -> dict[str, object]:
     values: dict[str, object] = {
         "global_concurrency_limit": None,
@@ -403,6 +447,54 @@ def test_postgres_concurrent_claim_takeover_and_fencing(postgres_store) -> None:
         assert run.lease_token == 2
         assert run.attempt_count == 2
         assert run.completed_questions == response_count == 1
+
+
+def test_postgres_two_workers_claim_distinct_due_runs_across_benchmarks(
+    postgres_store,
+) -> None:
+    _add_second_due_run(postgres_store)
+    repository = RunLeaseRepository(postgres_store, lease_for=timedelta(seconds=30))
+    barrier = Barrier(2)
+    owners = ("worker-pg-a", "worker-pg-b")
+
+    def claim_next(owner: str):
+        barrier.wait(timeout=5)
+        return repository.claim_next(owner=owner)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        leases = list(executor.map(claim_next, owners))
+
+    assert all(lease is not None for lease in leases)
+    claimed = [lease for lease in leases if lease is not None]
+    assert {lease.owner for lease in claimed} == set(owners)
+    assert {lease.run_id for lease in claimed} == {"run-pg", "run-pg-b"}
+    with postgres_store() as session:
+        benchmark_ids = set(
+            session.scalars(
+                select(EvaluationRun.benchmark_id).where(
+                    EvaluationRun.id.in_(tuple(lease.run_id for lease in claimed))
+                )
+            )
+        )
+    assert benchmark_ids == {"benchmark-pg", "benchmark-pg-b"}
+
+
+def test_postgres_active_lease_does_not_block_another_run_claim(postgres_store) -> None:
+    _add_second_due_run(postgres_store)
+    repository = RunLeaseRepository(postgres_store, lease_for=timedelta(seconds=30))
+    first = repository.claim("run-pg", owner="worker-pg-a")
+    assert first is not None
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        second = executor.submit(
+            repository.claim_next,
+            owner="worker-pg-b",
+        ).result(timeout=10)
+
+    assert second is not None
+    assert second.run_id == "run-pg-b"
+    assert second.owner == "worker-pg-b"
+    assert repository.claim("run-pg", owner="worker-pg-b") is None
 
 
 def test_postgres_claim_and_cancel_race_preserves_state_constraints(postgres_store) -> None:
@@ -1120,3 +1212,51 @@ def test_postgres_model_lock_serializes_run_creation_before_sensitive_patch(
         run = session.get(EvaluationRun, run_id)
         assert model is not None and model.base_url == "https://provider.example/v1"
         assert run is not None and run.status == RunStatus.PENDING
+
+
+def test_postgres_provider_protocol_constraint_accepts_explicit_remote_adapters(
+    postgres_store,
+) -> None:
+    with postgres_store() as session, session.begin():
+        session.add_all(
+            [
+                Model(
+                    id="model-pg-responses",
+                    name="Postgres Responses",
+                    provider_type=ProviderType.OPENAI_RESPONSES,
+                    base_url="https://provider.example/v1",
+                    remote_model_name="responses-model",
+                    api_key_env="PROVIDER_KEY",
+                    credential_source=CredentialSource.ENVIRONMENT,
+                ),
+                Model(
+                    id="model-pg-messages",
+                    name="Postgres Messages",
+                    provider_type=ProviderType.ANTHROPIC_MESSAGES,
+                    base_url="https://provider.example/v1",
+                    remote_model_name="messages-model",
+                    api_key_env="PROVIDER_KEY",
+                    credential_source=CredentialSource.ENVIRONMENT,
+                ),
+            ]
+        )
+
+    with postgres_store() as session:
+        assert set(
+            session.scalars(
+                select(Model.provider_type).where(
+                    Model.id.in_(("model-pg-responses", "model-pg-messages"))
+                )
+            )
+        ) == {ProviderType.OPENAI_RESPONSES, ProviderType.ANTHROPIC_MESSAGES}
+
+    with pytest.raises(IntegrityError), postgres_store() as session, session.begin():
+        session.execute(
+            text(
+                "INSERT INTO models ("
+                "id, name, provider_type, credential_source, enabled, "
+                "default_parameters, created_at, updated_at"
+                ") VALUES ('model-pg-invalid-protocol', 'Invalid protocol', 'bad', "
+                "'none', true, '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            )
+        )
