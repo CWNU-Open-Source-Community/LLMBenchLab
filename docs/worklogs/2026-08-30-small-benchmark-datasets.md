@@ -116,3 +116,8 @@
 ### 结论与边界
 
 验收标准全部满足。六套数据可直接在当前 Benchmarks/New Run 页面选择，且每套恰好 100 题。它们适合低成本、同配置的模型初筛和逐题配对比较；公开 Benchmark 可能被训练数据污染，100 题准确率的标准误差在最不利的 50% 正确率附近约为 5 个百分点，因此不应把小分差解释为稳定排名，也不应将 mini/binary 子集成绩冒充官方全量成绩。
+
+### 仓库收尾
+
+- 文档记录 commit `8faa2093b2c3308994d50e42a31063cdbf5264a6` 已普通 push 到 `codex/complete-evaluation-workflow`。其精确 SHA 的 GitHub Actions run `33296049611` 对 backend、真实 PostgreSQL/Redis integration、real-Compose reliability 和 frontend 四个必需 job 全部成功。
+- 首次按 exact SHA 查询 Actions 时手工展开了错误的完整 SHA `8faa20978a8d87665453130c2c226c17689b205f`，因此没有匹配到 run；随后以 `git rev-parse HEAD` 取得真实 SHA 并正确定位 `33296049611`。错误查询只读且没有触发或修改远程状态。

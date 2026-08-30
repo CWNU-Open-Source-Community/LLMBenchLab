@@ -84,7 +84,8 @@ validation，共 600 题。源缓存、转换器、ZIP、provenance 和备份继
 API/数据库/Hash 与 SQLite 完整性均已
 验证。该工作只复用现有 numeric/multiple-choice 合同，没有实现通用 Plugin SDK、IFEval、代码沙箱或
 新的产品协议；公开 mini 成绩也不得冒充官方全量榜单。导入任务没有创建、取消或重置 Run；当时既有
-12,032 题 Run 继续推进，导入后的取消请求与 MGSM mini Run 创建属于另一个并发客户端时间线。
+12,032 题 Run 继续推进，导入后的取消请求与 MGSM mini Run 创建属于另一个并发客户端时间线。记录
+commit `8faa2093b2c3308994d50e42a31063cdbf5264a6` 已 push，精确 SHA CI run `33296049611` 4/4 成功。
 
 ## 验收标准
 

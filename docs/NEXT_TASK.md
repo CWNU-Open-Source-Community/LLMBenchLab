@@ -27,7 +27,7 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 同日又把 `artifacts/benchmarks/` 中已存在的 GPQA-Diamond 与两种 MMLU-Pro profile 通过正式导入 API 加载到默认个人 SQLite，当前为 `4` 个 Benchmark、`24,277` 题，原 Model/Run/Response 保持且没有 Provider 调用。记录 commit `0163b67c00eb59ae59db5f3adb679ad85c799142` 已 push，其精确 SHA run `33266167547` 4/4 成功；该本地数据操作不提交第三方题目、不改变产品实现或路线图，P2-07 的下一任务仍保持不变。
 
-随后又从固定来源 revision 准备并通过同一正式导入 API 加载 GSM8K、中文 MGSM、HellaSwag、WinoGrande、TruthfulQA Binary 五套 100 题 mini 子集，以及完整 100 题中文 XCOPA validation。默认个人 SQLite 因此现为 `10` 个 Benchmarks、`24,877` 题；第三方题目、转换器、provenance 与导入前备份仍在 Git 忽略目录。导入任务没有创建、取消或重置 Run；当时既有 12,032 题 Run 正在执行，导入完成后的取消请求和 MGSM mini Run 创建属于另一个并发客户端时间线，其 Response/Provider 流量不属于导入副作用。该个人数据维护不实现 Plugin SDK、IFEval 或新的产品合同，P2-07 仍是下一项且保持 `planned`。
+随后又从固定来源 revision 准备并通过同一正式导入 API 加载 GSM8K、中文 MGSM、HellaSwag、WinoGrande、TruthfulQA Binary 五套 100 题 mini 子集，以及完整 100 题中文 XCOPA validation。默认个人 SQLite 因此现为 `10` 个 Benchmarks、`24,877` 题；第三方题目、转换器、provenance 与导入前备份仍在 Git 忽略目录。导入任务没有创建、取消或重置 Run；当时既有 12,032 题 Run 正在执行，导入完成后的取消请求和 MGSM mini Run 创建属于另一个并发客户端时间线，其 Response/Provider 流量不属于导入副作用。记录 commit `8faa2093b2c3308994d50e42a31063cdbf5264a6` 已 push，精确 SHA CI run `33296049611` 4/4 成功。该个人数据维护不实现 Plugin SDK、IFEval 或新的产品合同，P2-07 仍是下一项且保持 `planned`。
 
 [Observational Token overdraw 修复](plans/2026-08-30-fix-observational-token-overdraw.md) 已完成。ADR-0018 已把非显式 input 估算与 hard reservation 分离，并把 data-only head 定为 `20260830_0007`；该 revision 只重算 `governance_scopes.overdrawn`，upgrade/downgrade 均拒绝 active reservation，历史 ledger/actual/Response/Run 终态保持。本地完整验证、当前个人 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与 [exact-SHA CI run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 均通过。P2-07 前置阻碍已解除，但本次任务到此停止。
 
