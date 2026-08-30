@@ -78,6 +78,14 @@ GPQA-Diamond `198` 题，以及 MMLU-Pro Direct/Official-CoT 各 `12,032` 题；
 运行评测或调用 Provider；记录 commit `0163b67c00eb59ae59db5f3adb679ad85c799142` 的精确 SHA CI
 run `33266167547` 已 4/4 成功。这仍不代表 IFEval、Plugin SDK、沙箱、分组 UI 或本阶段验收已经完成。
 
+同日又从固定来源 revision 确定性准备并通过现有正式 API 导入六套各 100 题的个人本地小型 Benchmark：
+GSM8K、中文 MGSM、HellaSwag、WinoGrande、TruthfulQA Binary 五套 mini 子集与完整中文 XCOPA
+validation，共 600 题。源缓存、转换器、ZIP、provenance 和备份继续 Git 忽略；Loader/Evaluator、
+API/数据库/Hash 与 SQLite 完整性均已
+验证。该工作只复用现有 numeric/multiple-choice 合同，没有实现通用 Plugin SDK、IFEval、代码沙箱或
+新的产品协议；公开 mini 成绩也不得冒充官方全量榜单。导入任务没有创建、取消或重置 Run；当时既有
+12,032 题 Run 继续推进，导入后的取消请求与 MGSM mini Run 创建属于另一个并发客户端时间线。
+
 ## 验收标准
 
 - [ ] 每个标准 Benchmark 可从固定来源/版本重复导入并得到相同 Hash。
