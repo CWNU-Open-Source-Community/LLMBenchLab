@@ -3,6 +3,7 @@ export type CredentialSource = "none" | "environment" | "stored";
 export type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 export type GovernanceRunStatus = "legacy_unmanaged" | "managed" | "delayed" | "exhausted";
 export type QuestionType = "exact_match" | "multiple_choice" | "numeric";
+export type RunProgressOutcome = "passed" | "wrong" | "error";
 
 export interface ListResponse<T> {
   items: T[];
@@ -154,6 +155,46 @@ export interface EvaluationResponseList extends ListResponse<EvaluationResponse>
   known_output_tokens: number;
   input_token_reported_responses: number;
   output_token_reported_responses: number;
+}
+
+export interface RunProgressBlockSummary {
+  block_index: number;
+  response_count: number;
+}
+
+export interface RunProgressIndex {
+  block_size: number;
+  total_questions: number;
+  completed_questions: number;
+  correct_questions: number;
+  error_questions: number;
+  score: number;
+  completion_rate: number;
+  answered_accuracy: number | null;
+  average_latency_ms: number | null;
+  known_input_tokens: number;
+  known_output_tokens: number;
+  input_token_reported_responses: number;
+  output_token_reported_responses: number;
+  known_estimated_cost: number;
+  estimated_cost_reported_responses: number;
+  blocks: RunProgressBlockSummary[];
+}
+
+export interface RunProgressCell {
+  position: number;
+  outcome: RunProgressOutcome;
+  score: number;
+  latency_ms: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  estimated_cost: number | null;
+  error_type: string | null;
+}
+
+export interface RunProgressBlock {
+  block_index: number;
+  items: RunProgressCell[];
 }
 
 export interface LeaderboardEntry {

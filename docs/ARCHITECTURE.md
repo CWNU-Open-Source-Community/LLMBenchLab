@@ -63,7 +63,7 @@ flowchart TB
     subgraph FE[React 单页应用]
         Pages[Dashboard、Models、Benchmarks、Runs、New Run、Run Detail、Leaderboard]
         Client[集中式 API Client]
-        Poller[Run 状态轮询]
+        Poller[Run、证据页与 progress block 轮询]
         Pages --> Client
         Pages --> Poller
     end
@@ -106,7 +106,7 @@ flowchart TB
     ReportFiles[summary / groups / responses]
 
     Client -->|REST JSON| Routes
-    Poller -->|GET Run 与 Responses| Routes
+    Poller -->|GET Run、当前 Responses 页、progress index/变化 blocks| Routes
     Importer -->|受限读取| Files
     APIRepo --> DB
     Governance --> DB
@@ -142,7 +142,7 @@ flowchart TB
 | ModelAdapter | 把统一生成请求映射到具体模型 | 评分 |
 | Evaluator | 安全解析答案并给出 0/1 分 | 调用模型或数据库 |
 | Repository / ORM | 事务与持久化 | API 序列化和业务展示 |
-| React UI | 用户操作、write-only Key 表单、轮询和可视化 | 持久化/读回 Key、读取 keyring 或直接调用模型供应商 |
+| React UI | 用户操作、write-only Key 表单、独立轮询、虚拟化可访问热力图和可视化 | 持久化/读回 Key、读取 keyring、直接调用模型供应商或从部分 cells 重算权威指标 |
 
 ## 关键数据流
 
@@ -536,7 +536,11 @@ Runner 从 Run 快照读取模型连接配置、凭据来源、价格、生成�
 
 Model 的 `default_parameters` 在 Phase 1 只接受 Adapter 实际转发的 `temperature`、`top_p`、`max_tokens`、`seed`。创建 Run 时显式字段覆盖 Model 默认，省略字段才使用 Model 默认；显式 `max_tokens:null` 也是覆盖值，不会回退。`generation` 块因此只包含实际执行值，不把未转发的 Provider 扩展伪装成有效参数。通用 API 保留 protocol-v1 的 `max_tokens=256` 和读取超时 `60s` 默认；没有对应 Model 默认且用户尚未手动修改时，Web 根据已知 Benchmark 提交可编辑的显式建议：Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s`。
 
-React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 条为一页显示所有状态，支持状态筛选，并在当前页存在 active Run 时轮询；列表和 Run Detail 都以持久化 Run ID 建立链接。Run Detail 对 `GET /runs/{id}/responses` 使用每页 100 条的 offset 分页，而不是只加载大型正式 Benchmark 的前 100 条；active Run 继续轮询当前证据页，进入终态后停止。Run Detail 还显式展示 `managed/delayed/exhausted/legacy_unmanaged` 治理状态，只将封闭的稳定 reason 映射为人类可读文案，`governance_not_before` 以 UTC 显示，未知值不原样反射。
+React 主导航包含独立的 Runs 列表页。该页通过 `GET /runs` 以 20 条为一页显示所有状态，支持状态筛选，并在当前页存在 active Run 时轮询；列表和 Run Detail 都以持久化 Run ID 建立链接。Run Detail 对 `GET /runs/{id}/responses` 使用每页 100 条的 offset 分页，而不是只加载大型正式 Benchmark 的前 100 条；详情页页码与全 Run 进度读取相互独立。Run Detail 还显式展示 `managed/delayed/exhausted/legacy_unmanaged` 治理状态，只将封闭的稳定 reason 映射为人类可读文案，`governance_not_before` 以 UTC 显示，未知值不原样反射。
+
+全 Run 热力图采用固定 512 题 absolute-position blocks，而不是 Response offset 页或时间 cursor。`GET /runs/{id}/progress` 在一个数据库读取快照中返回全部计划 block 的 `response_count` 与 evidence-derived live metrics；`GET /runs/{id}/progress/blocks/{block_index}` 只返回该范围内按 position 排序的已持久化 cell 白名单。Response 对 Run/Question 唯一且追加，因而 block count 单调：客户端每秒只比较 index，hydrate 非空或 count 变化的 block；index→block 之间的新提交可使 payload 比旧 index 更新，但不会永久漏失，下一 index 会收敛。没有 Response 的计划 position 才是 `not_run`，非空 block 初始 hydrate 完成前为“同步中”。页面切 Run、旧请求返回、hidden/visible 和终态先到都由独立 progress reducer/poller 处理；终态需等目标 counts 追齐后才停止该 poller。
+
+四态 outcome 的后端优先级为 `error_type != null -> error`、否则 `score == 1 -> passed`、否则 `wrong`；未持久化为 `not_run`。index 的 score/completion/answered accuracy/error/latency 与 known Token/cost coverage 复用 protocol-v1 聚合定义，前端不从部分 block Map 重算。known subtotal 只是覆盖证据，不能写回或替代 Run `input_tokens/output_tokens/estimated_cost` 的 all-or-nothing nullable 真值。固定白名单排除 Question/Response ID、正文/答案、error message 与 Provider transport metadata；两个 progress 响应均为 `no-store`。该设计复用现有唯一约束和 `Question.position`，不增加表、revision 或 migration。
 
 写入约束：
 

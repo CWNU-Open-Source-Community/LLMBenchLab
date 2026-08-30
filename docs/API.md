@@ -139,6 +139,8 @@ Benchmark 校验错误还会提供文件、行、列或 JSON Pointer：
 | GET | `/runs/{run_id}` | 200 | 轮询 Run 状态与汇总 |
 | POST | `/runs/{run_id}/cancel` | 200 | 请求协作式取消 |
 | GET | `/runs/{run_id}/responses` | 200 | 分页读取逐题证据 |
+| GET | `/runs/{run_id}/progress` | 200 | 读取固定 512 题 block 索引与同快照 live metrics |
+| GET | `/runs/{run_id}/progress/blocks/{block_index}` | 200 | 读取一个 block 的轻量 absolute-position cells |
 | GET | `/runs/{run_id}/audit` | 200 | 按稳定时间顺序分页读取保留期内的类型化审计事件 |
 | GET | `/leaderboard` | 200 | 已完成 Run 的严格总分榜 |
 | GET | `/metrics/summary` | 200 | Dashboard 汇总 |
@@ -1073,8 +1075,7 @@ Run 一旦提交，不会因随后 Redis 故障、并发/RPM/TPM 饱和而删除
 curl -sS http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444
 ```
 
-`200 OK` 返回 `RunRead`。运行期间汇总字段可能为 `null`，进度由
-`completed_questions / total_questions` 表示。不存在返回：
+`200 OK` 返回 `RunRead`。运行期间持久化 Run 汇总字段可能尚未追上逐题证据；动态成绩、完成率、错误数、延迟与 usage/cost 已知覆盖应读取 6.7 节的 progress index。Run 的精确 `input_tokens`、`output_tokens` 与 `estimated_cost` 仍遵守 all-or-nothing nullable 语义，不会由 progress 已知小计回填。不存在返回：
 
 ```json
 {
@@ -1157,9 +1158,102 @@ curl -sS 'http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444
 
 逐题 transport 证据只保存并返回固定字段：Provider request ID、返回模型名、system fingerprint、finish reason 与实际 HTTP attempt 数；不会保存或返回任意 raw usage 对象。四个字符串必须是短、无空白的安全 opaque token，任何超长、控制字符、凭据形态或脱敏占位值都会 fail closed 为 `null`。这些值用于关联和诊断，不改变评分，也不把本地 Response 幂等扩展为 Provider exactly-once。可信本地报告的 `responses.jsonl` 导出同一组固定字段，并再次执行报告级 secret scrub 与安全字符边界。
 
-Web Run Detail 固定以 `limit=100` 请求一页逐题证据，并用 `offset` 提供上一页/下一页导航；它不会把大型正式 Benchmark 截止在前 100 条。页面以 `completed_questions - correct_questions` 显示“未得分”，再用 `error_questions` 拆出执行异常，其余为普通答错；当前页同样分别显示未得分与执行异常。精确 Run Token 与 Response 汇总来自同一可核对快照时显示精确值；否则显示“已知小计”、输入/输出各自覆盖率和“完整总量未知”。Run 不存在返回 `404 run_not_found`；分页非法返回 `422`。
+Web Run Detail 固定以 `limit=100` 请求一页逐题证据，并用 `offset` 提供上一页/下一页导航；它不会把大型正式 Benchmark 截止在前 100 条。当前页仍分别显示未得分与执行异常。全 Run 动态指标与热力图改用下一节的 progress index/block，不从当前证据页推断。精确 Run Token 与 Response 汇总来自同一可核对快照时显示精确值；否则显示“已知小计”、输入/输出各自覆盖率和“完整总量未知”。Run 不存在返回 `404 run_not_found`；分页非法返回 `422`。
 
-### 6.7 `GET /runs/{run_id}/audit`
+### 6.7 `GET /runs/{run_id}/progress` 与 `/progress/blocks/{block_index}`
+
+这两个只读接口为大型 Run Detail 提供轻量热力图事实，不使用通用 offset pagination，也没有 cursor。block 大小固定为 `512`，`block_index` 从 `0` 开始，absolute position 范围由 `block_index * block_size` 派生。
+
+索引请求：
+
+```bash
+curl -sS 'http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444/progress'
+```
+
+`200 OK`：
+
+```json
+{
+  "block_size": 512,
+  "total_questions": 5,
+  "completed_questions": 3,
+  "correct_questions": 1,
+  "error_questions": 1,
+  "score": 20.0,
+  "completion_rate": 40.0,
+  "answered_accuracy": 50.0,
+  "average_latency_ms": 200.0,
+  "known_input_tokens": 30,
+  "known_output_tokens": 15,
+  "input_token_reported_responses": 2,
+  "output_token_reported_responses": 2,
+  "known_estimated_cost": 0.001,
+  "estimated_cost_reported_responses": 1,
+  "blocks": [
+    {"block_index": 0, "response_count": 3}
+  ]
+}
+```
+
+示例为字段结构演示；实际 `blocks` 必须覆盖该 Run 的全部计划 block，并按 `block_index` 升序返回，空 block 也保留 `response_count=0`。`completed_questions`、正确/异常数、三项成绩、平均延迟、known usage/cost 及其 reported coverage 与这些 block counts 从同一数据库读取快照派生，运行中每次请求都可变化。指标公式与 `llmbenchlab-protocol-v1` 相同；前端不得从尚未完全同步的 cells 子集另算主指标。
+
+读取一个 block：
+
+```bash
+curl -sS 'http://127.0.0.1:8000/api/v1/runs/44444444-4444-4444-8444-444444444444/progress/blocks/0'
+```
+
+`200 OK`：
+
+```json
+{
+  "block_index": 0,
+  "items": [
+    {
+      "position": 0,
+      "outcome": "wrong",
+      "score": 0.0,
+      "latency_ms": 200.0,
+      "input_tokens": 20,
+      "output_tokens": 10,
+      "estimated_cost": null,
+      "error_type": null
+    },
+    {
+      "position": 2,
+      "outcome": "passed",
+      "score": 1.0,
+      "latency_ms": 100.0,
+      "input_tokens": 10,
+      "output_tokens": 5,
+      "estimated_cost": 0.001,
+      "error_type": null
+    },
+    {
+      "position": 3,
+      "outcome": "error",
+      "score": 0.0,
+      "latency_ms": 300.0,
+      "input_tokens": null,
+      "output_tokens": null,
+      "estimated_cost": null,
+      "error_type": "provider_error"
+    }
+  ]
+}
+```
+
+`items` 只含该 block 已持久化的 Response，并按 absolute `position` 升序；没有返回的计划 position 隐式为 `not_run`。`outcome` 的互斥判定优先级固定为：`error_type != null` 时 `error`；否则 `score == 1` 时 `passed`；其余为 `wrong`。这保证执行异常不会同时被展示为普通答错。
+
+cell 是严格白名单，只能包含 `position`、`outcome`、`score`、`latency_ms`、`input_tokens`、`output_tokens`、`estimated_cost`、`error_type`。接口不返回 Question/Response ID、external ID、prompt、choices、raw/parsed/reference answer、error message、Provider request/model/fingerprint/finish reason、任意 raw usage 或其他 Provider metadata。两个响应都带 `Cache-Control: no-store`。
+
+客户端每秒读取小型 index，只拉取 `response_count` 非零且尚未同步、或 count 相对本地发生变化的 block。全部目标 block hydrate 完成前应显示“同步中”，不能把尚未加载的格子伪装成 `not_run`。Response 是 append-only 唯一事实；若新提交发生在 index 与 block 请求之间，block 可能已比旧 index 更新，客户端保留较新 items 并由下一次 index 收敛。Run 进入终态不代表最后一个 block 请求已经返回，客户端应在目标 counts 追齐后再停止 progress 轮询。
+
+Run 不存在返回 `404 run_not_found`。负 `block_index` 由路径参数校验返回 `422`；`block_index >= block_count` 返回 typed `422 progress_block_out_of_range`。若已持久化 Response 的 Question/position 不属于 Run 冻结计划，index 整次 fail closed 为 `500 run_progress_integrity_error`，不返回部分指标或格子。索引响应不重复 Run `status`，客户端继续从 `GET /runs/{run_id}` 读取状态。
+
+`known_input_tokens`、`known_output_tokens` 与 `known_estimated_cost` 始终只是非 `null` 证据的小计，三个 reported-response 计数分别给出覆盖范围；合法的零值仍算已上报。它们不改变 Run 精确字段：任一必要 usage 或价格缺失时，`RunRead.input_tokens/output_tokens/estimated_cost` 仍可为 `null`，不得把 known subtotal 冒充完整账单。
+
+### 6.8 `GET /runs/{run_id}/audit`
 
 返回该 Run 已保留的类型化审计事件。排序固定为 `(occurred_at, id)` 升序；`offset`/`limit` 使用通用 `0..` / `1..100` 分页规则。事件表由执行状态转换事务追加，分页读取不会修改事件、Run 或治理账本。
 

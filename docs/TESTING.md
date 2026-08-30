@@ -254,11 +254,23 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
 - Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。生成边界测试覆盖兼容默认 `max_tokens=256`、显式 `null`、数字上限 `131072`、读取超时默认 `60s`/上限 `1800s`，并断言最终 generation 与 `execution.timeouts_seconds.read` 快照。
 - Response 列表的 Run-wide usage summary 覆盖零 Response、完整 usage、部分/非对称 usage、合法零 Token 和跨页一致性；输入/输出已知小计与非 `null` 计数各自独立，部分 usage 不会回填 protocol-v1 的精确 Run Token。
+- P3-06 progress index/block 回归必须覆盖：固定 `block_size=512`；全部计划 block（含空 block）升序 count；block absolute position 的稀疏/乱序完成；`error_type` 优先于 score、`score==1` 通过、其余普通答错；没有 Response 的 planned position 由客户端视为 `not_run`。index 的 completed/correct/error、三项 protocol-v1 指标、平均延迟及 known Token/cost coverage 必须与 block counts 在同一读取快照派生。
+- progress 竞态回归必须在 index→block 之间插入新 Response，证明 payload 与下一 index 最终收敛、不漏不重；覆盖 0/1/12,032/20,000 题边界、运行中和 completed/cancelled/failed 部分证据、nullable latency/usage/cost、负 block FastAPI 422、越界 typed `422 progress_block_out_of_range`、Run 404、两个接口 `Cache-Control: no-store` 及显式 OpenAPI Schema。相同语义需在快速 SQLite 与真实 PostgreSQL 读取快照用例验证。
+- progress cell 白名单必须精确限制为 `position/outcome/score/latency_ms/input_tokens/output_tokens/estimated_cost/error_type`；marker 测试必须证明 Question/Response ID、external ID、prompt/choices/raw/parsed/reference、error message、Provider request/model/fingerprint/finish reason、raw usage 和其他 Provider metadata 均不可表示或反射。
 - Web stored Key 纵向用例通过模拟 SSE 验证 API 写入→Worker 解密→Adapter 聚合→逐题/Run Token 持久化→报告脱敏；另一用例保留 JSON fallback，并断言 Run 的空闲读取超时和 stream payload 到达 Provider request。
 - Response/API/report 纵向用例验证安全归一化的 provider request ID、returned model、system fingerprint、finish reason 和 HTTP attempt count；过长/控制字符/非标值 fail closed 为 `null`，raw usage object 不作为任意持久化字段暴露。
 - Runner 诊断测试覆盖非空但无法解析且 `finish_reason="length"` 时的 `output_truncated`，并确认普通解析失败仍保持 `parse_error`；两者都不改变严格计零语义。
 
 增加或修改路由时至少断言：成功状态码与 Schema、一项校验错误、404/409 等业务错误、分页/筛选（若适用），以及响应中不出现秘密值。API 行为改变必须同步更新 [API.md](API.md)。
+
+P3-06 后端定向命令：
+
+```bash
+cd backend
+uv run pytest tests/test_run_progress_api.py tests/test_response_metadata_api.py -q
+```
+
+初版 cursor 合同曾建立 4 个失败先行用例并得到 `4 failed`；随后发现 Response 没有数据库单调提交序列，因此已在生产实现前废弃。固定 512 题 block 合同的后端定向结果为 `37 passed`；旧 cursor red 结果不计入通过数。
 
 ### 6.2 Alembic 与遗留 SQLite
 
@@ -370,11 +382,16 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 - Runs 主导航、20 条 offset 分页、状态筛选、active Run 定时刷新、错误/空状态和详情链接。
 - Run Detail 返回 Runs 列表、终态停止轮询、逐题每页 100 条的 offset 导航，以及跨页序号/总数显示。
 - Run Detail 把全局和当前页的未得分与执行异常分开显示；Token 测试覆盖精确 Run 总量、部分已知小计、输入/输出非对称覆盖、零 usage、零 Response，以及并行 Run/Response 快照不一致时的保守降级。
+- P3-06 进行中的纯函数/状态测试覆盖 position↔row/column 的 0、1、12,032、20,000 边界，四态计数、nullable usage 的 aria-label、block reducer 幂等、旧请求世代/旧 runId 响应丢弃与 reset；实现不应保留 API cursor 合同代码路径。
+- 热力图组件测试必须覆盖非仅颜色的图例/形状或边框、hover/focus/tap 等价详情、方向键、Home/End、Ctrl+Home/End、PageUp/PageDown、`aria-rowcount/aria-colcount/aria-activedescendant`、virtual DOM 节点上限、移动端 pinned detail，以及 block 未 hydrate 时“同步中”而非虚假 `not_run`。
+- Run Detail 集成测试必须覆盖 live metrics 更新但不触发整页 loading、当前 Response page 2 保持、旧 Run/旧 block 返回丢弃、一个 tick 不重复 fetch、hidden 暂停/visible 恢复、terminal 先到仍追齐目标 counts、progress 失败不阻断 Run/当前证据页。terminal 且 progress reconciled 后必须恰好执行一次最终 Run/当前 evidence 页刷新，避免终态 `Promise.all` 交错留下旧证据；同一路由切换 `runId` 必须把 evidence offset 重置为 0。known subtotal/coverage 只能展示，不能写成精确 Run Token/cost。
 - Run Detail 显示 `managed`、`delayed`、`exhausted`、`legacy_unmanaged` 治理状态，稳定 closed reason 使用受控文案，`not_before` 明确按 UTC 格式化；未知 reason 只显示安全兜底，不反射服务端原值。
 
-所有 fetch 与 Recharts 均在进程内 stub，没有真实网络；这些组件测试不会调用真实 Provider，也不会验证 Provider 实际接受某个输出长度或读取超时。Benchmark Demo 导入与完整 raw/parsed/reference/score/error 证据仍以离线后端 Smoke 和手工验收补充，不能把 DOM/API stub 结果描述成真实模型兼容性验证。
+所有 fetch 与 Recharts 均在进程内 stub，没有真实网络；这些组件测试不会调用真实 Provider，也不会验证 Provider 实际接受某个输出长度或读取超时。Benchmark Demo 导入与完整 raw/parsed/reference/score/error 证据仍以离线后端 Smoke 和手工验收补充，不能把 DOM/API stub 结果描述成真实模型兼容性验证。P3-06 定向命令 `cd frontend && npm test -- --run tests/run-detail-page.test.tsx tests/run-progress-heatmap.test.tsx` 为 `32 passed`（Run Detail `20` + heatmap `12`）；完整 `make test` 为 backend `964 passed, 33 skipped`、frontend `64 passed`。`make lint`、Mock smoke `1 passed, 7 deselected`、frontend production build 与 `docker compose config --quiet` 也已通过。
 
 本轮还在可信 loopback 的真实浏览器中手工核对 Models 表单：Key 控件实际为 password input，页面没有 `api_key_env` 控件，保存成功后表单/卡片/网络响应均不回显测试 Key，应用日志也没有该测试 Key。该检查使用无效测试值且没有触发真实 Provider；它补充 DOM stub 自动化，但不增加 Vitest 或后端测试计数。
+
+P3-06 可信 loopback 浏览器验收使用历史 Run `a3de7e4d-40b2-4d8c-994b-c713047393ae`：热力图/计数为 179 passed、17 wrong、2 error，known input/output Token 为 `45,509 / 4,561,625` 且两项覆盖均为 `196/198`。desktop、768px、375px 无横向溢出，console 无 warning/error，键盘导航与 Tooltip 通过。12,032/20,000 题仅由组件自动化验证虚拟 DOM 边界与导航，未进行大型真实 Run 的手工 DevTools 长任务/内存测量；不得把自动化结果扩写为该性能声明。
 
 测试应优先按可见文本、label 和 role 查询 DOM，不依赖内部 class 或实现细节。时间、ID 和 API 返回应固定；不要用长 sleep 消除竞态。
 
@@ -533,13 +550,15 @@ make dev
 
    ```bash
    curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/responses?limit=100'
+   curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/progress'
+   curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/progress/blocks/0'
    curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/audit?limit=100'
    curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
    curl -sS 'http://127.0.0.1:8000/api/v1/leaderboard?benchmark_id=<BENCHMARK_ID>&order=score_desc'
    curl -sS http://127.0.0.1:8000/api/v1/metrics/summary
    ```
 
-   预期 Responses 共 15 条，Run audit 能稳定分页看到 admission/claim/question/terminal typed event，history counters/latency 包含本次 Run；排行榜包含该 Run 且 `is_demo=true`，汇总包含 1 个已完成 Run。
+   预期 Responses 共 15 条；progress index 为 `block_size=512`、一个 block/15 responses，block payload 为 15 个 absolute-position passed cells，且两个响应均 `no-store`。Run audit 能稳定分页看到 admission/claim/question/terminal typed event，history counters/latency 包含本次 Run；排行榜包含该 Run 且 `is_demo=true`，汇总包含 1 个已完成 Run。
 
 ### 11.2 前端验收
 
@@ -549,7 +568,9 @@ make dev
 - Models 能新增、编辑、删除 Mock；选择 OpenAI-compatible 后出现 masked API Key 输入框，用户直接粘贴真实 Key，保存后输入框清空且卡片只显示“已安全保存”。编辑留空保留，改变 Provider origin 必须重输。
 - Benchmarks 能重载 Demo、显示版本/题数/Hash/许可证与醒目的 Demo 警告。
 - New Run 能选择 Model 与 Benchmark，区分 protocol-v1 API 默认和 Web 建议，允许数字预算或显式 Provider 托管，并把读取超时随创建请求提交。
-- Runs 列表能从主导航进入，按状态/20 条分页显示并链接回详情；Run Detail 轮询进度并在终态停止，配置快照和逐题证据以每页 100 条查看，不把大型 Run 截断在第一页。
+- Runs 列表能从主导航进入，按状态/20 条分页显示并链接回详情；Run Detail 独立轮询 Run、当前证据页与 progress index/变化 blocks，终态先到时追齐热力图再停止。切到证据第 2 页、切换 Run、隐藏/恢复标签页或 progress 暂时失败都不应清空当前页或混入旧 block。
+- 在运行中、completed、cancelled 和 failed 的部分证据样本核对绿/红/黑/白四态、计数与后端 live metrics；初次非空 block 未 hydrate 时显示“同步中”。hover、键盘 focus/导航与移动端 tap 显示同一 score/Token/延迟/cost/error_type，未知 usage 不显示 0。
+- 在 320/375/768/desktop 宽度、200% zoom、仅键盘、VoiceOver 或 NVDA、forced-colors 和 reduced-motion 下检查可用性；以 12,032 和 20,000 题样本核对虚拟 DOM 上限、滚动、长任务与内存，没有全量正文轮询。
 - Leaderboard 可按模型/Benchmark 筛选、按得分排序，协议、Hash、完成率和 Demo 标识可见。
 - 刷新页面、空数据库、API 关闭和常见移动宽度下都有明确可操作状态。
 

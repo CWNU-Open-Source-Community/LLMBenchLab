@@ -80,10 +80,10 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 - **FR-API-02** 系统端点：`GET /health`、`GET /info`；健康检查不得依赖真实模型服务。
 - **FR-API-03** 模型端点：`GET/POST /models`、`GET/PATCH/DELETE /models/{id}`。
 - **FR-API-04** Benchmark 端点：`GET /benchmarks`、`GET /benchmarks/{id}`、`POST /benchmarks/import`、`POST /benchmarks/reload-demo`。
-- **FR-API-05** Run 端点：`GET/POST /runs`、`GET /runs/{id}`、`POST /runs/{id}/cancel`、`GET /runs/{id}/responses`。
+- **FR-API-05** Run 端点：`GET/POST /runs`、`GET /runs/{id}`、`POST /runs/{id}/cancel`、`GET /runs/{id}/responses`，以及固定 512 题 absolute-position block 的 `GET /runs/{id}/progress` index 和 `GET /runs/{id}/progress/blocks/{block_index}` payload。progress index 必须从同一读取快照给出 block counts 与 evidence-derived live metrics；block payload 只能给出热力图所需轻量字段。
 - **FR-API-06** 汇总端点：`GET /leaderboard`、`GET /metrics/summary`。
 - **FR-API-07** 列表必须支持基本分页；Leaderboard 必须支持 Benchmark/Model 筛选和得分排序。
-- **FR-API-08** 请求/响应必须使用明确 Schema、合理状态码和可读校验错误，任何响应不得泄漏秘密。
+- **FR-API-08** 请求/响应必须使用明确 Schema、合理状态码和可读校验错误，任何响应不得泄漏秘密。progress cell 必须使用固定字段白名单，禁止 Question/Response ID、正文/答案、error message 与 Provider metadata，并返回 `Cache-Control: no-store`。
 - **FR-API-09** CORS 只能允许配置的前端来源。
 
 ### FR-UI：用户界面
@@ -92,9 +92,9 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 - **FR-UI-02** Models 页面必须支持列表、添加、编辑、删除和表单校验；OpenAI-compatible 模型由用户直接在密码输入框粘贴 API Key，提交后立即清空，后续只显示“已安全保存”等状态，绝不回显密钥。环境变量名称不得作为 Web 主流程输入项。
 - **FR-UI-03** Benchmarks 页面必须展示名称、版本、维度、语言、题数、Hash、详情、格式说明、Demo 标识及重新载入操作。
 - **FR-UI-04** New Run 必须允许选择 Model/Benchmark，设置 temperature、top_p、max_tokens、seed，创建后跳转详情。
-- **FR-UI-05** Run Detail 必须轮询状态并展示进度、三类得分/比率、正确/错误数、延迟、Token、成本、配置快照及逐题原始/解析/标准答案、得分与错误。
+- **FR-UI-05** Run Detail 必须轮询状态并展示进度、三类得分/比率、正确/普通答错/执行异常数、延迟、Token、成本、配置快照及逐题原始/解析/标准答案、得分与错误。全 Run 进度必须以通过、普通答错、执行异常、未执行四态热力图呈现；动态主指标取自后端同快照证据聚合，Token/cost 已知小计必须同时显示 reported coverage，不能回填或冒充 nullable 的精确 Run 总量。
 - **FR-UI-06** Leaderboard 必须展示模型、Benchmark/version、protocol version、严格总分、回答准确率、完成率、延迟、Token、成本和运行时间，并支持筛选与排序。
-- **FR-UI-07** 所有页面必须有加载、空数据和错误状态，在常见桌面和移动宽度可用；不能是占位空壳。
+- **FR-UI-07** 所有页面必须有加载、空数据和错误状态，在常见桌面和移动宽度可用；不能是占位空壳。热力图状态不能只靠颜色，必须有文字图例、可访问名称和键盘导航；hover、focus 与移动端 tap 提供等价详情，block 尚未 hydrate 时必须显示“同步中”而非伪装为未执行。
 
 ## 3. 数据要求
 
@@ -138,9 +138,9 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 ### 性能与可靠性
 
 - **NFR-PERF-01** 在开发机、默认 SQLite、单个 12–20 题 Demo 上，Mock Run 应能在 30 秒内完成；该指标不适用于真实上游延迟。
-- **NFR-PERF-02** 创建 Run 应在 2 秒内返回；列表和详情在本地千级 Response 数据下目标响应时间为 1 秒内（不含首次启动和前端网络开销）。
-- **NFR-PERF-03** 列表必须分页，后台并发必须有上限，数据库会话和 HTTP 客户端必须正确释放。
-- **NFR-REL-01** 单题失败隔离，汇总指标可由持久化 Response 重算；进程重启遗留状态不得永远显示运行中。
+- **NFR-PERF-02** 创建 Run 应在 2 秒内返回；列表和详情在本地千级 Response 数据下目标响应时间为 1 秒内（不含首次启动和前端网络开销）。12,032–20,000 题热力图每秒只能读取有界 index 并重取计数变化的 512 题 block，不能每轮拉取全题正文或创建等量常驻 DOM 节点。
+- **NFR-PERF-03** 列表必须分页，热力图必须虚拟化，后台并发必须有上限，数据库会话和 HTTP 客户端必须正确释放。
+- **NFR-REL-01** 单题失败隔离，汇总指标可由持久化 Response 重算；进程重启遗留状态不得永远显示运行中。progress index 的 live metrics 与 block counts 必须来自同一读取快照；乱序完成、index→block 并发提交、终态先到及页面切换不得造成永久漏格或旧响应污染。
 - **NFR-REL-02** MVP 明确不保证后台任务自动恢复、跨进程互斥或高可用；这些属于 Phase 2。
 
 ### 安全与隐私
@@ -162,7 +162,7 @@ MVP 必须完成以下链路：注册 Mock 模型，载入内置 Demo Benchmark�
 
 - **TST-01** 后端覆盖三类 Evaluator 的正常、边界、冲突、容差、boxed 与非法输入。
 - **TST-02** 覆盖 Mock Adapter、manifest/JSONL 校验与行号、Hash 稳定性、Model API 脱敏、CRUD 和 Health。
-- **TST-03** 覆盖创建与完成 Mock Run、单题故障隔离、汇总分数和 Leaderboard 聚合。
+- **TST-03** 覆盖创建与完成 Mock Run、单题故障隔离、汇总分数和 Leaderboard 聚合；另覆盖 progress 四态优先级、绝对位置稀疏/乱序、block index/payload 一致性与并发收敛、live metrics、nullable usage/cost、字段白名单、12,032/20,000 边界，以及前端同步/虚拟化/键盘/轮询竞态。
 - **TST-04** 前端覆盖格式化、Run 状态、得分/完成率、API 错误和至少一个主要页面，并通过 typecheck 与 production build。
 - **TST-05** Smoke Test 使用临时 SQLite，完成注册 Mock、导入 Demo、Run、Response、Score 和 Leaderboard 断言，全程禁止网络。
 - **TST-06** CI 在 PR 和 main push 上运行后端 lint/test、前端 lint/test/build，不要求 API Key。

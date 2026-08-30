@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Path, Request, Response, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,8 +31,20 @@ from app.models import (
 )
 from app.runners.run_leases import CancelDisposition, RunLeaseRepository
 from app.schemas.audit import AuditEventList
+from app.schemas.evaluation_progress import (
+    PROGRESS_BLOCK_SIZE,
+    EvaluationProgressBlock,
+    EvaluationProgressBlockSummary,
+    EvaluationProgressIndex,
+)
 from app.schemas.evaluation_response import EvaluationResponseList
 from app.schemas.evaluation_run import EvaluationRunCreate, EvaluationRunList, EvaluationRunRead
+from app.services.run_progress import (
+    RunProgressIntegrityError,
+    load_progress_block,
+    load_progress_index,
+    progress_block_count,
+)
 from app.services.run_service import build_evaluation_run
 from app.task_queue import QueueUnavailable
 
@@ -366,6 +379,83 @@ def cancel_run(run_id: str, session: SessionDep, settings: SettingsDep) -> Evalu
             detail={"code": "run_not_found", "message": "Evaluation run was not found"},
         )
     return run
+
+
+def _raise_progress_integrity_error() -> None:
+    raise HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail={
+            "code": "run_progress_integrity_error",
+            "message": "Persisted Run progress does not match its frozen question plan",
+        },
+    )
+
+
+@router.get(
+    "/{run_id}/progress",
+    response_model=EvaluationProgressIndex,
+    summary="查看 Run 实时进度索引",
+)
+def get_run_progress(
+    run_id: str,
+    response: Response,
+    session: SessionDep,
+) -> EvaluationProgressIndex:
+    response.headers["Cache-Control"] = "no-store"
+    run = _get_run_or_404(session, run_id)
+    try:
+        projection = load_progress_index(session, run)
+    except RunProgressIntegrityError:
+        _raise_progress_integrity_error()
+    metrics = projection.metrics
+    return EvaluationProgressIndex(
+        block_size=PROGRESS_BLOCK_SIZE,
+        total_questions=run.total_questions,
+        completed_questions=metrics.completed_questions,
+        correct_questions=metrics.correct_questions,
+        error_questions=metrics.error_questions,
+        score=metrics.score,
+        completion_rate=metrics.completion_rate,
+        answered_accuracy=metrics.answered_accuracy,
+        average_latency_ms=metrics.average_latency_ms,
+        known_input_tokens=projection.known_input_tokens,
+        known_output_tokens=projection.known_output_tokens,
+        input_token_reported_responses=projection.input_token_reported_responses,
+        output_token_reported_responses=projection.output_token_reported_responses,
+        known_estimated_cost=float(projection.known_estimated_cost),
+        estimated_cost_reported_responses=projection.estimated_cost_reported_responses,
+        blocks=[
+            EvaluationProgressBlockSummary(block_index=index, response_count=count)
+            for index, count in enumerate(projection.block_response_counts)
+        ],
+    )
+
+
+@router.get(
+    "/{run_id}/progress/blocks/{block_index}",
+    response_model=EvaluationProgressBlock,
+    summary="查看 Run 单个进度区块",
+)
+def get_run_progress_block(
+    run_id: str,
+    block_index: Annotated[int, Path(ge=0)],
+    response: Response,
+    session: SessionDep,
+) -> EvaluationProgressBlock:
+    response.headers["Cache-Control"] = "no-store"
+    run = _get_run_or_404(session, run_id)
+    if block_index >= progress_block_count(run.total_questions):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail={
+                "code": "progress_block_out_of_range",
+                "message": "Run progress block is outside the frozen question plan",
+            },
+        )
+    return EvaluationProgressBlock(
+        block_index=block_index,
+        items=load_progress_block(session, run, block_index),
+    )
 
 
 @router.get("/{run_id}/responses", response_model=EvaluationResponseList, summary="查看逐题结果")

@@ -54,6 +54,20 @@ CLI 仍提供分组报告，但 Web 尚无分组聚合/子集指标 UI。P3-04/P
 沙箱范围未开始。该 UI 切片的完整本地门禁已通过，功能提交 `467d0243b4fb081c2d637b20ee0958c3bd6ee6d1` 已 push；
 分支无 PR且精确 SHA 未触发仅监听 PR/main 的 workflow，不能称为远程绿色。
 
+P3-06 的 Run Detail 热力图/live metrics 切片已完成本地实现与验证：`/runs/{id}/progress` 以固定
+`512` 题 absolute-position block index 返回同一数据库读取快照的 evidence-derived 指标与 block counts，
+`/runs/{id}/progress/blocks/{block_index}` 只返回指定 block 的轻量白名单 cells，前端只重取计数变化的 block。前端用虚拟化
+ARIA grid 呈现通过/普通答错/执行异常/未执行四态，并在非空 block hydrate 完成前明确显示“同步中”。
+该切片不改变 `llmbenchlab-protocol-v1`，也不把 known Token/cost 小计回填为 Run 精确字段；无
+migration、ADR 或安全边界变更。初版 cursor 的 4 个失败先行测试因 Response 没有数据库单调提交
+序列而在生产实现前废弃；fixed-block backend/frontend 定向回归为 `37/32 passed`（Run Detail `20` +
+heatmap `12`），完整回归为 backend `964 passed, 33 skipped`、frontend `64 passed`，lint、Mock smoke、
+build 与 Compose config 均通过。终态且 progress 已 reconciled 时只做一次最终 Run/当前 evidence 页刷新，
+同路由切换 `runId` 会把 evidence offset 重置为 0，两条竞态均有回归。
+目标 198 题 Run 的实页、desktop/768/375、键盘/Tooltip/console 验收通过；12,032/20,000 题由自动化
+虚拟化测试覆盖，不冒充大型真实 Run 的手工性能测量。最终 commit/push、实现 SHA 与精确 SHA CI 尚待
+收尾，因此 P3-06 保持 `in_progress`。
+
 2026-08-30 的个人本地实例已把 `artifacts/benchmarks/` 中现有的三份可复现 ZIP 经正式 API 加载：
 GPQA-Diamond `198` 题，以及 MMLU-Pro Direct/Official-CoT 各 `12,032` 题；默认库连同 Demo 共
 `4` 个 Benchmark、`24,277` 题。第三方题目和导入前备份继续位于 Git 忽略目录，本次没有重新下载、
@@ -69,6 +83,7 @@ run `33266167547` 已 4/4 成功。这仍不代表 IFEval、Plugin SDK、沙箱�
 - [ ] 超时、fork bomb、磁盘/输出耗尽、恶意系统调用等路径有验证。
 - [ ] 代码结果保留编译、stdout/stderr、测试状态和沙箱错误的受限快照。
 - [ ] 分组指标计算正确，不同协议/数据版本不会无提示混排。
+- [x] 12,032–20,000 题 Run Detail 以固定 block/虚拟化可访问热力图动态展示四态和后端同快照指标，乱序/并发/终态竞态不漏格且不轮询全量正文；大型边界为自动化验证。
 - [ ] 核心 Mock 离线回归测试继续通过。
 
 ## 风险
@@ -92,6 +107,7 @@ run `33266167547` 已 4/4 成功。这仍不代表 IFEval、Plugin SDK、沙箱�
 ## 状态
 
 `in_progress`。仓库不再只有计划：MMLU-Pro 与 GPQA-Diamond 的固定来源转换、可信本地运行和
-报告切片已经实现，但不会提交第三方题目；Web 已有标准数据选择、建议配置、Run 列表和分页证据的
-已 push 的当前切片。IFEval、通用 Plugin SDK、代码题/沙箱、分组/子集完整 UI 与红队验收仍缺失；
-本轮精确 SHA 没有 workflow run，且其余范围仍缺失，故本阶段不得标为 `completed`。
+报告切片已经实现，但不会提交第三方题目；Web 已有标准数据选择、建议配置、Run 列表和分页证据，
+热力图/live metrics 已完成本地实现、回归和目标 Run 浏览器验收，但仍是等待 commit/push 与精确 SHA CI
+的 P3-06 切片。IFEval、通用 Plugin SDK、代码题/沙箱、分组/子集完整 UI 与红队验收仍缺失；当前切片
+最终实现 SHA 与远端 CI 待收尾，且其余范围仍缺失，故本阶段不得标为 `completed`。

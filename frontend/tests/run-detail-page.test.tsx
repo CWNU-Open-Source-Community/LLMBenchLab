@@ -1,15 +1,23 @@
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { Link, MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { EvaluationResponse, EvaluationResponseList, EvaluationRun } from "../src/api/types";
+import type {
+  EvaluationResponse,
+  EvaluationResponseList,
+  EvaluationRun,
+  RunProgressCell,
+  RunProgressIndex,
+} from "../src/api/types";
 import { RunDetailPage } from "../src/pages/RunDetailPage";
 
 const apiMocks = vi.hoisted(() => ({
   run: vi.fn(),
   responses: vi.fn(),
   cancelRun: vi.fn(),
+  runProgressIndex: vi.fn(),
+  runProgressBlock: vi.fn(),
 }));
 
 vi.mock("../src/api/client", async (importOriginal) => {
@@ -21,6 +29,8 @@ vi.mock("../src/api/client", async (importOriginal) => {
       run: apiMocks.run,
       responses: apiMocks.responses,
       cancelRun: apiMocks.cancelRun,
+      runProgressIndex: apiMocks.runProgressIndex,
+      runProgressBlock: apiMocks.runProgressBlock,
     },
   };
 });
@@ -104,6 +114,46 @@ function responseFixture(position: number): EvaluationResponse {
   };
 }
 
+function progressCell(
+  position: number,
+  outcome: RunProgressCell["outcome"],
+  overrides: Partial<RunProgressCell> = {},
+): RunProgressCell {
+  return {
+    position,
+    outcome,
+    score: outcome === "passed" ? 1 : 0,
+    latency_ms: 100,
+    input_tokens: 10,
+    output_tokens: 5,
+    estimated_cost: 0.001,
+    error_type: outcome === "error" ? "provider_error" : null,
+    ...overrides,
+  };
+}
+
+function progressIndexFixture(overrides: Partial<RunProgressIndex> = {}): RunProgressIndex {
+  return {
+    block_size: 512,
+    total_questions: 4,
+    completed_questions: 3,
+    correct_questions: 1,
+    error_questions: 1,
+    score: 25,
+    completion_rate: 50,
+    answered_accuracy: 50,
+    average_latency_ms: 100,
+    known_input_tokens: 30,
+    known_output_tokens: 15,
+    input_token_reported_responses: 3,
+    output_token_reported_responses: 3,
+    known_estimated_cost: 0.003,
+    estimated_cost_reported_responses: 3,
+    blocks: [{ block_index: 0, response_count: 3 }],
+    ...overrides,
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
@@ -113,6 +163,17 @@ function deferred<T>() {
 function renderPage() {
   return render(
     <MemoryRouter initialEntries={["/runs/run-001"]}>
+      <Routes>
+        <Route path="/runs/:runId" element={<RunDetailPage />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+function renderSwitchablePage() {
+  return render(
+    <MemoryRouter initialEntries={["/runs/run-001"]}>
+      <Link to="/runs/run-002">切换 Run</Link>
       <Routes>
         <Route path="/runs/:runId" element={<RunDetailPage />} />
       </Routes>
@@ -133,6 +194,10 @@ describe("RunDetailPage", () => {
       input_token_reported_responses: 198,
       output_token_reported_responses: 198,
     });
+    // Most legacy assertions intentionally exercise the existing fallback
+    // presentation. Dedicated integration cases below enable progress data.
+    apiMocks.runProgressIndex.mockRejectedValue(new Error("progress unavailable in fixture"));
+    apiMocks.runProgressBlock.mockRejectedValue(new Error("unexpected block request"));
   });
 
   afterEach(() => {
@@ -350,6 +415,178 @@ describe("RunDetailPage", () => {
       .toBeInTheDocument();
   });
 
+  it("uses compact progress metrics and partial usage while a Run is still running", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      status: "running",
+      total_questions: 4,
+      completed_questions: 1,
+      correct_questions: 0,
+      error_questions: 0,
+      score: 0,
+      completion_rate: 0,
+      answered_accuracy: null,
+      average_latency_ms: null,
+      input_tokens: null,
+      output_tokens: null,
+      estimated_cost: null,
+      finished_at: null,
+    }));
+    apiMocks.runProgressIndex.mockResolvedValue(progressIndexFixture({
+      known_input_tokens: 25,
+      known_output_tokens: 5,
+      input_token_reported_responses: 2,
+      output_token_reported_responses: 1,
+      known_estimated_cost: 0.001,
+      estimated_cost_reported_responses: 1,
+    }));
+    apiMocks.runProgressBlock.mockResolvedValue({
+      block_index: 0,
+      items: [
+        progressCell(0, "passed"),
+        progressCell(1, "wrong", { input_tokens: 15, output_tokens: null, estimated_cost: null }),
+        progressCell(2, "error", {
+          latency_ms: null,
+          input_tokens: null,
+          output_tokens: null,
+          estimated_cost: null,
+        }),
+      ],
+    });
+
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "逐题进度热力图" })).toBeInTheDocument();
+    expect(screen.getByText("3 / 4 题 · 75%")).toBeInTheDocument();
+    expect(screen.getByText("25.0", { selector: ".score-block strong" })).toBeInTheDocument();
+    const accuracy = screen.getByText("回答准确率").closest("article");
+    const completion = screen.getByText("完成率").closest("article");
+    const latency = screen.getByText("平均延迟").closest("article");
+    expect(within(accuracy!).getByText("50.0%")).toBeInTheDocument();
+    expect(within(completion!).getByText("50.0%")).toBeInTheDocument();
+    expect(within(latency!).getByText("100.0 ms")).toBeInTheDocument();
+
+    const token = screen.getByText("Token").closest("article");
+    expect(token).not.toBeNull();
+    expect(within(token!).getByText("已知小计 30")).toBeInTheDocument();
+    expect(within(token!).getByText(/输入覆盖 2\/3 题 · 输出覆盖 1\/3 题/)).toBeInTheDocument();
+
+    const cost = screen.getByText("估算成本").closest("article");
+    expect(cost).not.toBeNull();
+    expect(within(cost!).getByText("已知小计 $0.001000")).toBeInTheDocument();
+    expect(within(cost!).getByText("费用覆盖 1/3 题，完整总量未知")).toBeInTheDocument();
+
+    const unscored = screen.getByText("未得分").closest("article");
+    expect(unscored).not.toBeNull();
+    expect(within(unscored!).getByText("2")).toBeInTheDocument();
+    expect(within(unscored!).getByText("普通答错 1 · 执行异常 1 · 正确 1"))
+      .toBeInTheDocument();
+  });
+
+  it("shows exact terminal token and cost only after the compact snapshot reconciles", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({
+      total_questions: 3,
+      completed_questions: 3,
+      correct_questions: 1,
+      error_questions: 1,
+      input_tokens: 30,
+      output_tokens: 15,
+      estimated_cost: 0.003,
+    }));
+    apiMocks.runProgressIndex.mockResolvedValue(progressIndexFixture({
+      total_questions: 3,
+      completed_questions: 3,
+      blocks: [{ block_index: 0, response_count: 3 }],
+    }));
+    apiMocks.runProgressBlock.mockResolvedValue({
+      block_index: 0,
+      items: [
+        progressCell(0, "passed"),
+        progressCell(1, "wrong"),
+        progressCell(2, "error"),
+      ],
+    });
+
+    renderPage();
+
+    expect(await screen.findByRole("heading", { name: "逐题进度热力图" })).toBeInTheDocument();
+    const token = screen.getByText("Token").closest("article");
+    expect(token).not.toBeNull();
+    await waitFor(() => expect(within(token!).getByText("45")).toBeInTheDocument());
+    expect(within(token!).getByText("输入 30 / 输出 15")).toBeInTheDocument();
+    expect(within(token!).queryByText(/完整总量未知/)).not.toBeInTheDocument();
+
+    const cost = screen.getByText("估算成本").closest("article");
+    expect(cost).not.toBeNull();
+    expect(within(cost!).getByText("$0.003000")).toBeInTheDocument();
+    expect(within(cost!).getByText("终态精确总量；按冻结价格快照估算"))
+      .toBeInTheDocument();
+  });
+
+  it("refreshes the terminal Run and current evidence page once after progress reconciliation", async () => {
+    const finalRun = runFixture({
+      total_questions: 3,
+      completed_questions: 3,
+      correct_questions: 1,
+      error_questions: 1,
+      input_tokens: 30,
+      output_tokens: 15,
+      estimated_cost: 0.003,
+    });
+    const pendingProgress = deferred<RunProgressIndex>();
+    apiMocks.run.mockResolvedValue(finalRun);
+    apiMocks.responses
+      .mockResolvedValueOnce({
+        items: [responseFixture(1)],
+        total: 2,
+        offset: 0,
+        limit: 100,
+        known_input_tokens: 20,
+        known_output_tokens: 10,
+        input_token_reported_responses: 2,
+        output_token_reported_responses: 2,
+      })
+      .mockResolvedValue({
+        items: [responseFixture(1), responseFixture(2), responseFixture(3)],
+        total: 3,
+        offset: 0,
+        limit: 100,
+        known_input_tokens: 30,
+        known_output_tokens: 15,
+        input_token_reported_responses: 3,
+        output_token_reported_responses: 3,
+      });
+    apiMocks.runProgressIndex.mockReturnValue(pendingProgress.promise);
+    apiMocks.runProgressBlock.mockResolvedValue({
+      block_index: 0,
+      items: [
+        progressCell(0, "passed"),
+        progressCell(1, "wrong"),
+        progressCell(2, "error"),
+      ],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText(/显示 1–1 \/ 共 2 条/)).toBeInTheDocument();
+    expect(apiMocks.responses).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pendingProgress.resolve(progressIndexFixture({
+        total_questions: 3,
+        completed_questions: 3,
+        blocks: [{ block_index: 0, response_count: 3 }],
+      }));
+      await pendingProgress.promise;
+    });
+
+    expect(await screen.findByText(/显示 1–3 \/ 共 3 条/)).toBeInTheDocument();
+    expect(apiMocks.run).toHaveBeenCalledTimes(2);
+    expect(apiMocks.responses).toHaveBeenCalledTimes(2);
+    await act(async () => Promise.resolve());
+    expect(apiMocks.run).toHaveBeenCalledTimes(2);
+    expect(apiMocks.responses).toHaveBeenCalledTimes(2);
+  });
+
   it("shows a delayed backpressure reason and the earliest database time explicitly in UTC", async () => {
     apiMocks.run.mockResolvedValue(runFixture({
       status: "pending",
@@ -490,6 +727,110 @@ describe("RunDetailPage", () => {
     });
     expect(await screen.findByText("gpqa-101")).toBeInTheDocument();
     expect(screen.queryByText("正在读取运行证据")).not.toBeInTheDocument();
+  });
+
+  it("keeps evidence page two selected while a progress block updates", async () => {
+    apiMocks.run.mockResolvedValue(runFixture({ status: "running", finished_at: null }));
+    apiMocks.responses.mockImplementation((_: string, params: { offset?: number }) => {
+      const offset = params.offset ?? 0;
+      return Promise.resolve({
+        items: [responseFixture(offset + 1)],
+        total: 198,
+        offset,
+        limit: 100,
+        known_input_tokens: 1000,
+        known_output_tokens: 2000,
+        input_token_reported_responses: 198,
+        output_token_reported_responses: 198,
+      });
+    });
+    const first = progressIndexFixture({
+      total_questions: 198,
+      completed_questions: 1,
+      correct_questions: 1,
+      error_questions: 0,
+      score: 0.51,
+      completion_rate: 0.51,
+      answered_accuracy: 100,
+      blocks: [{ block_index: 0, response_count: 1 }],
+    });
+    const second = progressIndexFixture({
+      ...first,
+      completed_questions: 2,
+      correct_questions: 2,
+      score: 1.01,
+      completion_rate: 1.01,
+      blocks: [{ block_index: 0, response_count: 2 }],
+    });
+    apiMocks.runProgressIndex.mockResolvedValueOnce(first).mockResolvedValue(second);
+    let blockReads = 0;
+    apiMocks.runProgressBlock.mockImplementation(() => {
+      blockReads += 1;
+      return Promise.resolve({
+        block_index: 0,
+        items: blockReads === 1
+          ? [progressCell(0, "passed")]
+          : [progressCell(0, "passed"), progressCell(1, "passed")],
+      });
+    });
+    const user = userEvent.setup();
+    renderPage();
+    await screen.findByRole("heading", { name: "逐题进度热力图" });
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    expect(await screen.findByText("gpqa-101")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText("通过 2")).toBeInTheDocument(), { timeout: 1800 });
+
+    expect(screen.getByText("gpqa-101")).toBeInTheDocument();
+    expect(apiMocks.responses).toHaveBeenLastCalledWith(
+      "run-001",
+      { offset: 100, limit: 100 },
+    );
+  });
+
+  it("starts a different Run at evidence offset zero instead of reusing page two", async () => {
+    apiMocks.run.mockImplementation((runId: string) => Promise.resolve(
+      runId === "run-002"
+        ? runFixture({
+          id: "run-002",
+          total_questions: 20,
+          completed_questions: 20,
+          model_parameters_snapshot: {
+            model: { name: "Second Model" },
+            benchmark: { slug: "gpqa-mini" },
+          },
+        })
+        : runFixture(),
+    ));
+    apiMocks.responses.mockImplementation((runId: string, params: { offset?: number }) => {
+      const offset = params.offset ?? 0;
+      const total = runId === "run-002" ? 20 : 198;
+      return Promise.resolve({
+        items: offset < total ? [responseFixture(offset + 1)] : [],
+        total,
+        offset,
+        limit: 100,
+        known_input_tokens: total * 10,
+        known_output_tokens: total * 5,
+        input_token_reported_responses: total,
+        output_token_reported_responses: total,
+      });
+    });
+    const user = userEvent.setup();
+    renderSwitchablePage();
+    await screen.findByText("gpqa-1");
+
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    expect(await screen.findByText("gpqa-101")).toBeInTheDocument();
+    await user.click(screen.getByRole("link", { name: "切换 Run" }));
+
+    expect(await screen.findByRole("heading", { name: "Second Model" })).toBeInTheDocument();
+    const nextRunEvidenceCalls = apiMocks.responses.mock.calls.filter(
+      ([runId]) => runId === "run-002",
+    );
+    expect(nextRunEvidenceCalls.length).toBeGreaterThan(0);
+    expect(nextRunEvidenceCalls.every(([, params]) => params.offset === 0)).toBe(true);
+    expect(screen.getByText(/显示 1–1 \/ 共 20 条/)).toBeInTheDocument();
   });
 
   it("returns to the runs list when the run does not exist", async () => {
