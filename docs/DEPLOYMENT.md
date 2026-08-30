@@ -5,7 +5,7 @@
 LLMBenchLab 当前有三条本地运行路径：
 
 - 本地开发兼容路径：SQLite、可选 Redis、FastAPI API、独立 Worker 和 Vite。它便于开发与离线 Mock 验收，但 SQLite 只支持单 Worker 低并发，不能替代 PostgreSQL 并发证据。
-- Phase 2 Compose 可靠执行路径：PostgreSQL 是唯一任务事实来源，Redis Streams 是 at-least-once 通知层，API 与 Worker 是独立进程，migrate 是唯一 Alembic upgrade owner，Nginx 提供前端。
+- Phase 2 Compose 可靠执行路径：PostgreSQL 是唯一任务事实来源，Redis Streams 是 at-least-once 通知层，API 与多个可复制 Worker 是独立进程，migrate 是唯一 Alembic upgrade owner，Nginx 提供前端。标准 Make 入口默认两个 Worker。
 - 可信本地正式评测 CLI：直接连接已迁移数据库，固定下载/转换 MMLU-Pro 或 GPQA-Diamond，在同一进程做 Provider preflight、运行有界 Runner、恢复缺失题并导出全量报告；不要求浏览器、API、Redis 或常驻 Worker。
 
 可靠执行基础已经覆盖租约、心跳、fencing、幂等 Response、取消、有限重试、数据库 reconciliation 和故障恢复；数据库权威的 global/provider/model/run 治理、逐 HTTP attempt ledger、背压、公平 slice、typed audit/archive、Worker progress、固定 exporter/规则、历史延迟及 Mock 容量基线也已进入 Phase 2 工作树，`llmbenchlab-protocol-v1` 评分含义没有改变。部署仍不等于生产高可用；容量边界见 [`PERFORMANCE.md`](PERFORMANCE.md)，告警、故障、retention 与 0005/0004 安全回滚见 [`OPERATIONS.md`](OPERATIONS.md)。
@@ -18,7 +18,7 @@ LLMBenchLab 当前有三条本地运行路径：
 | --- | --- | --- | --- | --- |
 | 本地 Make | `http://127.0.0.1:5173` | `http://127.0.0.1:8000` | `backend/data/llmbenchlab.db`；Redis 可选 | `make dev` 启动 API、独立 Worker、frontend；默认 loopback |
 | 可信本地 CLI | 不需要 | 不需要 | 当前 `DATABASE_URL`；`artifacts/` 中缓存、Benchmark ZIP 与报告 | `llmbenchlab-evaluate` 自己运行 Runner；同一数据库不得有竞争 Worker |
-| Docker Compose | `http://127.0.0.1:8080` | `http://127.0.0.1:8000` | `postgres-data`、`redis-data` named volumes | API/frontend 仅 loopback；PostgreSQL/Redis 无 host port |
+| Docker Compose | `http://127.0.0.1:8080` | `http://127.0.0.1:8000` | `postgres-data`、`redis-data` named volumes | `make dev-multi` 默认两个 Worker；API/frontend 仅 loopback；PostgreSQL/Redis 无 host port |
 
 API 系统端点：
 
@@ -84,6 +84,16 @@ make frontend
 只启动 `make backend` 时，API 可以提交 Run，但没有进程内 Runner；新 Run 保持 `pending`，直到独立 Worker 启动。默认 `REDIS_URL` 为空时 Worker 仍会扫描数据库并执行到期 Run，Redis 只是可选低延迟通知层。
 
 SQLite 本地路径只允许单 Worker。不要启动多个 SQLite Worker，也不要用 SQLite kill/restart 代替真实 PostgreSQL 并发验收。
+
+当 `.env` 的有效 `DATABASE_URL` 已指向迁移到 head 的 PostgreSQL 时，同一 Vite 开发入口可以管理多个 Worker 进程：
+
+```bash
+make dev DEV_WORKERS=2
+```
+
+`DEV_WORKERS` 映射到 launcher-only 的 `LLMBENCHLAB_DEV_WORKER_PROCESSES`，范围为 1–32。单 Worker继续写 `worker.log`；多 Worker分别写 `worker-1.log`、`worker-2.log` 等，并向 API 注入同值的 `LLMBENCHLAB_WORKER_EXPECTED_PROCESSES`。任一 Worker、API 或 frontend 退出时，启动器向同一会话所有剩余进程发送 TERM、逐一等待并传播原退出码。请求 `N>1` 而有效 DSN 不是 PostgreSQL 时，会在创建日志或启动子进程前失败，错误不会回显 DSN。
+
+已有 SQLite 数据不能仅靠改 DSN 出现在 PostgreSQL。需要保留 Model、Benchmark 和 Run 时，必须先让 `pending/running`、active reservation 与 live Worker generation 通过受支持的取消/租约/对账流程收敛，随后停写并使用第 7 节的 SQLite→空 PostgreSQL importer；启动器不会自动迁移或双写。
 
 ### 3.3 直接运行子项目
 
@@ -250,6 +260,7 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | SIGTERM 后等待活动 Run 的应用 grace |
 | `LLMBENCHLAB_WORKER_PROGRESS_FLUSH_SECONDS` | `5` | 真实 scan/claim/progress/heartbeat bit 合并写入 DB 的最大间隔；timer 不生成 keepalive |
 | `LLMBENCHLAB_WORKER_PROGRESS_STALE_SECONDS` | `60` | DB UTC 下 active generation 的 stale cutoff |
+| `LLMBENCHLAB_DEV_WORKER_PROCESSES` | `1` | 仅 `scripts/dev.sh` 使用的本地 Worker 进程数，范围 1–32；大于 1 要求 PostgreSQL |
 | `LLMBENCHLAB_WORKER_EXPECTED_PROCESSES` | `1` | 部署明确声明的最小 live Worker 数；扩缩容必须同步修改 |
 | `LLMBENCHLAB_WORKER_RECOVERY_ALERT_SECONDS` | `60` | expired lease age 告警比较阈值 |
 | `LLMBENCHLAB_MOCK_GENERATION_DELAY_SECONDS` | `0` | 只用于确定性 Mock 故障测试；不改变报告 latency 或协议评分 |
@@ -287,7 +298,8 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_COMPOSE_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | 应用 grace；容器另有 45 秒 stop grace |
 | `LLMBENCHLAB_COMPOSE_WORKER_PROGRESS_FLUSH_SECONDS` | `5` | 映射到 Worker progress flush |
 | `LLMBENCHLAB_COMPOSE_WORKER_PROGRESS_STALE_SECONDS` | `60` | 映射到 Worker stale cutoff |
-| `LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` | `1` | Compose 目标 Worker 数；`--scale` 时必须同步设置 |
+| `LLMBENCHLAB_COMPOSE_WORKER_PROCESSES` | `2` | 标准 Compose 包装器的 Worker replica 数，范围 1–32；当前只有 1–2 经过容量资格 |
+| `LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` | `1`（直接 Compose） | API 的低层 expected 声明；标准包装器从 Worker 数自动设置，直接 `docker compose` 时仍须自行同步 |
 | `LLMBENCHLAB_COMPOSE_WORKER_RECOVERY_ALERT_SECONDS` | `60` | exporter lease recovery 告警阈值 |
 | `LLMBENCHLAB_COMPOSE_REDIS_BLOCK_MILLISECONDS` | `1000` | 映射到 Worker Redis blocking read 上限 |
 | `LLMBENCHLAB_COMPOSE_REDIS_OPERATION_TIMEOUT_SECONDS` | `1` | 容器 Redis 操作 timeout |
@@ -374,16 +386,20 @@ Compose 定义六个 service，其中五个常驻，`migrate` 为一次性任务
 | `redis` | Redis 7 Streams 通知层，AOF everysec | `redis-cli ping`；`redis-data`；无 host port |
 | `migrate` | 唯一 Alembic preflight/upgrade/check owner | 等 PostgreSQL healthy；成功后 exit 0，不常驻 |
 | `api` | FastAPI CRUD、write-only Key 加密、Run commit 与 best-effort publish | 等 migrate 成功；只读挂载 keyring；启动只 head check；`/ready` 为容器 health；loopback API port |
-| `worker` | 独立租约 Worker、stored Key 解密、DB reconciliation、Redis consume/ACK、DB-time process progress | 等 migrate 成功；只读挂载同一 keyring；启动只 head check；dependency-only probe；容器 stop grace 45 秒 |
+| `worker` | 可横向复制的独立租约 Worker、stored Key 解密、DB reconciliation、Redis consume/ACK、DB-time process progress | 等 migrate 成功；只读挂载同一 keyring；启动只 head check；dependency-only probe；容器 stop grace 45 秒 |
 | `frontend` | Nginx 静态站与 `/api/` 同源代理 | 等 API healthy；loopback frontend port；关闭 API request buffering，避免 Key body 被 Nginx 临时落盘 |
 
 ### 6.1 启动、检查和停止
 
 ```bash
 make docker-up
+# 等价的产品化名称
+make dev-multi
+# 显式副本数
+make docker-up WORKERS=2
 ```
 
-该命令执行 `docker compose up --build --wait --wait-timeout 180 --remove-orphans`。检查：
+标准包装器校验副本数后，用同一个值导出 `LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` 并分阶段执行 build、依赖/migrate、Worker、API、frontend。它以全部 Compose replica（包括 exited）判断是否缩容，并另算 running replica 数；扩容/重启时先增加 Worker，要求恰好 `N` 个 fresh active generation 已有真实数据库 scan，且至少 `N-running` 个 generation 在本轮 DB-time watermark 之后启动并完成 scan，再强制重建 API 提高 expected。缩容时先重建 API 降低 expected，再 graceful scale Worker。默认 `N=2`。最后从 API container 有界轮询 `/api/v1/tasks/metrics`，只有 `worker_expected_processes=N`、`worker_registered_processes=N`、`worker_live_processes=N`、`worker_stalled_processes=0`、`worker_shortfall_processes=0` 才返回成功；scan 或 gauges 超时会保留当前 stack 供诊断，不自动删除 volume 或容器。检查：
 
 ```bash
 docker compose ps -a
@@ -619,7 +635,7 @@ operational/security audit 分别至少保留 90/365 天，清理不在请求链
 | 网络 | API/frontend loopback；PG/Redis 内部 Compose 网络；Provider Chat 真 SSE 客户端 | TLS 反向代理、可信 Host/代理、Worker→Provider 全链路 SSE flush/buffering/timeout 核对、网络策略、认证与安全 headers |
 | PostgreSQL | 单实例、named volume、迁移/故障测试 | 托管/HA、TLS、最小权限角色、加密、备份/PITR、RPO/RTO 与真实恢复演练 |
 | Redis | 单实例 AOF、非权威通知层 | 认证/TLS、HA/容量/保留策略、监控；继续保持 DB 事实来源 |
-| Worker | 租约/心跳/fencing/重试/取消；数据库权威四层治理、attempt ledger、背压/公平 slice；DB-time scan/claim/progress/heartbeat aggregate；真实双 Worker Mock 基线 | 滚动排空自动化、更高 Worker 数/真实 Provider 的独立容量与成本规划 |
+| Worker | 租约/心跳/fencing/重试/取消；数据库权威四层治理、attempt ledger、背压/公平 slice；DB-time scan/claim/progress/heartbeat aggregate；标准 Compose 默认双 Worker且按方向扩缩并校验 expected/registered/live/stalled/shortfall；真实双 Worker Mock 基线 | 滚动排空自动化、三个以上 Worker/真实 Provider 的独立容量与成本规划 |
 | Secrets | Web write-only；AES-GCM 密文入库；API/Worker 共享独立 keyring；legacy env 可用 | 身份/对象授权、KMS/HSM、短期凭据、批量重加密、轮换审计与每进程最小权限 |
 | SSRF/数据外发 | 远端 HTTPS、HTTP 仅 loopback、禁重定向与有界正文 | allowlist、DNS/IP 验证、出站代理、元数据阻断、外发审批 |
 | 可观测性 | 受控 JSON 日志源、组件健康、DB gauges、typed audit/history、固定低基数 Prometheus exporter、8 条规则、Worker progress、逐题安全 Provider metadata | 受认证 Dashboard、统一 traces、告警发送/值班集成、生产 SLO、数据库管理员级不可篡改审计 |

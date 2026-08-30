@@ -15,9 +15,9 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 | API 与进程边界测试 | FastAPI Schema、状态码、秘密安全、Run 提交与 API/Worker 分离 | `backend/tests/test_api.py`、`test_run_dispatch.py`、`test_process_boundaries.py` | 禁止 |
 | Governance / audit 测试 | policy/ledger 完整性、typed history/audit、Provider/credential evidence，以及 canonical archive/离线 verify/精确 reconcile/restore/delete | `test_governance.py`、`test_audit_api.py`、`test_audit_archive.py`、`test_audit_retention.py`、`test_audit_retention_cli.py` | 禁止；SQLite/Mock/fixture；真实 PG retention 只连测试库 |
 | 租约与 Worker 测试 | 条件领取、fencing、心跳、取消、幂等 Response、重试/恢复、队列 ACK，以及 generation 级 DB-time scan/claim/lease-heartbeat/progress/stale | `test_run_leases.py`、`test_evaluation_runner_reliability.py`、`test_worker.py`、`test_worker_progress.py`、`test_worker_probe.py` | 禁止；SQLite/假队列 |
-| Metrics / alert / logging 测试 | 固定 Prometheus exposition、snapshot/hard cap/single-flight/取消竞态、精确八规则/Runbook、全部生产 logger source/第三方 handler 治理，以及组合开发启动器的日志分流/退出传播 | `test_prometheus_exporter.py`、`test_prometheus_alert_rules.py`、`test_logging.py`、`test_logging_sources.py`、`test_dev_script.py` | 禁止；SQLite/假队列/标准库 JSON/假子进程 |
+| Metrics / alert / logging / 启动器测试 | 固定 Prometheus exposition、snapshot/hard cap/single-flight/取消竞态、精确八规则/Runbook、全部生产 logger source/第三方 handler 治理，以及本地/Compose 多 Worker启动、日志分流、环境优先级、gauges 轮询与退出传播 | `test_prometheus_exporter.py`、`test_prometheus_alert_rules.py`、`test_logging.py`、`test_logging_sources.py`、`test_dev_script.py`、`test_compose_up_script.py` | 禁止；SQLite/假队列/标准库 JSON/假子进程/假 Docker |
 | 迁移与导入回归 | SQLite/真实 PostgreSQL migration、`0005` populated downgrade refusal/空库往返，以及 13 表 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
-| 真实基础设施集成 | PostgreSQL 并发领取/取消竞态、Redis Streams PEL/ACK/重复投递 | `backend/tests/integration/` 与 importer 的 `integration` 用例 | 只连接显式测试 PostgreSQL/Redis；禁止 Provider |
+| 真实基础设施集成 | PostgreSQL 并发领取/取消竞态、不同 Benchmark Run 被不同 owner 领取且同一 Run lease 唯一、Redis Streams PEL/ACK/重复投递 | `backend/tests/integration/` 与 importer 的 `integration` 用例 | 只连接显式测试 PostgreSQL/Redis；禁止 Provider |
 | Mock 端到端 Smoke | API 提交 pending Run → 独立 WorkerService → Responses → Leaderboard/Metrics | `backend/tests/test_smoke.py`，marker 为 `smoke` | 禁止 |
 | Compose 故障验收 | 六服务拓扑、双 Worker、进程/Redis/lease 故障、治理/ledger、取消、重复消息、Worker expected count 与 `0005` 安全回滚 | `scripts/phase2_acceptance.py` / `make phase2-acceptance` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | Mock 容量基线 | 真实 PostgreSQL 16/Redis 7、全有限 policy、1/2 Worker、精确 `202/429` backlog、cooperative quantum、跨 Model 公平性、lease/Redis/重复通知故障及 DB/queue/ledger/audit 对账 | `scripts/phase2_capacity.py` / `make phase2-capacity` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
@@ -62,11 +62,25 @@ npm ci
 make test       # 后端 pytest + 前端 Vitest
 make lint       # Ruff + ESLint + TypeScript 类型检查
 make smoke      # 只跑完全离线的后端垂直切片
+make dev-multi  # PostgreSQL/Redis Compose 默认双 Worker，并验证 gauges
 make phase2-acceptance  # 隔离的真实 Compose 九场景可靠性验收
 make phase2-capacity    # PostgreSQL 16/Redis 7/1→2 Worker 的 Mock 容量基线
 make phase2-slo         # clean commit 上固定 v2 四-cell、1 warm-up + 5 measured 的单机资格
 make format     # 运行项目约定的格式化器
 ```
+
+多 Worker启动层的纯离线目标回归为：
+
+```bash
+cd backend
+uv run pytest tests/test_dev_script.py tests/test_compose_up_script.py
+```
+
+它用假子进程和假 Docker 覆盖 `1..32` 校验、SQLite fail-fast、独立日志、信号清理、
+Compose scale/expected 同步与 30 次有界 gauges 超时，不会启动真实 Provider。租约并发
+断言还必须在已迁移的显式 PostgreSQL 测试库上运行
+`test_postgres_leases.py`；没有 `LLMBENCHLAB_TEST_POSTGRES_URL` 时该层按设计跳过，不能
+把 skip 写成真实 PostgreSQL 通过。
 
 格式化会修改文件；仅检查时使用下面的直接命令。提交 PR 前还应执行前端 production build。
 
@@ -148,7 +162,7 @@ npm run build
 docker compose config --quiet
 ```
 
-这只验证配置渲染，不证明镜像已构建、migration 已完成或服务健康。普通启动验证使用 `make docker-up`、检查 `/api/v1/live`、`/health`、`/ready` 和 Worker probe，最后执行 `make docker-down`。真实故障验收使用 `make phase2-acceptance`，容量基线使用 `make phase2-capacity`；两者都创建唯一 Compose project、随机 loopback 端口和隔离卷，失败路径也执行精确 `down -v` 并检查无项目残留。不得对日常项目名手工套用其清理命令。
+这只验证配置渲染，不证明镜像已构建、migration 已完成或服务健康。普通启动验证使用 `make docker-up` / `make dev-multi`；标准包装器默认两个 Worker，先拒绝 stale generation 冒充本轮新增 Worker scan，并把 exited replica 纳入缩容方向判断；只有 `/api/v1/tasks/metrics` 收敛到 `expected/registered/live/stalled/shortfall=2/2/2/0/0` 才成功。随后检查 `/api/v1/live`、`/health`、`/ready` 和 Worker probe，最后执行 `make docker-down`。真实故障验收使用 `make phase2-acceptance`，容量基线使用 `make phase2-capacity`；两者都创建唯一 Compose project、随机 loopback 端口和隔离卷，失败路径也执行精确 `down -v` 并检查无项目残留。不得对日常项目名手工套用其清理命令。
 
 ## 5. 后端测试覆盖
 

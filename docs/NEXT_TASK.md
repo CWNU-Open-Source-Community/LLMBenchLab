@@ -37,6 +37,18 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；随后的兼容修复已在自动备份后将当时重建库前进到 `0006` 并通过 startup/check。
 
+## 进行中：日常多 Worker评测入口维护
+
+本轮只把既有 PostgreSQL lease/fencing 能力暴露到日常启动入口，不改 P2-07 范围。
+`make dev DEV_WORKERS=N` 管理本地 PostgreSQL Worker进程，`make dev-multi` /
+`make docker-up WORKERS=N` 默认两个 Compose Worker并按扩/缩方向切换 API expected，
+最终校验 expected/registered/live/stalled/shortfall；
+SQLite 多 Worker在服务启动前拒绝。离线启动器 `42 passed`，迁移到 head 的隔离
+PostgreSQL 16 跨 Benchmark/唯一 lease 回归 `2 passed`，隔离 Compose 的 `2→1→2`
+扩缩与五 gauges/cleanup 通过；完整 lint/test/smoke/build/config 也已通过。commit/push 与
+exact-SHA CI 尚待完成，所以本维护仍为 `in_progress`。它完成后，本文件的下一独立任务
+仍是下面的 P2-07 最小只读 verifier。
+
 ## 已完成：建立 P2-07 工作包
 
 1. 已按 AGENTS/PLANS 新建独立执行计划与工作日志，记录目标、非目标、验收、风险和实施步骤。
@@ -65,6 +77,7 @@ P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最�
 
 - P2-06 已完成，不再重复其资格或证据门禁。
 - P3-06 热力图/live metrics 的 fixed-block 目标回归、完整本地门禁、目标 Run 浏览器验收、12,032/20,000 自动化虚拟化边界、实现 commit/push 与精确 SHA CI 已全部完成；P2-07 现在是下一项但仍须在实际实施开始时才标成 `in_progress`。
+- 日常多 Worker入口维护只有在完整本地门禁、实现 commit/push 和 exact-SHA CI 全绿后才能标成 completed；这不等于 3+ Worker、真实 Provider、HA 或 SLA 资格。
 - P2-07：backup/restore、Redis 重建、告警处置与约定故障矩阵必须有隔离真实 PostgreSQL/Redis、Mock-only Compose、秘密审查、独立 commit/push 和精确 SHA CI 证据，才能标记 completed。
 - Phase 2：只有 P2-07 也完成后才可评估 `completed`；在此之前保持 `in_progress`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展、WORM 或 Provider exactly-once。
 

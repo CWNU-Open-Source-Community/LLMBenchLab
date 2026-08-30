@@ -1,6 +1,6 @@
 # LLMBenchLab 架构
 
-本文描述 LLMBenchLab 当前 Phase 1 产品边界、Phase 2 可靠执行/治理/可观测性工作树，以及可信本地 MMLU-Pro/GPQA-Diamond 真实评测垂直切片。前端仍通过 REST API 操作同一组领域对象，但 API 不执行评测：PostgreSQL/数据库是任务、四层治理、逐 Provider attempt ledger、typed audit、Worker progress 与评分证据的唯一事实来源，Redis Streams 是非权威的 at-least-once 通知层，独立 Worker 或受信本地 CLI 用数据库租约、心跳与 fencing 执行同一 Runner。SQLite 保留为单 Worker 本地兼容路径。Exporter、告警和普通文件 archive 都是数据库事实的受控投影，不是第二状态机。Phase 2/3 总状态没有因此完成，这不是公网、HA、生产架构或 SLA 声明。
+本文描述 LLMBenchLab 当前 Phase 1 产品边界、Phase 2 可靠执行/治理/可观测性工作树，以及可信本地 MMLU-Pro/GPQA-Diamond 真实评测垂直切片。前端仍通过 REST API 操作同一组领域对象，但 API 不执行评测：PostgreSQL/数据库是任务、四层治理、逐 Provider attempt ledger、typed audit、Worker progress 与评分证据的唯一事实来源，Redis Streams 是非权威的 at-least-once 通知层，多个独立 Worker replica 或受信本地 CLI 用数据库租约、心跳与 fencing 执行同一 Runner。每个 Worker 同时只持有一个 Run，因此一个长期 Provider 请求只占用一个 Worker；其他 Worker仍可领取不同 Run。SQLite 保留为单 Worker 本地兼容路径。Exporter、告警和普通文件 archive 都是数据库事实的受控投影，不是第二状态机。Phase 2/3 总状态没有因此完成，这不是公网、HA、生产架构或 SLA 声明。
 
 ## 架构目标与原则
 
@@ -594,7 +594,7 @@ Alembic `20260827_0004` 引入治理/审计表与 Run/Response 字段；`2026082
 
 ## 部署拓扑与安全边界
 
-本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。`make setup` 与其他相关启动入口通过 `uv run --script` 显式选择满足 `>=3.11` 的独立 CPython，再由 bootstrap 为 Web credential 生成 Git 忽略、权限为 `0600` 的 `.secrets/credential-keys.json`，API 与 Worker 读取同一文件；这避免 `PATH` 中其他 Python 实现破坏安全原子安装语义，也不会为 Docker-only 入口同步宿主后端依赖。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六个 service：长运行的 PostgreSQL、Redis、API、Worker、frontend，以及一次性 migrate；同一只读 Compose secret 只挂载到 API/Worker。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
+本地 Make 模式启动 API、独立 Worker 和 Vite，默认 SQLite 且 Redis 可选；SQLite 只支持一个 Worker。连接 PostgreSQL 时，`make dev DEV_WORKERS=N` 可由同一启动器管理多个独立 Worker 进程，并把每个进程写入独立私有日志；非 PostgreSQL 请求 `N>1` 会在启动前拒绝。`make setup` 与其他相关启动入口通过 `uv run --script` 显式选择满足 `>=3.11` 的独立 CPython，再由 bootstrap 为 Web credential 生成 Git 忽略、权限为 `0600` 的 `.secrets/credential-keys.json`，API 与 Worker 读取同一文件；这避免 `PATH` 中其他 Python 实现破坏安全原子安装语义，也不会为 Docker-only 入口同步宿主后端依赖。可信本地 CLI 是第三条运维入口：它直接复用当前数据库与 Runner，因此运行时必须停止连接同库的常规 API/Worker 并独占数据库，默认把下载、转换 ZIP 与报告放入 Git 忽略的 `artifacts/`。Compose 包含六类 service：长运行的 PostgreSQL、Redis、API、可复制 Worker、frontend，以及一次性 migrate；`make dev-multi` / `make docker-up` 默认把 Worker scale 与 API 的 expected minimum 同时设为 2，并在返回前核对数据库 gauges。同一只读 Compose secret 只挂载到 API/Worker。PostgreSQL/Redis 各自使用 named volume，Redis 启用 AOF；API/frontend host port 明确绑定 loopback，DB/Redis 无 host port。CORS 只允许配置的前端 Origin。
 
 当前 Compose 只是本地开发/故障验收拓扑，示例数据库密码不是生产秘密管理。前端 Nginx 位于浏览器→API 路径，不代表 Worker→Provider 路径上的 Cloudflare、Caddy 或其他 Gateway；真 SSE 必须在这条上游链路上保留正确 Content-Type 并持续 flush，且仍受每层独立的缓冲/超时限制。虽然远端 Provider 已强制 HTTPS、明文 HTTP 只允许 loopback，`base_url` 的允许范围仍未达到公网多租户要求；有效的 HTTPS URL 仍可能指向私网/云元数据或发生 DNS rebinding。本版本仅供受信任的本地操作者使用，不应直接暴露公网。后续公开部署必须增加鉴权、TLS、URL allowlist、DNS/IP 重绑定防护、出站网络策略、上传隔离、权限拆分、备份/PITR 和资源配额。当前不声称生产、HA 或灾备 SLA。
 
@@ -608,7 +608,7 @@ v2 aggregate schema 为 `llmbenchlab-phase2-slo-evidence-v2`。aggregate 与 raw
 
 ## 当前限制
 
-- PostgreSQL 租约已支持受限多 Worker 协调；SQLite 仍只适合单 Worker、单机低并发。这不是无限水平扩展或 HA 保证。
+- PostgreSQL 租约已支持受限多 Worker 协调；普通 Compose 入口默认两个 replica，按扩/缩方向同步 API expected，并在启动时验证 expected/registered/live/stalled/shortfall。SQLite 仍只适合单 Worker、单机低并发。这不是无限水平扩展或 HA 保证；当前容量资格不覆盖三个以上 Worker。
 - managed Web/API Run 已实现数据库权威四层限流/预算/背压与公平调度；默认 policy 可关闭限制，`legacy_unmanaged` CLI 不覆盖，当前 global scope 锁会串行化新 admission，Mock 容量基线也不是生产调优结论。
 - typed audit/history/archive、低基数 exporter、八条规则、Worker DB-time progress 与逐题 Provider metadata 已实现，但 append-only/普通文件 hash 不是 WORM；尚无告警发送器、tracing/认证监控面板、`resume` canary 独立事件或公网对象级访问控制。
 - at-least-once 不能防止 `send_started` 后崩溃留下 Provider 幽灵请求，或 Provider 响应到本地 COMMIT 之间的重复远程调用/费用；本地 ledger 幂等和保守结算都不是远端 exactly-once/账单真值。

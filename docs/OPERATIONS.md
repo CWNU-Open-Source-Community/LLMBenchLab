@@ -253,21 +253,46 @@ Run 终态、defer 或 exhaust 转换会先在短事务中提交，再做 lease 
 - 增加 Worker 不会自动提高治理 limit；也不能消除 Provider fixed-minute 或 lifetime budget。
 - 当前实测只覆盖最多 2 个 Worker；更高数量必须重新测量。
 
-Compose 扩到两个 Worker：
+标准 Compose 入口默认启动两个 Worker，并在返回成功前核对 API 暴露的
+`expected/registered/live/stalled/shortfall=2/2/2/0/0`：
 
 ```bash
-LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES=2 \
-  docker compose up -d --no-deps --scale worker=2 worker
+make dev-multi
+# 等价入口，也可显式声明规模
+make docker-up WORKERS=2
 ```
 
-缩到一个 Worker：
+缩到一个 Worker时也必须走同一包装器，让 API expected 声明与实际 scale
+一起变化：
 
 ```bash
-LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES=1 \
-  docker compose up -d --no-deps --scale worker=1 worker
+make docker-up WORKERS=1
 ```
 
-`LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` 是部署声明，不从历史进程行猜测；规模与 expected 不一致会产生有意的 shortfall。缩容依赖 SIGTERM grace。先观察活动 Run，等待被停止 Worker 排空；若 grace 耗尽，未完成 lease 留到数据库自然过期，由 peer 以递增 token 接管。缩容后检查 Worker health、DB-time registered/live/stalled、`running/expired_running/retry_scheduled`、active reservations 和 Response 唯一性。
+`WORKERS` 映射到 launcher-only 的
+`LLMBENCHLAB_COMPOSE_WORKER_PROCESSES`，包装器再用同一值设置低层
+`LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` 和 `--scale worker=N`。包装器把 exited
+replica 也纳入扩缩方向判断；扩容/重启先启动 Worker，要求 fresh active generation 数
+精确为 `N`，并用应用数据库时钟 watermark 证明至少 `N-running` 个新 generation 已完成
+本轮 scan，随后才重建 API 提高 expected；缩容先重建 API 降低 expected，再让 Compose
+graceful scale Worker。
+不要只对 `worker` service 执行 `--no-deps --scale`：那不会重建 API，旧 expected
+会与实际规模漂移。直接使用低层 `docker compose` 时，操作者必须自行同步两者并核对
+gauges；标准包装器最多轮询 30 秒，超时非零且保留栈供诊断。
+
+连接已经迁移到 head 的 PostgreSQL 时，本地 API/Vite 开发会话也可启动多个独立
+Worker 进程：
+
+```bash
+make dev DEV_WORKERS=2
+```
+
+每个 Worker 同时持有一个 Run，Run 内仍可有 1–4 个 Provider 请求并发。因此未被
+governance 限制时，潜在外发并发上界约为 `Worker 数 × Run concurrency`；增加
+Worker 会放大 Provider 限流和费用风险。一个长时间 SSE/HTTP 请求只占住其所在
+Worker，peer 仍能领取其他数据集的 Run；若所有 Worker 都被长请求占满，队列仍会等待。
+
+缩容依赖 SIGTERM grace。先观察活动 Run，等待被停止 Worker 排空；若 grace 耗尽，未完成 lease 留到数据库自然过期，由 peer 以递增 token 接管。缩容后检查 Worker health、DB-time registered/live/stalled、`running/expired_running/retry_scheduled`、active reservations 和 Response 唯一性。
 
 ### 6.2 Worker crash/lease expiry
 

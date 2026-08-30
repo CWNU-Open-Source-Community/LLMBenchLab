@@ -1,12 +1,13 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 
-.PHONY: help setup dev backend worker frontend test lint format smoke migrate phase2-acceptance phase2-capacity phase2-slo docker-up docker-down
+.PHONY: help setup dev dev-multi backend worker frontend test lint format smoke migrate phase2-acceptance phase2-capacity phase2-slo docker-up docker-down
 
 help:
 	@echo "LLMBenchLab developer commands:"
 	@echo "  make setup        Install dependencies and initialize the local database"
-	@echo "  make dev          Start API, independent Worker, and frontend together"
+	@echo "  make dev          Start local API, Worker(s), and frontend (DEV_WORKERS=N needs PostgreSQL)"
+	@echo "  make dev-multi    Start PostgreSQL/Redis/API/frontend with two Workers (WORKERS=N)"
 	@echo "  make backend      Start only the FastAPI development server"
 	@echo "  make worker       Start only the independent task Worker"
 	@echo "  make frontend     Start only the Vite development server"
@@ -25,7 +26,13 @@ setup:
 	@./scripts/setup.sh
 
 dev:
-	@./scripts/dev.sh
+	@if [[ "$(origin DEV_WORKERS)" != "undefined" ]]; then \
+		LLMBENCHLAB_DEV_WORKER_PROCESSES="$(DEV_WORKERS)" ./scripts/dev.sh; \
+	else \
+		./scripts/dev.sh; \
+	fi
+
+dev-multi: docker-up
 
 backend:
 	@./scripts/bootstrap_credential_keyring.sh
@@ -82,7 +89,11 @@ phase2-slo:
 
 docker-up:
 	@./scripts/bootstrap_credential_keyring.sh
-	@docker compose up --build --wait --wait-timeout 180 --remove-orphans
+	@if [[ "$(origin WORKERS)" != "undefined" ]]; then \
+		LLMBENCHLAB_COMPOSE_WORKER_PROCESSES="$(WORKERS)" ./scripts/compose_up.sh; \
+	else \
+		./scripts/compose_up.sh; \
+	fi
 
 docker-down:
 	@docker compose down --remove-orphans

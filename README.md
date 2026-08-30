@@ -34,7 +34,7 @@ LLMBenchLab 是一个面向个人开发者与研究人员的轻量级 LLM 评测
 - **真实模型本地入口**：`llmbenchlab-evaluate prepare/run/resume/report` 完成下载、模型发现、付费 canary、显式确认、有界执行、缺失题恢复和全量证据导出；Key 只来自环境变量或隐藏输入，远端 Provider 必须使用 HTTPS，明文 HTTP 仅允许 loopback。
 - **确定性评分**：内置三类 Evaluator；解析失败和单题调用失败严格计 0 分，并保留错误证据。
 - **可解释指标与动态进度**：严格总分 `score`、完成率 `completion_rate` 和已回答准确率 `answered_accuracy` 分开呈现，避免把缺失回答隐藏在成功样本中；Run Detail 以固定 512 题轻量 block 呈现通过、普通答错、执行异常、未执行四态热力图，并从后端同快照证据实时刷新主指标，避免把 `error_questions` 误读为全部错题。
-- **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复；大快照加载移出事件循环，已领取 Run 在物化题目时仍可续租。
+- **可靠任务执行基础**：API 先提交 Run，再 best-effort 发送 Redis Streams 通知；独立 Worker 以数据库时间、租约和 fencing token 领取任务，并通过数据库扫描从通知丢失或进程故障中恢复；标准 Compose PostgreSQL 入口默认提供两个 Worker，使不同 Run 可占用不同执行槽；大快照加载移出事件循环，已领取 Run 在物化题目时仍可续租。
 - **幂等与恢复**：同一 Run/Question 只有一条计分证据；租约心跳、有限 attempt、退避、取消、过期接管和 dead-letter 都由数据库裁决，Redis 不是状态数据库。
 - **数据库权威治理**：Web/API admission 把版本化完整 policy 冻结进 Run；global/provider/model/run 四层并发、RPM/TPM 和累计预算在固定锁序中共同裁决，backlog 满时在提交前稳定拒绝，Token/cost hard limit 缺少显式上界或价格时 fail closed。非显式输入估算不会冒充 hard reservation；actual usage 仍保留，只有实际用量超过显式预留才触发对应 overdraw。
 - **逐 Provider attempt 账本与公平调度**：每次 HTTP attempt 先 reserve、再持久化 `send_started`、最后 actual/conservative settlement；可证明未发送的 release 保留终态 ledger，另起 generation 并重试当前未发送 ordinal，不重置之前已发送的 HTTP retry。Worker 每个 lease 只新增有界 question quantum，按最久未获服务顺序 cooperative yield，不把让出误计为失败。
@@ -137,9 +137,18 @@ make setup
 make dev
 ```
 
-`make setup` 会让 `uv` 显式选择 CPython，按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，控制台只显示地址与日志位置；三个服务的详细输出分别追加到 Git 忽略的 `artifacts/dev-logs/api.log`、`worker.log` 和 `frontend.log`，`Ctrl-C` 会一起停止。
+`make setup` 会让 `uv` 显式选择 CPython，按锁文件安装前后端依赖、仅在 `.env` 不存在时从 `.env.example` 创建它，并执行 Alembic migration；已有 `.env` 不会被覆盖。该命令可重复执行。若检测到由早期开发版自动建表留下的未版本化 SQLite，只有在结构与完整性严格匹配已知版本时才会先创建同目录 `.bak` 一致性备份并无损收养；未知或部分结构会在写入版本标记前停止。普通 API/Worker 启动不会隐式建表，未迁移时会提示先运行 `make setup` 或 `make migrate`。`make dev` 在一个终端启动 API、独立 Worker 和 frontend，控制台只显示地址与日志位置；单 Worker 日志保持为 `worker.log`，PostgreSQL 下使用 `make dev DEV_WORKERS=2` 时改为私有的 `worker-1.log`、`worker-2.log`。`Ctrl-C` 或任一子进程退出会停止同一开发会话中的全部服务。
 
-默认地址：
+需要并行执行多个 Benchmark Run 时，使用已支持多 Worker 租约的 PostgreSQL 模式。最简单的入口默认启动两个 Worker，并在返回前校验 `expected/registered/live/stalled/shortfall=2/2/2/0/0`：
+
+```bash
+make dev-multi
+# 或显式设置：make dev-multi WORKERS=2
+```
+
+该模式的 Web 地址为 `http://127.0.0.1:8080`。本地 `make dev` 仍默认使用 SQLite 单 Worker；若它连接的是 PostgreSQL，也可用 `DEV_WORKERS=2` 启动两个本地 Worker 进程。请求多个 Worker而数据库不是 PostgreSQL 时，启动器会在创建日志或启动服务前拒绝。现有 SQLite 数据不会自动复制到 Compose PostgreSQL；需要保留它时必须在活动 Run、reservation 和 Worker 全部收敛并停写后，使用文档化的 SQLite→空 PostgreSQL importer。
+
+普通 `make dev` 的默认地址：
 
 - Web：`http://127.0.0.1:5173`
 - API：`http://127.0.0.1:8000`
@@ -160,7 +169,7 @@ curl -sS http://127.0.0.1:8000/api/v1/metrics/prometheus
 
 API 为每个请求自行生成 `X-Request-ID` 并在响应中返回，不信任或回显客户端提供的同名 header。LLMBenchLab 生产日志调用只允许无格式参数的字面量消息；结构化 extra 除字段白名单外还逐字段执行固定枚举、UUID/Redis stream ID 与有限数值规范化，非法 ID 被省略，未知 method/code 只输出固定 `unsupported`。Redis Run 通知本身也只接受 canonical UUID。外部 logger 的动态消息不进入 JSON，原始 Uvicorn access handler 关闭。凭据和敏感内容仍绝不得放在 URL、header、请求路径或日志字段中。
 
-需要跟踪组合启动日志时可运行 `tail -f artifacts/dev-logs/api.log artifacts/dev-logs/worker.log artifacts/dev-logs/frontend.log`；需要在前台分别观察时，可在三个终端运行 `make backend`、`make worker` 和 `make frontend`。只启动 API 时，新 Run 会持久化为 `pending`，但不会在 API 进程内执行。本地 SQLite 只支持一个 Worker；Redis URL 可留空，Worker 将使用数据库对账。所有命令可通过 `make help` 查看；更完整的环境变量、迁移和排障说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
+需要跟踪组合启动日志时可运行 `tail -f artifacts/dev-logs/api.log artifacts/dev-logs/worker*.log artifacts/dev-logs/frontend.log`；需要在前台分别观察时，可在三个终端运行 `make backend`、`make worker` 和 `make frontend`。只启动 API 时，新 Run 会持久化为 `pending`，但不会在 API 进程内执行。本地 SQLite 只支持一个 Worker；Redis URL 可留空，Worker 将使用数据库对账。所有命令可通过 `make help` 查看；更完整的环境变量、迁移和排障说明见 [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md)。
 
 ## Mock Demo：完整离线流程
 
@@ -325,10 +334,11 @@ npm run build
 
 ## Docker Compose
 
-Docker 模式包含六个 service：长运行的 `postgres`、`redis`、`api`、`worker`、`frontend`，以及一次性 `migrate`。`migrate` 是 Compose 中唯一执行 Alembic 升级的服务；API/Worker 只在启动时检查 schema 已在 head。PostgreSQL 和开启 AOF 的 Redis 分别使用 named volume：
+Docker 模式包含六类 service：长运行的 `postgres`、`redis`、`api`、可横向复制的 `worker`、`frontend`，以及一次性 `migrate`。`migrate` 是 Compose 中唯一执行 Alembic 升级的服务；API/Worker 只在启动时检查 schema 已在 head。PostgreSQL 和开启 AOF 的 Redis 分别使用 named volume。标准入口默认启动两个 Worker；显式设置只能改变部署规模，不会自动提高 governance limit：
 
 ```bash
 make docker-up
+make docker-up WORKERS=2
 ```
 
 默认地址：
@@ -421,7 +431,7 @@ uv run llmbenchlab-audit-retention delete \
 
 ## 当前限制
 
-- SQLite 兼容路径只支持一个 Worker 和低并发；多 Worker 的真实租约协调路径以 PostgreSQL 为目标。
+- SQLite 兼容路径只支持一个 Worker 和低并发；多 Worker 的真实租约协调路径以 PostgreSQL 为目标，普通 Compose 入口默认 2 个 Worker。当前容量资格只覆盖 1–2 个 Worker，3 个以上必须重新测量。
 - API 重启不拥有或改写 Run；Worker 异常退出后由数据库租约过期和对账恢复。这是受限的可靠基础，不是 HA/SLA 保证。
 - 取消是协作式的；已经发出的上游请求可能要等到返回或超时。
 - at-least-once 恢复不保证 Provider 调用或计费 exactly-once；数据库只保留一份幂等的 Response/费用证据。
