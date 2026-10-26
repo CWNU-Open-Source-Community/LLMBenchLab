@@ -31,7 +31,7 @@
 | Phase 0 | 项目治理和架构 | 可执行的需求、架构、协议、ADR 与持续文档流程 | `completed` | [PHASE-0-GOVERNANCE.md](phases/PHASE-0-GOVERNANCE.md) |
 | Phase 1 | MVP 垂直链路 | Mock 模型到 Run、逐题结果与排行榜的离线闭环 | `completed` | [PHASE-1-MVP.md](phases/PHASE-1-MVP.md) |
 | Phase 2 | 可靠性与任务执行 | 可靠 Worker、治理/审计、P2-01、P2-06 与 observational overdraw 维护已交付；P2-07 工作包已建立但功能尚未实现 | `in_progress` | [PHASE-2-RELIABILITY.md](phases/PHASE-2-RELIABILITY.md) |
-| Phase 3 | 标准 Benchmark 与代码评测 | 已有 MMLU-Pro/GPQA 可信本地切片；IFEval、沙箱与完整插件体系待完成 | `in_progress` | [PHASE-3-BENCHMARKS.md](phases/PHASE-3-BENCHMARKS.md) |
+| Phase 3 | 标准 Benchmark 与代码评测 | 已有 MMLU-Pro/GPQA 可信本地切片；P3-06 Run Detail 热力图/live metrics 已完成实现、push 与精确 SHA CI，IFEval、沙箱与完整插件体系待完成 | `in_progress` | [PHASE-3-BENCHMARKS.md](phases/PHASE-3-BENCHMARKS.md) |
 | Phase 4 | Judge、Arena 与长上下文 | 可校准 Judge、Pairwise Judge、个人 Arena 和长上下文评测 | `planned` | [PHASE-4-JUDGE-ARENA.md](phases/PHASE-4-JUDGE-ARENA.md) |
 | Phase 5 | Agent、私有与 Live Benchmark | 工具调用轨迹、隔离私有集和持续更新的 Live Benchmark | `planned` | [PHASE-5-AGENT-LIVE.md](phases/PHASE-5-AGENT-LIVE.md) |
 | Phase 6 | 公共发布 | 多用户、鉴权、运维加固和正式版本发布 | `planned` | [PHASE-6-PUBLIC-RELEASE.md](phases/PHASE-6-PUBLIC-RELEASE.md) |
@@ -181,7 +181,7 @@
 - 独立 Worker、原子领取、数据库时间租约、心跳、单调 fencing token、逐题幂等、有限重试、取消、过期接管和 dead-letter；大 Run 快照加载移出事件循环并保持租约心跳，dead-letter 前从持久化 Response 重聚合证据。
 - Alembic `0004` 的 policy/scope/minute bucket/question execution/Provider reservation/audit event 六类治理表及 `0005` 的 Worker process/progress 表与 bounded audit indexes；Run/Response 证据字段和 13 表 SQLite→PostgreSQL importer。
 - managed Run 冻结 policy/hash 与显式 overrides；global/provider/model/run 四层 concurrency、固定窗口 RPM/TPM、global/run lifetime request/Token/USD budget 和逐 Provider HTTP attempt ledger。
-- 当前 data-only head `20260830_0007` 按 ADR-0018 将观测 input 估算与 hard reservation 分离：无显式 input bound 时不生成 input reservation/reserved cost，actual usage 仍保存；显式 input/output 上界及由完整上界和价格派生的 reserved cost 超额继续 fail closed。本地完整门禁、当前 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与远程 CI 4/4 均通过。
+- data-only `20260830_0007` 按 ADR-0018 将观测 input 估算与 hard reservation 分离：无显式 input bound 时不生成 input reservation/reserved cost，actual usage 仍保存；显式 input/output 上界及由完整上界和价格派生的 reserved cost 超额继续 fail closed。本地完整门禁、当前 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与远程 CI 4/4 均通过。当前 head `20260830_0008` 按 ADR-0019 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并替换 Provider 类型 check 与远程配置 check，以加入显式 Chat Completions / Responses / Messages Adapter；不改评分或 protocol-v1。
 - materialized counter 只作 ledger 投影；counter、policy/hash 或 Run override 漂移 fail closed。confirmed pre-send release 按 ADR-0011 不消耗未发送 HTTP retry。
 - 有限 backlog、typed `429`、database not-before、question quantum、dispatch/failure 分离和跨 Model 公平排序。
 - typed audit、Run audit、task history/latency、Provider metadata、credential 非秘密事件和前端治理状态；P2-06 实现 SHA `9a20676…` 另交付固定低基数 Prometheus exporter/八条规则、canonical retention archive/verify/reconcile/restore/delete、Worker DB-time progress/liveness 聚合与全日志源治理。
@@ -208,6 +208,7 @@
 | P2-04 生命周期可靠性 | 可靠基础已交付 | retry/取消/恢复/dead-letter/终态重算及三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；外部调用仍不保证 exactly-once |
 | P2-05 并发治理 | 切片已实现 | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序和完整性 fail-closed 已实现；真实 PG/capacity/acceptance/精确 SHA CI 候选门禁已通过 |
 | P2-05 observational overdraw 维护 | `completed` | ADR-0018 与 data-only `0007` 只重算 overdrawn 并保留 ledger/actual，active reservation 时拒绝；当前库迁移和本地门禁通过，最终 SHA `cb00924…` 的 run `33271095910` 4/4 成功 |
+| Provider API 三协议维护 | `in_progress` | ADR-0019、Chat / Responses / Messages 显式 Adapter、`0008`、CLI/Web 与本地完整门禁已完成；等待 commit/push/exact-SHA CI，不改变 protocol-v1 或 P2-07 |
 | P2-06 可观测性 | `completed` | exporter/八规则、retention CLI、Worker DB-time progress、`0005`/13 表 importer 与全日志源治理已实现；`9a20676…` 已 push、PR #3、实现 run `33164609388` 4/4，clean capacity/9/9 acceptance 全绿；evidence-doc commit `ec29596…` 已 push且精确 SHA run `33165775037` 4/4 |
 | P2-07 验证与运维 | `planned` | ADR-0016、独立计划与工作日志已建立；功能尚未实现，后续从最小只读 verifier 开始，再开展数据库+keyring restore、Redis 重建、告警响应与完整失败矩阵 |
 
@@ -285,7 +286,7 @@
 3. 实现离线缓存、Hash 清单、分片和验证失败诊断。
 4. 构建无网络、最小权限、CPU/内存/时间/输出受限的代码沙箱。
 5. 实现编译、运行、测试用例隔离和结构化错误分类。
-6. 增加分组指标、UI 筛选、测试夹具与端到端验证。
+6. 增加分组指标、UI 筛选、Run Detail 大规模进度热力图/live metrics、测试夹具与端到端验证（P3-06）。
 7. 完成威胁建模、渗透测试范围和操作手册。
 
 ### 验收标准
@@ -296,6 +297,7 @@
 - 不可信代码在隔离环境运行，默认无网络，并强制资源与输出上限。
 - 沙箱逃逸防线、超时、fork bomb、磁盘耗尽等关键威胁有自动化验证。
 - 指标按任务/子集正确聚合，协议不兼容时不混排。
+- 12,032–20,000 题 Run Detail 以固定 512 题 block 和虚拟化可访问四态 grid 展示；后端同快照动态指标、乱序/并发/终态收敛及 nullable usage/cost 语义有回归。
 
 ### 风险
 
@@ -312,8 +314,15 @@
 ### 状态
 
 `in_progress`（2026-08-27 开始）。MMLU-Pro 与 GPQA-Diamond 已有固定 revision/SHA、
-可复现转换、受限 real-Provider CLI 和证据派生分组报告切片；IFEval、正式 Plugin SDK、代码题模型、
-安全沙箱、分组 UI、完整数据卡/红队及全部阶段验收仍未完成。
+可复现转换、受限 real-Provider CLI 和证据派生分组报告切片。P3-06 的固定 512 题 absolute-position
+block progress API、后端同快照 live metrics 与虚拟化四态 Run Detail 已完成；定向 backend/frontend
+`37/32 passed`（Run Detail `20` + heatmap `12`），完整 backend `964 passed, 33 skipped`、frontend
+`64 passed`，lint、Mock smoke、build、Compose config 和目标 198 题 Run 的三档宽度/键盘/Tooltip/console
+实页验收通过。12,032/20,000 题边界为自动化虚拟化验证。初版 cursor 合同因没有数据库单调提交序列
+而在实现前废弃；最终实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5)
+已普通 push 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)，精确 SHA [Actions run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923)
+四个必需 job 全部成功，因此 P3-06 切片为 `completed`。IFEval、正式 Plugin SDK、代码题模型、安全沙箱、
+分组 UI、完整数据卡/红队及全部阶段验收仍未完成，所以 Phase 3 整体保持 `in_progress`。
 
 ## 7. Phase 4：Judge、Arena 与长上下文
 

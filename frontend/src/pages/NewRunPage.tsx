@@ -1,4 +1,4 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, ArrowRight, Beaker, Clock3, Coins, SlidersHorizontal } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -21,7 +21,6 @@ type TouchedFields = {
   temperature: boolean;
   topP: boolean;
   maxTokens: boolean;
-  seed: boolean;
   readTimeout: boolean;
 };
 
@@ -29,7 +28,6 @@ const untouchedFields: TouchedFields = {
   temperature: false,
   topP: false,
   maxTokens: false,
-  seed: false,
   readTimeout: false,
 };
 
@@ -49,9 +47,33 @@ function recommendationFor(benchmark?: Benchmark): Recommendation {
   return { maxTokens: 4_096, readTimeoutSeconds: 300, reason: "正式数据集采用保守的长回答预算" };
 }
 
-function finiteDefault(model: ModelConfig | undefined, key: string, fallback: number): number {
+function usesOptionalSamplingDefaults(model: ModelConfig | undefined): boolean {
+  return model?.provider_type === "openai_responses" || model?.provider_type === "anthropic_messages";
+}
+
+function samplingDefault(
+  model: ModelConfig | undefined,
+  key: "temperature" | "top_p",
+  fallback: number,
+): number | null {
   const value = model?.default_parameters[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  return usesOptionalSamplingDefaults(model) ? null : fallback;
+}
+
+function samplingAfterContextChange(
+  model: ModelConfig | undefined,
+  key: "temperature" | "top_p",
+  current: number | null,
+  wasTouched: boolean,
+  fallback: number,
+): number | null {
+  const validForProtocol =
+    key !== "temperature" ||
+    model?.provider_type !== "anthropic_messages" ||
+    current === null ||
+    current <= 1;
+  return wasTouched && validForProtocol ? current : samplingDefault(model, key, fallback);
 }
 
 function maxTokensDefault(model: ModelConfig | undefined, fallback: number): number | null {
@@ -63,6 +85,35 @@ function maxTokensDefault(model: ModelConfig | undefined, fallback: number): num
   return fallback;
 }
 
+function requiresFiniteMaxTokens(model: ModelConfig | undefined): boolean {
+  return model?.provider_type === "anthropic_messages";
+}
+
+function protocolMaxTokensDefault(
+  model: ModelConfig | undefined,
+  fallback: number,
+): number | null {
+  const value = maxTokensDefault(model, fallback);
+  return requiresFiniteMaxTokens(model) && value === null ? fallback : value;
+}
+
+function maxTokensAfterContextChange(
+  model: ModelConfig | undefined,
+  current: number | null,
+  wasTouched: boolean,
+  fallback: number,
+): number | null {
+  const canPreserveCurrent =
+    !requiresFiniteMaxTokens(model) ||
+    (current !== null &&
+      Number.isInteger(current) &&
+      current >= 1 &&
+      current <= MAX_GENERATION_TOKENS);
+  return wasTouched && canPreserveCurrent
+    ? current
+    : protocolMaxTokensDefault(model, fallback);
+}
+
 function seedDefault(model: ModelConfig | undefined, fallback: number): number | null {
   if (model && Object.prototype.hasOwnProperty.call(model.default_parameters, "seed")) {
     const value = model.default_parameters.seed;
@@ -72,15 +123,23 @@ function seedDefault(model: ModelConfig | undefined, fallback: number): number |
   return fallback;
 }
 
+function supportsSeed(model: ModelConfig | undefined): boolean {
+  return !model || !["openai_responses", "anthropic_messages"].includes(model.provider_type);
+}
+
+function protocolSeedDefault(model: ModelConfig | undefined, fallback: number): number | null {
+  return supportsSeed(model) ? seedDefault(model, fallback) : null;
+}
+
 function payloadFor(model: ModelConfig | undefined, benchmark: Benchmark | undefined): RunPayload {
   const recommendation = recommendationFor(benchmark);
   return {
     model_id: model?.id || "",
     benchmark_id: benchmark?.id || "",
-    temperature: finiteDefault(model, "temperature", 0),
-    top_p: finiteDefault(model, "top_p", 1),
-    max_tokens: maxTokensDefault(model, recommendation.maxTokens),
-    seed: seedDefault(model, 42),
+    temperature: samplingDefault(model, "temperature", 0),
+    top_p: samplingDefault(model, "top_p", 1),
+    max_tokens: protocolMaxTokensDefault(model, recommendation.maxTokens),
+    seed: protocolSeedDefault(model, 42),
     concurrency: 1,
     read_timeout_seconds: recommendation.readTimeoutSeconds,
   };
@@ -95,6 +154,7 @@ export function NewRunPage() {
   const [saving, setSaving] = useState(false);
   const [touched, setTouched] = useState<TouchedFields>(untouchedFields);
   const [payload, setPayload] = useState<RunPayload>(() => payloadFor(undefined, undefined));
+  const seedOverridesRef = useRef(new Map<string, number | null>());
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -125,17 +185,37 @@ export function NewRunPage() {
     [benchmarks, payload.benchmark_id],
   );
   const recommendation = useMemo(() => recommendationFor(selectedBenchmark), [selectedBenchmark]);
+  const modelRequiresFiniteMaxTokens = requiresFiniteMaxTokens(selectedModel);
+  const modelSupportsSeed = supportsSeed(selectedModel);
+  const modelUsesOptionalSamplingDefaults = usesOptionalSamplingDefaults(selectedModel);
   const belowRecommendation = payload.max_tokens !== null && payload.max_tokens < recommendation.maxTokens;
 
   const chooseModel = (modelId: string) => {
     const model = models.find((item) => item.id === modelId);
+    const hasSeedOverride = model ? seedOverridesRef.current.has(model.id) : false;
+    const seedOverride = model ? seedOverridesRef.current.get(model.id) : undefined;
     setPayload((current) => ({
       ...current,
       model_id: modelId,
-      temperature: touched.temperature ? current.temperature : finiteDefault(model, "temperature", 0),
-      top_p: touched.topP ? current.top_p : finiteDefault(model, "top_p", 1),
-      max_tokens: touched.maxTokens ? current.max_tokens : maxTokensDefault(model, recommendation.maxTokens),
-      seed: touched.seed ? current.seed : seedDefault(model, 42),
+      temperature: samplingAfterContextChange(
+        model,
+        "temperature",
+        current.temperature,
+        touched.temperature,
+        0,
+      ),
+      top_p: samplingAfterContextChange(model, "top_p", current.top_p, touched.topP, 1),
+      max_tokens: maxTokensAfterContextChange(
+        model,
+        current.max_tokens,
+        touched.maxTokens,
+        recommendation.maxTokens,
+      ),
+      seed: supportsSeed(model)
+        ? hasSeedOverride
+          ? seedOverride ?? null
+          : protocolSeedDefault(model, 42)
+        : null,
     }));
   };
 
@@ -145,9 +225,12 @@ export function NewRunPage() {
     setPayload((current) => ({
       ...current,
       benchmark_id: benchmarkId,
-      max_tokens: touched.maxTokens
-        ? current.max_tokens
-        : maxTokensDefault(selectedModel, nextRecommendation.maxTokens),
+      max_tokens: maxTokensAfterContextChange(
+        selectedModel,
+        current.max_tokens,
+        touched.maxTokens,
+        nextRecommendation.maxTokens,
+      ),
       read_timeout_seconds: touched.readTimeout
         ? current.read_timeout_seconds
         : nextRecommendation.readTimeoutSeconds,
@@ -241,17 +324,19 @@ export function NewRunPage() {
           <div className="form-grid parameter-grid">
             <label>
               Temperature
-              <input aria-label="Temperature" type="number" min="0" max="2" step="0.1" value={payload.temperature} onChange={(event) => {
+              <input aria-label="Temperature" type="number" min="0" max={selectedModel?.provider_type === "anthropic_messages" ? "1" : "2"} step="0.1" required={!modelUsesOptionalSamplingDefaults} placeholder={modelUsesOptionalSamplingDefaults ? "由 Provider 决定" : undefined} value={payload.temperature ?? ""} onChange={(event) => {
                 setTouched((current) => ({ ...current, temperature: true }));
-                setPayload((current) => ({ ...current, temperature: Number(event.target.value) }));
+                setPayload((current) => ({ ...current, temperature: event.target.value === "" ? null : Number(event.target.value) }));
               }} />
+              {modelUsesOptionalSamplingDefaults && <small>留空表示不发送 temperature；部分 Responses 模型不支持该参数。</small>}
             </label>
             <label>
               Top-p
-              <input aria-label="Top-p" type="number" min="0.01" max="1" step="0.01" value={payload.top_p} onChange={(event) => {
+              <input aria-label="Top-p" type="number" min="0.01" max="1" step="0.01" required={!modelUsesOptionalSamplingDefaults} placeholder={modelUsesOptionalSamplingDefaults ? "由 Provider 决定" : undefined} value={payload.top_p ?? ""} onChange={(event) => {
                 setTouched((current) => ({ ...current, topP: true }));
-                setPayload((current) => ({ ...current, top_p: Number(event.target.value) }));
+                setPayload((current) => ({ ...current, top_p: event.target.value === "" ? null : Number(event.target.value) }));
               }} />
+              {modelUsesOptionalSamplingDefaults && <small>留空表示不发送 top_p；需要时再显式设置。</small>}
             </label>
             <div className="field-group">
               <label htmlFor="max-tokens">Max tokens</label>
@@ -262,7 +347,7 @@ export function NewRunPage() {
                 min="1"
                 max={MAX_GENERATION_TOKENS}
                 required={payload.max_tokens !== null}
-                disabled={payload.max_tokens === null}
+                disabled={!modelRequiresFiniteMaxTokens && payload.max_tokens === null}
                 value={payload.max_tokens ?? ""}
                 onChange={(event) => {
                   setTouched((current) => ({ ...current, maxTokens: true }));
@@ -273,7 +358,8 @@ export function NewRunPage() {
                 <input
                   aria-label="由 Provider 决定 max tokens"
                   type="checkbox"
-                  checked={payload.max_tokens === null}
+                  checked={!modelRequiresFiniteMaxTokens && payload.max_tokens === null}
+                  disabled={modelRequiresFiniteMaxTokens}
                   onChange={(event) => {
                     setTouched((current) => ({ ...current, maxTokens: true }));
                     setPayload((current) => ({ ...current, max_tokens: event.target.checked ? null : recommendation.maxTokens }));
@@ -281,14 +367,22 @@ export function NewRunPage() {
                 />
                 由 Provider 决定
               </label>
-              <small>数字上限 {MAX_GENERATION_TOKENS.toLocaleString()}；勾选后不发送 max_tokens，并不等于无限输出。</small>
+              <small>
+                {modelRequiresFiniteMaxTokens
+                  ? "Messages API 必须提供有限的 max tokens。"
+                  : `数字上限 ${MAX_GENERATION_TOKENS.toLocaleString()}；勾选后不发送 max_tokens，并不等于无限输出。`}
+              </small>
             </div>
             <label>
               Seed
-              <input aria-label="Seed" type="number" value={payload.seed ?? ""} onChange={(event) => {
-                setTouched((current) => ({ ...current, seed: true }));
-                setPayload((current) => ({ ...current, seed: event.target.value === "" ? null : Number(event.target.value) }));
+              <input aria-label="Seed" type="number" disabled={!modelSupportsSeed} value={payload.seed ?? ""} onChange={(event) => {
+                const nextSeed = event.target.value === "" ? null : Number(event.target.value);
+                if (selectedModel && supportsSeed(selectedModel)) {
+                  seedOverridesRef.current.set(selectedModel.id, nextSeed);
+                }
+                setPayload((current) => ({ ...current, seed: nextSeed }));
               }} />
+              {!modelSupportsSeed && <small>{selectedModel?.provider_type === "openai_responses" ? "Responses API 不支持 seed。" : "Messages API 不支持 seed。"}</small>}
             </label>
             <label>
               并发度

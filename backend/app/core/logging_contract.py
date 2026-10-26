@@ -113,6 +113,8 @@ _ROUTE_TEMPLATES = frozenset(
         "/runs/{run_id}",
         "/runs/{run_id}/audit",
         "/runs/{run_id}/cancel",
+        "/runs/{run_id}/progress",
+        "/runs/{run_id}/progress/blocks/{block_index}",
         "/runs/{run_id}/responses",
         "/tasks/history",
         "/tasks/metrics",

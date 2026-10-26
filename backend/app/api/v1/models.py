@@ -26,6 +26,7 @@ from app.models import (
 )
 from app.models import Model as RegisteredModel
 from app.schemas.model import (
+    REMOTE_PROVIDER_TYPES,
     ModelCreate,
     ModelList,
     ModelRead,
@@ -497,13 +498,12 @@ def update_model(
             )
     old_origin = (
         normalize_provider_origin(model.base_url)
-        if model.provider_type == ProviderType.OPENAI_COMPATIBLE and model.base_url is not None
+        if model.provider_type in REMOTE_PROVIDER_TYPES and model.base_url is not None
         else None
     )
     new_origin = (
         normalize_provider_origin(validated.base_url)
-        if validated.provider_type == ProviderType.OPENAI_COMPATIBLE
-        and validated.base_url is not None
+        if validated.provider_type in REMOTE_PROVIDER_TYPES and validated.base_url is not None
         else None
     )
     if (

@@ -19,6 +19,18 @@ ENV_VAR_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 ALLOWED_DEFAULT_PARAMETERS = frozenset({"temperature", "top_p", "max_tokens", "seed"})
 API_KEY_MIN_BYTES = 8
 API_KEY_MAX_BYTES = 8192
+REMOTE_PROVIDER_TYPES = frozenset(
+    {
+        ProviderType.OPENAI_COMPATIBLE,
+        ProviderType.OPENAI_RESPONSES,
+        ProviderType.ANTHROPIC_MESSAGES,
+    }
+)
+_PROVIDER_ENDPOINT_SUFFIXES = {
+    ProviderType.OPENAI_COMPATIBLE: "/chat/completions",
+    ProviderType.OPENAI_RESPONSES: "/responses",
+    ProviderType.ANTHROPIC_MESSAGES: "/messages",
+}
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -150,6 +162,67 @@ def _validate_default_parameters(value: dict[str, Any] | None) -> dict[str, Any]
     return validated
 
 
+def _validate_provider_endpoint(provider_type: ProviderType, base_url: str | None) -> None:
+    """Reject a full endpoint that belongs to a different explicit protocol."""
+
+    if provider_type not in REMOTE_PROVIDER_TYPES or base_url is None:
+        return
+    path = urlsplit(base_url).path.rstrip("/")
+    matching_type = next(
+        (
+            candidate
+            for candidate, suffix in _PROVIDER_ENDPOINT_SUFFIXES.items()
+            if path.endswith(suffix)
+        ),
+        None,
+    )
+    if matching_type is not None and matching_type != provider_type:
+        expected = _PROVIDER_ENDPOINT_SUFFIXES[provider_type]
+        raise ValueError(
+            f"{provider_type.value} requires a compatible root URL or an endpoint ending "
+            f"in {expected}"
+        )
+
+
+def validate_provider_generation_parameters(
+    provider_type: ProviderType | str,
+    parameters: Mapping[str, Any],
+) -> None:
+    """Validate protocol-specific fields without weakening Adapter final checks."""
+
+    normalized = (
+        provider_type if isinstance(provider_type, ProviderType) else ProviderType(provider_type)
+    )
+    if normalized in {ProviderType.MOCK, ProviderType.OPENAI_COMPATIBLE}:
+        for field in ("temperature", "top_p"):
+            if field in parameters and parameters[field] is None:
+                raise ValueError(f"{normalized.value} requires a non-null {field} value")
+    if (
+        normalized in {ProviderType.OPENAI_RESPONSES, ProviderType.ANTHROPIC_MESSAGES}
+        and parameters.get("seed") is not None
+    ):
+        raise ValueError(f"{normalized.value} does not support a non-null seed")
+    if (
+        normalized == ProviderType.ANTHROPIC_MESSAGES
+        and "max_tokens" in parameters
+        and parameters.get("max_tokens") is None
+    ):
+        raise ValueError("anthropic_messages requires a finite max_tokens value")
+    temperature = parameters.get("temperature")
+    if (
+        normalized == ProviderType.ANTHROPIC_MESSAGES
+        and temperature is not None
+        and (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or temperature != temperature
+            or temperature in {float("inf"), float("-inf")}
+            or not 0 <= temperature <= 1
+        )
+    ):
+        raise ValueError("anthropic_messages temperature must be between 0 and 1")
+
+
 class ModelFields(APIModel):
     """Fields shared by create validation and reconstructed PATCH payloads."""
 
@@ -225,16 +298,23 @@ class ModelFields(APIModel):
                 self.input_price_per_million = 0
             if self.output_price_per_million is None:
                 self.output_price_per_million = 0
-        if self.provider_type == ProviderType.OPENAI_COMPATIBLE:
+        if self.provider_type in REMOTE_PROVIDER_TYPES:
             missing = [
                 field for field in ("base_url", "remote_model_name") if getattr(self, field) is None
             ]
             if self.api_key is None and self.api_key_env is None:
                 missing.append("api_key or api_key_env")
             if missing:
-                raise ValueError("openai_compatible requires " + ", ".join(missing))
+                raise ValueError(f"{self.provider_type.value} requires " + ", ".join(missing))
             if self.api_key is not None and self.api_key_env is not None:
-                raise ValueError("openai_compatible accepts api_key or api_key_env, not both")
+                raise ValueError(
+                    f"{self.provider_type.value} accepts api_key or api_key_env, not both"
+                )
+            _validate_provider_endpoint(self.provider_type, self.base_url)
+            validate_provider_generation_parameters(
+                self.provider_type,
+                self.default_parameters,
+            )
         return self
 
 

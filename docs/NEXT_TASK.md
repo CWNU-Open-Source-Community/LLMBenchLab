@@ -1,10 +1,11 @@
 # 下一任务（当前修复完成后）：实施 P2-07 最小恢复验证切片
 
 > 状态：`planned`；P2-07 独立计划、工作日志与 ADR-0016 已建立，功能实现尚未开始
+> 当前前置：P3-06 Run Detail 热力图/live metrics 已完成实现、普通 push 与精确 SHA CI，状态为 `completed`；P2-07 恢复为下一项但仍是 `planned`，本文件不表示其已经开始
 > 对应阶段：[Phase 2 — Reliability](phases/PHASE-2-RELIABILITY.md)
 > 当前计划：[Phase 2 恢复与运维闭环](plans/2026-08-28-phase-2-recovery-operations.md)
 > 当前日志：[2026-08-28 P2-07 工作日志](worklogs/2026-08-28-phase-2-recovery-operations.md)
-> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)，exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
+> 当前决策：[ADR-0016](decisions/ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md)，exact-head amendments [ADR-0017](decisions/ADR-0017-schema-equivalent-governance-index-repair.md) / [ADR-0018](decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md) / [ADR-0019](decisions/ADR-0019-explicit-provider-api-protocol-adapters.md)
 > 决策基础：[ADR-0005](decisions/ADR-0005-durable-task-execution.md)、[ADR-0009](decisions/ADR-0009-database-governance-audit-fair-scheduling.md)、[ADR-0010](decisions/ADR-0010-phase-2-governance-delivery-boundaries.md)、[ADR-0011](decisions/ADR-0011-confirmed-pre-send-release-retry-generation.md)、[ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md)
 
 ## 当前事实
@@ -13,7 +14,7 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 当前 P2-06 已按 [ADR-0015](decisions/ADR-0015-observability-worker-progress-audit-retention.md) 实现：
 
-- P2-06 的 `20260828_0005` 新增 `worker_processes` 和 bounded audit scan indexes；`20260829_0006` 仅修复早期 `0004` 三索引缺口。当前应用 head `20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn，不改变 13 表 schema/importer/archive 合同、never-delete ledger 或 actual usage。SQLite→PostgreSQL importer 继续做 13 表精确 digest，拒绝 live generation 并复制 stopped/stale facts；表非空时 `0005 -> 0004` 在 DDL 前拒绝。
+- P2-06 的 `20260828_0005` 新增 `worker_processes` 和 bounded audit scan indexes；`20260829_0006` 仅修复早期 `0004` 三索引缺口，`20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn。当前应用 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并替换 Provider 类型 check 与远程配置 check；它不改写旧 Model，也不改变 13 表/importer/archive event 合同、never-delete ledger 或 actual usage。SQLite→PostgreSQL importer 继续做 13 表精确 digest，拒绝 live generation 并复制 stopped/stale facts；表非空时 `0005 -> 0004` 在 DDL 前拒绝。
 - 长运行 Worker 注册唯一 generation，只在真实 scan/claim/lease-heartbeat/progress 后按 DB UTC 合并刷新；`/tasks/metrics` 和 exporter 只公开 expected/registered/live/stalled/shortfall 与聚合时间。dependency probe 固定声明不检查 main-loop progress。
 - `GET /api/v1/metrics/prometheus` 输出固定 Prometheus text `0.0.4` gauge，使用一个 DB-time 快照、有界 15 分钟 audit 与 1 小时 latency 窗口、固定 enum label、整次 fail-closed 和每 API 进程 single-flight。
 - `deploy/observability/` 提供固定八条告警规则、抓取示例与对应 Operations Runbook；仓库不部署 Prometheus、Alertmanager、OTel 或通知发送器。
@@ -26,9 +27,42 @@ P2-01 已完成，不再重复资格或“重跑碰绿”。P2-06 也已完成�
 
 同日又把 `artifacts/benchmarks/` 中已存在的 GPQA-Diamond 与两种 MMLU-Pro profile 通过正式导入 API 加载到默认个人 SQLite，当前为 `4` 个 Benchmark、`24,277` 题，原 Model/Run/Response 保持且没有 Provider 调用。记录 commit `0163b67c00eb59ae59db5f3adb679ad85c799142` 已 push，其精确 SHA run `33266167547` 4/4 成功；该本地数据操作不提交第三方题目、不改变产品实现或路线图，P2-07 的下一任务仍保持不变。
 
+随后又从固定来源 revision 准备并通过同一正式导入 API 加载 GSM8K、中文 MGSM、HellaSwag、WinoGrande、TruthfulQA Binary 五套 100 题 mini 子集，以及完整 100 题中文 XCOPA validation。默认个人 SQLite 因此现为 `10` 个 Benchmarks、`24,877` 题；第三方题目、转换器、provenance 与导入前备份仍在 Git 忽略目录。导入任务没有创建、取消或重置 Run；当时既有 12,032 题 Run 正在执行，导入完成后的取消请求和 MGSM mini Run 创建属于另一个并发客户端时间线，其 Response/Provider 流量不属于导入副作用。记录 commit `8faa2093b2c3308994d50e42a31063cdbf5264a6` 已 push，精确 SHA CI run `33296049611` 4/4 成功。该个人数据维护不实现 Plugin SDK、IFEval 或新的产品合同，P2-07 仍是下一项且保持 `planned`。
+
 [Observational Token overdraw 修复](plans/2026-08-30-fix-observational-token-overdraw.md) 已完成。ADR-0018 已把非显式 input 估算与 hard reservation 分离，并把 data-only head 定为 `20260830_0007`；该 revision 只重算 `governance_scopes.overdrawn`，upgrade/downgrade 均拒绝 active reservation，历史 ledger/actual/Response/Run 终态保持。本地完整验证、当前个人 SQLite 迁移、修正 SHA `cb00924…` 的 real-Compose 9/9 与 [exact-SHA CI run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 均通过。P2-07 前置阻碍已解除，但本次任务到此停止。
 
+[Run Detail 错题与部分 Token 展示修复](plans/2026-08-30-fix-run-detail-metrics.md) 已完成：它只扩充 Responses 读取 API 和页面证据表达，不改变 protocol-v1 精确 Token、成绩、历史数据、migration 或 P2-07 范围。实现 SHA `0003e429…` 已普通 push，[PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5) 的精确 SHA [CI run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 4/4 成功；下一独立切片仍是本文件定义的 P2-07 最小只读 recovery verifier。
+
+[Run Detail 热力图与实时指标](plans/2026-08-30-run-progress-heatmap-live-metrics.md) 是已完成的 P3-06 切片。它冻结为固定 `512` 题 absolute-position block index/payload 和后端同快照 evidence-derived live metrics；不改变 `/api/v1`、`llmbenchlab-protocol-v1`、Run 精确 nullable Token/cost、数据库 schema 或 P2-07 范围。初版 cursor 的 4 个 red tests 因没有数据库单调提交序列已在实现前废弃。本地 fixed-block 验证为 backend/frontend target `37/32 passed`（Run Detail `20` + heatmap `12`），完整 backend `964 passed, 33 skipped`、frontend `64 passed`；lint、Mock smoke、build、Compose config 与目标 198 题 Run 的三档宽度/键盘/Tooltip/console 实页验收均通过，12,032/20,000 题仅为自动化虚拟化边界。实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5) 已普通 push 到 `codex/complete-evaluation-workflow` 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)，精确 SHA [Actions run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) 的 backend、backend-integration、full-stack-reliability、frontend 四个 job 全部成功。执行入口现回到下面的 P2-07 verifier；P2-07 继续为 `planned`。
+
 P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/test/smoke、双方言 migration、真实 PostgreSQL/Redis integration、frontend build、Compose config、Prometheus 规则、clean capacity/acceptance 与技术/安全终审均已通过；原始 evidence 仍不得公开。P2-06 当时未擅自迁移默认用户 SQLite；随后的兼容修复已在自动备份后将当时重建库前进到 `0006` 并通过 startup/check。
+
+## 已完成：日常多 Worker评测入口维护
+
+本轮只把既有 PostgreSQL lease/fencing 能力暴露到日常启动入口，不改 P2-07 范围。
+`make dev DEV_WORKERS=N` 管理本地 PostgreSQL Worker进程，`make dev-multi` /
+`make docker-up WORKERS=N` 默认两个 Compose Worker并按扩/缩方向切换 API expected，
+最终校验 expected/registered/live/stalled/shortfall；
+SQLite 多 Worker在服务启动前拒绝。离线启动器 `42 passed`，迁移到 head 的隔离
+PostgreSQL 16 跨 Benchmark/唯一 lease 回归 `2 passed`，隔离 Compose 的 `2→1→2`
+扩缩与五 gauges/cleanup 通过；完整 lint/test/smoke/build/config 也已通过。实现 SHA
+[`b06594c2df67d6e2a8b117651b193cd0fa409bf5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/b06594c2df67d6e2a8b117651b193cd0fa409bf5)
+已普通 push，其 exact-SHA Actions [run `33299883513`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33299883513)
+四个必需 job 全绿，因此本维护为 `completed`。本文件的下一独立任务仍是下面的 P2-07
+最小只读 verifier。
+
+## 已完成：Provider API 三协议适配
+
+[ADR-0019](decisions/ADR-0019-explicit-provider-api-protocol-adapters.md) 与
+[独立计划](plans/2026-08-30-provider-api-protocols.md) 已把旧 `openai_compatible`
+保留为 Chat Completions，并新增显式 `openai_responses` / `anthropic_messages`。
+Adapter、Model/API/Run snapshot、Worker/CLI preflight、`0008` migration 与 Web 表单已实现；
+本地 backend `1079 passed, 36 skipped`、frontend `72 passed`、lint、Mock smoke、build、
+Compose config 和隔离 PostgreSQL 16 migration 门禁均通过，未调用真实 Provider。
+完整本地门禁与隔离 PostgreSQL 16 迁移验证均通过；实现 SHA
+[`6943aa29a154c82bdfbe5efb2578c916c3cbf632`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/6943aa29a154c82bdfbe5efb2578c916c3cbf632)
+已普通 push，[exact-SHA Actions run `33304667092`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33304667092)
+四个必需 job 全部成功。该维护现为 `completed`；下一独立任务回到下面的 P2-07 最小只读 verifier。
 
 ## 已完成：建立 P2-07 工作包
 
@@ -41,7 +75,7 @@ P2-06 本地与 clean evidence 数值保持记录不变：合并定向、lint/te
 
 P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最小只读 verifier 切片开始，之后才依次完成：
 
-- PostgreSQL backup → 空目标 restore → Alembic `20260830_0007` exact head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
+- PostgreSQL backup → 空目标 restore → Alembic `20260830_0008` exact head → 13 表 count/PK/content fingerprint → managed Run/ledger/audit/Worker stopped-or-stale facts 可读。
 - 数据库与数据库外 keyring 独立备份/恢复：匹配 keyring 能解密，缺失/错误 keyring fail closed；日志/证据不得回显 Key 或 envelope。
 - Redis 重建/consumer group 恢复、Worker 扩缩、八条告警响应、dead-letter、commit outcome unknown、governance integrity 与 remaining cancel/retry/lease/budget crash matrix 的真实 PostgreSQL/Redis 演练。
 - audit archive 作为数据库恢复后的精确校验/补回工具参与演练，但不得把 archive 自身 restore 冒充整库、PITR、RPO/RTO 或 WORM 认证。
@@ -57,11 +91,13 @@ P2-07 当前为 `planned`、尚未实现。恢复实施时按当前计划从最�
 ## Definition of Done
 
 - P2-06 已完成，不再重复其资格或证据门禁。
+- P3-06 热力图/live metrics 的 fixed-block 目标回归、完整本地门禁、目标 Run 浏览器验收、12,032/20,000 自动化虚拟化边界、实现 commit/push 与精确 SHA CI 已全部完成；P2-07 现在是下一项但仍须在实际实施开始时才标成 `in_progress`。
+- 日常多 Worker入口维护的完整本地门禁、实现 commit/push 和 exact-SHA CI 已全绿；这不等于 3+ Worker、真实 Provider、HA 或 SLA 资格。
 - P2-07：backup/restore、Redis 重建、告警处置与约定故障矩阵必须有隔离真实 PostgreSQL/Redis、Mock-only Compose、秘密审查、独立 commit/push 和精确 SHA CI 证据，才能标记 completed。
 - Phase 2：只有 P2-07 也完成后才可评估 `completed`；在此之前保持 `in_progress`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展、WORM 或 Provider exactly-once。
 
 ## 可直接复制给 Codex 的任务指令
 
 ```text
-确认 observational Token overdraw 修复已完成本地/远程门禁且当前应用 head 为 20260830_0007 后，再继续执行 docs/NEXT_TASK.md。P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
+P3-06 Run Detail 热力图/live metrics 已按固定 512 题 block 合同完成本地/远程门禁并标为 completed。继续执行 docs/NEXT_TASK.md：P2-07 的 ADR-0016、独立计划和工作日志已建立，不要重复设计或扩大范围。先只实现计划步骤 2 的最小只读 recovery verifier 及其目标测试；完成、复核并记录后再决定是否进入 Redis/Worker 或 rules/harness。自动化只用 Mock/Stub，所有 destructive 操作只针对隔离、精确目标；Phase 2 在 P2-07 完成前保持 in_progress。
 ```

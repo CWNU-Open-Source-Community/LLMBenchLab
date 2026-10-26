@@ -66,7 +66,23 @@ def _wait_for_terminal(client, run_id: str) -> dict:
     assert initial_payload["status"] == "pending"
     assert initial_payload["attempt_count"] == 0
     assert initial_payload["lease_owner"] is None
-    assert client.get(f"/api/v1/runs/{run_id}/responses").json()["total"] == 0
+    initial_evidence = client.get(f"/api/v1/runs/{run_id}/responses").json()
+    assert {
+        key: initial_evidence[key]
+        for key in (
+            "total",
+            "known_input_tokens",
+            "known_output_tokens",
+            "input_token_reported_responses",
+            "output_token_reported_responses",
+        )
+    } == {
+        "total": 0,
+        "known_input_tokens": 0,
+        "known_output_tokens": 0,
+        "input_token_reported_responses": 0,
+        "output_token_reported_responses": 0,
+    }
     assert not hasattr(client.app.state, "task_manager")
     worker = WorkerService(
         SessionLocal,
@@ -163,13 +179,14 @@ def test_run_lifecycle_timestamps_ignore_worker_host_clock_skew(client, monkeypa
 
 
 def test_parse_error_evidence_identifies_nonempty_truncated_output() -> None:
-    assert EvaluationRunner._parse_error_evidence(
-        "choice_not_found", {"finish_reason": "length"}
-    ) == (
-        "output_truncated",
-        "Provider stopped at the output token limit before a valid final answer was parsed "
-        "(choice_not_found).",
-    )
+    for finish_reason in ("length", "max_tokens"):
+        assert EvaluationRunner._parse_error_evidence(
+            "choice_not_found", {"finish_reason": finish_reason}
+        ) == (
+            "output_truncated",
+            "Provider stopped at the output token limit before a valid final answer was parsed "
+            "(choice_not_found).",
+        )
     assert EvaluationRunner._parse_error_evidence(
         "choice_not_found", {"finish_reason": "stop"}
     ) == ("parse_error", "choice_not_found")
@@ -227,6 +244,10 @@ def test_offline_mock_vertical_slice(client, db_session) -> None:
     assert responses.status_code == 200
     evidence = responses.json()
     assert evidence["total"] == 15
+    assert evidence["known_input_tokens"] == 120
+    assert evidence["known_output_tokens"] == 30
+    assert evidence["input_token_reported_responses"] == 15
+    assert evidence["output_token_reported_responses"] == 15
     assert len(evidence["items"]) == 15
     assert {item["question_type"] for item in evidence["items"]} == {
         "exact_match",
@@ -278,8 +299,12 @@ def test_single_question_error_does_not_fail_run(client, db_session) -> None:
     assert run["output_tokens"] is None
     assert run["estimated_cost"] is None
 
-    responses = client.get(f"/api/v1/runs/{run['id']}/responses?limit=100").json()["items"]
-    failed = [item for item in responses if item["error_type"] == "injected_failure"]
+    evidence = client.get(f"/api/v1/runs/{run['id']}/responses?limit=100").json()
+    assert evidence["known_input_tokens"] == 112
+    assert evidence["known_output_tokens"] == 28
+    assert evidence["input_token_reported_responses"] == 14
+    assert evidence["output_token_reported_responses"] == 14
+    failed = [item for item in evidence["items"] if item["error_type"] == "injected_failure"]
     assert len(failed) == 1
     assert failed[0]["score"] == 0
 
@@ -324,9 +349,13 @@ def test_evaluator_error_keeps_generated_evidence(client, monkeypatch) -> None:
     assert run["output_tokens"] == 30
     assert run["estimated_cost"] == 0
 
-    responses = client.get(f"/api/v1/runs/{run['id']}/responses?limit=100").json()["items"]
+    evidence = client.get(f"/api/v1/runs/{run['id']}/responses?limit=100").json()
+    assert evidence["known_input_tokens"] == 120
+    assert evidence["known_output_tokens"] == 30
+    assert evidence["input_token_reported_responses"] == 15
+    assert evidence["output_token_reported_responses"] == 15
     evaluator_errors = [
-        item for item in responses if item["error_type"] == "evaluator_internal_error"
+        item for item in evidence["items"] if item["error_type"] == "evaluator_internal_error"
     ]
     assert len(evaluator_errors) == 5
     assert all(item["raw_response"] for item in evaluator_errors)

@@ -100,7 +100,7 @@ MMLU-Pro 的标准转换器把题目选项以及 profile 指令直接固化在�
 每道计划题恰好产生一条最终 EvaluationResponse。过程如下：
 
 1. 使用 Run 快照构造消息和 generation config。
-2. 调用选定 ModelAdapter；临时错误按快照策略有限重试。OpenAI-compatible 远端只允许 HTTPS，明文 HTTP 仅允许 loopback；Chat 请求声明且响应只接受 identity encoding，显式发送 `stream:true` 与流式 usage 选项，持续聚合 `delta.content`。看到 finish 后不提前返回；若有 usage-only 尾块则继续读取，并验证 `[DONE]`，usage 缺失时保持未知。返回普通 JSON 的 Provider 使用 fallback。普通 JSON 成功体最多 4 MiB，SSE wire/单事件/聚合 content 最多 64 MiB/1 MiB/4 MiB，错误体最多 64 KiB。数字 `max_tokens` 原样发送，快照值为 `null` 时省略该请求字段；每次等待下一批字节使用 Run 冻结的空闲读取超时。
+2. 调用 Run 快照选定的 ModelAdapter；临时错误按快照策略有限重试。三类远程 Adapter 都只允许 HTTPS，明文 HTTP 仅允许 loopback，并声明且只接受 identity encoding。Chat、Responses、Messages 分别向 `/chat/completions`、`/responses`、`/messages` 发送各自 payload，持续聚合对应文本 delta，并以 `[DONE]`、`response.completed`、`message_stop` 验证完整终止；usage 缺失时保持未知，各协议普通 JSON 成功体作为 fallback。普通 JSON 成功体最多 4 MiB，SSE wire/单事件/聚合 content 最多 64 MiB/1 MiB/4 MiB，错误体最多 64 KiB；malformed/oversized 错误不链回原始 Provider 内容。Chat 的数字 `max_tokens` 原样发送，Responses 映射为 `max_output_tokens`，二者的 `null` 省略该字段；Messages 必须使用有限正整数。Responses/Messages 在请求与 Model 默认都未提供时省略 `temperature/top_p/seed`，并拒绝非空 seed；每次等待下一批字节使用 Run 冻结的空闲读取超时。
 3. 成功时保存未经答案规范化的 `raw_response`、input/output Token 和总延迟。若成功内容、raw usage 的对象键/字符串值、request ID、返回模型名或 system fingerprint 精确包含当前 Key，Adapter 会先替换为 `[REDACTED]`。Adapter 结果仍只在调用期携带 request ID/raw usage/返回模型/fingerprint；Phase 1 的 Response Schema 不持久化这些 transport 扩展字段。
 4. 根据 manifest 的题型映射选择版本化 Evaluator。
 5. 保存 `parsed_answer`、标准答案快照、0/1 分、Evaluator 名称和解析元数据。
@@ -197,9 +197,9 @@ answered\_accuracy = 100 \times \frac{\sum_{i=1}^{N}s_i}{\sum_{i=1}^{N}a_i}
 - 任一必要 usage 或价格缺失时，该题成本为 `null`；Run 成本只有在所有已完成模型调用均可计算时才给出总值。Mock 的明确零单价可计算为 0。
 - 价格必须在 Run 创建时快照。估算成本不等同供应商账单，不包含缓存、阶梯价、税费或重试计费差异。
 
-可信本地 CLI 在创建新 Run 或恢复缺失题前先执行一个最小 Chat Completions canary。模型发现若有任何模型 ID 反射当前 Key，预检立即失败；canary 必须可解析为预期答案，且成功体明确返回模型名时必须与请求目标完全一致。新 Run 保存脱敏的初次模型发现/canary 状态、返回模型名、request ID、usage、延迟和尝试次数。确认界面的 HTTP 请求上界包含每次调用最多 3 次 HTTP attempts，以及新 Run 的全部或恢复 Run 的剩余 execution attempts；当前公式为 `(缺失计分题数 × 剩余 Run attempts + 1 个 canary) × 3`。canary 不是计分题，也不进入 Run 的三项成绩；它和失败重试可能产生的费用也不保证被 Run `estimated_cost` 完整覆盖，最终应以 Provider 账单为准。
+可信本地 CLI 在创建新 Run 或恢复缺失题前，按显式 Adapter 执行一个最小 canary：Chat、Responses、Messages 分别调用 `/chat/completions`、`/responses`、`/messages`，并以 `[DONE]`、`response.completed`、`message_stop` 作为流式成功终止证据。模型发现也按显式协议鉴权；若任何模型 ID 反射当前 Key，预检立即失败。canary 必须可解析为预期答案，且成功体明确返回模型名时必须与请求目标完全一致。新 Run 保存脱敏的初次模型发现/canary 状态、返回模型名、request ID、usage、延迟和尝试次数。确认界面的 HTTP 请求上界包含每次调用最多 3 次 HTTP attempts，以及新 Run 或恢复 Run 剩余的 failed-attempt 预算；该预算严格为 `max_attempts - failed_attempt_count`，不把 cooperative yield 或仍有效的成功领取算作失败。当前公式为 `(缺失计分题数 × 剩余 failed-attempt 预算 + 1 个 canary) × 3`。canary 不是计分题，也不进入 Run 的三项成绩；它和失败重试可能产生的费用也不保证被 Run `estimated_cost` 完整覆盖，最终应以 Provider 账单为准。
 
-P2-06 的审计链尚未闭合：`resume` 会重新执行 canary，但不会把这次证据追加成独立审计事件；逐题 Provider request ID、返回模型名和 system fingerprint 也尚未持久化。因此初次 preflight 快照不能证明恢复期间或每一道题实际命中的远端版本。
+P2-06 的审计链尚未完全闭合：`resume` 会重新执行 canary，但不会把这次证据追加成独立审计事件。逐题 Provider request ID、返回模型名、system fingerprint、finish reason 与 HTTP attempt count 已按安全边界持久化；初次 preflight 快照仍不能单独证明恢复期间的 canary 结果或 Provider 账单真值。
 
 ## 完整报告导出
 

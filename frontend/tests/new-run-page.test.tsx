@@ -222,4 +222,152 @@ describe("NewRunPage generation recommendations", () => {
     await screen.findByRole("heading", { name: "新建评测" });
     expect(screen.queryByText(/逐题调用外部 Provider/)).not.toBeInTheDocument();
   });
+
+  it("uses Messages defaults and recommendations until max tokens are manually changed", async () => {
+    const user = userEvent.setup();
+    const postBodies: Array<Record<string, unknown>> = [];
+    const messagesWithDefault: ModelConfig = {
+      ...model,
+      id: "messages-with-default",
+      name: "Messages With Default",
+      provider_type: "anthropic_messages",
+      default_parameters: { max_tokens: 2048 },
+    };
+    const messagesWithRecommendation: ModelConfig = {
+      ...model,
+      id: "messages-with-recommendation",
+      name: "Messages With Recommendation",
+      provider_type: "anthropic_messages",
+      default_parameters: { max_tokens: null },
+    };
+    installFetch(postBodies, [model, messagesWithDefault, messagesWithRecommendation]);
+    renderPage();
+
+    const modelSelect = await screen.findByRole("combobox", { name: "模型" });
+    const benchmarkSelect = screen.getByRole("combobox", { name: "Benchmark" });
+    const maxTokens = screen.getByLabelText("Max tokens");
+
+    await user.selectOptions(modelSelect, messagesWithDefault.id);
+    expect(maxTokens).toHaveValue(2048);
+
+    await user.selectOptions(modelSelect, messagesWithRecommendation.id);
+    expect(maxTokens).toHaveValue(8192);
+    await user.selectOptions(benchmarkSelect, "mmlu-direct");
+    expect(maxTokens).toHaveValue(1024);
+
+    await user.clear(maxTokens);
+    await user.type(maxTokens, "777");
+    await user.selectOptions(benchmarkSelect, "mmlu-cot");
+    expect(maxTokens).toHaveValue(777);
+
+    await user.click(screen.getByRole("button", { name: "创建并开始评测" }));
+    await waitFor(() => expect(postBodies).toHaveLength(1));
+    expect(postBodies[0]).toEqual(
+      expect.objectContaining({
+        model_id: messagesWithRecommendation.id,
+        benchmark_id: "mmlu-cot",
+        max_tokens: 777,
+        seed: null,
+      }),
+    );
+  });
+
+  it("restores per-model manual seeds, including null, across unsupported protocols", async () => {
+    const user = userEvent.setup();
+    const secondCompatibleModel: ModelConfig = {
+      ...model,
+      id: "model-compatible-second",
+      name: "Second Compatible Model",
+      default_parameters: { seed: 99 },
+    };
+    const responsesModel: ModelConfig = {
+      ...model,
+      id: "model-responses-seed-bridge",
+      name: "Responses Seed Bridge",
+      provider_type: "openai_responses",
+      default_parameters: { seed: null },
+    };
+    installFetch([], [model, secondCompatibleModel, responsesModel]);
+    renderPage();
+
+    const modelSelect = await screen.findByRole("combobox", { name: "模型" });
+    const seed = screen.getByLabelText("Seed");
+
+    await user.clear(seed);
+    await user.type(seed, "123");
+    await user.selectOptions(modelSelect, responsesModel.id);
+    expect(seed).toBeDisabled();
+    expect(seed).toHaveValue(null);
+
+    await user.selectOptions(modelSelect, secondCompatibleModel.id);
+    expect(seed).toBeEnabled();
+    expect(seed).toHaveValue(99);
+    await user.clear(seed);
+    expect(seed).toHaveValue(null);
+
+    await user.selectOptions(modelSelect, responsesModel.id);
+    await user.selectOptions(modelSelect, model.id);
+    expect(seed).toHaveValue(123);
+
+    await user.selectOptions(modelSelect, secondCompatibleModel.id);
+    expect(seed).toHaveValue(null);
+  });
+
+  it("enforces protocol-specific seed and max-token controls when switching models", async () => {
+    const user = userEvent.setup();
+    const responsesModel: ModelConfig = {
+      ...model,
+      id: "model-responses",
+      name: "Responses Model",
+      provider_type: "openai_responses",
+      remote_model_name: "gpt-5.6-luna",
+      default_parameters: { max_tokens: null, seed: 42 },
+    };
+    const messagesModel: ModelConfig = {
+      ...model,
+      id: "model-messages",
+      name: "Messages Model",
+      provider_type: "anthropic_messages",
+      remote_model_name: "qwen3.8-flash",
+      default_parameters: { max_tokens: null, seed: 42 },
+    };
+    installFetch([], [model, responsesModel, messagesModel]);
+    renderPage();
+
+    const modelSelect = await screen.findByRole("combobox", { name: "模型" });
+    const seed = screen.getByLabelText("Seed");
+    const temperature = screen.getByLabelText("Temperature");
+    const topP = screen.getByLabelText("Top-p");
+    const maxTokens = screen.getByLabelText("Max tokens");
+    const providerManaged = screen.getByRole("checkbox", { name: "由 Provider 决定 max tokens" });
+
+    await user.selectOptions(modelSelect, "model-responses");
+    expect(seed).toBeDisabled();
+    expect(seed).toHaveValue(null);
+    expect(temperature).toHaveValue(null);
+    expect(topP).toHaveValue(null);
+    expect(screen.getByText(/Responses API 不支持 seed/)).toBeInTheDocument();
+    expect(providerManaged).toBeEnabled();
+    expect(maxTokens).toBeDisabled();
+
+    await user.selectOptions(modelSelect, "model-messages");
+    expect(seed).toBeDisabled();
+    expect(seed).toHaveValue(null);
+    expect(temperature).toHaveValue(null);
+    expect(temperature).toHaveAttribute("max", "1");
+    expect(topP).toHaveValue(null);
+    expect(providerManaged).toBeDisabled();
+    expect(providerManaged).not.toBeChecked();
+    expect(maxTokens).toBeEnabled();
+    expect(maxTokens).toHaveValue(8192);
+    expect(screen.getByText(/Messages API 必须提供有限的 max tokens/)).toBeInTheDocument();
+
+    await user.selectOptions(modelSelect, "model-compatible");
+    expect(seed).toBeEnabled();
+    expect(seed).toHaveValue(42);
+    expect(temperature).toHaveValue(0);
+    expect(temperature).toHaveAttribute("max", "2");
+    expect(topP).toHaveValue(1);
+    expect(providerManaged).toBeEnabled();
+  });
 });

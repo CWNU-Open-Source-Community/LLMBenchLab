@@ -25,6 +25,7 @@ from app.models import (
     Question,
     RunStatus,
 )
+from app.runners.evaluation_runner import EvaluationRunner
 from app.runners.run_leases import RunLeaseRepository
 from app.task_queue import QueueUnavailable, RedisRunQueue
 
@@ -47,6 +48,21 @@ def test_health_and_info_do_not_require_provider(client) -> None:
     info = client.get("/api/v1/info")
     assert info.status_code == 200
     assert info.json()["protocol_version"] == "llmbenchlab-protocol-v1"
+    assert info.json()["capabilities"]["providers"] == [
+        "mock",
+        "openai_compatible",
+        "openai_responses",
+        "anthropic_messages",
+    ]
+
+    openapi = client.get("/openapi.json")
+    assert openapi.status_code == 200
+    assert set(openapi.json()["components"]["schemas"]["ProviderType"]["enum"]) == {
+        "mock",
+        "openai_compatible",
+        "openai_responses",
+        "anthropic_messages",
+    }
 
 
 def test_liveness_readiness_and_request_id_are_componentized(client, monkeypatch) -> None:
@@ -374,6 +390,254 @@ def test_openai_model_provider_fields_are_validated(client) -> None:
     )
     assert response.status_code == 422
     assert "base_url" in response.text
+
+
+@pytest.mark.parametrize(
+    ("provider_type", "endpoint"),
+    [
+        ("openai_compatible", "https://provider.example/v1/chat/completions"),
+        ("openai_responses", "https://provider.example/v1/responses"),
+        ("anthropic_messages", "https://provider.example/v1/messages"),
+    ],
+)
+def test_remote_provider_protocols_persist_and_filter(
+    client,
+    provider_type: str,
+    endpoint: str,
+) -> None:
+    created = client.post(
+        "/api/v1/models",
+        json={
+            "name": f"Protocol {provider_type}",
+            "provider_type": provider_type,
+            "base_url": endpoint,
+            "remote_model_name": "offline-model",
+            "api_key_env": "PROTOCOL_PROVIDER_KEY",
+        },
+    )
+
+    assert created.status_code == 201, created.text
+    assert created.json()["provider_type"] == provider_type
+    listed = client.get(f"/api/v1/models?provider_type={provider_type}")
+    assert listed.status_code == 200
+    assert listed.json()["total"] == 1
+    assert listed.json()["items"][0]["id"] == created.json()["id"]
+
+
+@pytest.mark.parametrize(
+    ("provider_type", "wrong_endpoint"),
+    [
+        ("openai_compatible", "https://provider.example/v1/responses"),
+        ("openai_responses", "https://provider.example/v1/messages"),
+        ("anthropic_messages", "https://provider.example/v1/chat/completions"),
+    ],
+)
+def test_remote_provider_protocol_rejects_a_mismatched_known_endpoint(
+    client,
+    provider_type: str,
+    wrong_endpoint: str,
+) -> None:
+    response = client.post(
+        "/api/v1/models",
+        json={
+            "name": "Mismatched Protocol",
+            "provider_type": provider_type,
+            "base_url": wrong_endpoint,
+            "remote_model_name": "offline-model",
+            "api_key_env": "PROTOCOL_PROVIDER_KEY",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "compatible root URL" in response.text
+
+
+@pytest.mark.parametrize(
+    ("provider_type", "default_parameters", "expected_message"),
+    [
+        ("openai_responses", {"seed": 42}, "does not support a non-null seed"),
+        ("anthropic_messages", {"seed": 42}, "does not support a non-null seed"),
+        ("anthropic_messages", {"max_tokens": None}, "requires a finite max_tokens"),
+        ("anthropic_messages", {"temperature": 1.5}, "temperature must be between 0 and 1"),
+    ],
+)
+def test_remote_provider_protocol_rejects_invalid_model_defaults(
+    client,
+    provider_type: str,
+    default_parameters: dict[str, object],
+    expected_message: str,
+) -> None:
+    response = client.post(
+        "/api/v1/models",
+        json={
+            "name": f"Invalid defaults {provider_type}",
+            "provider_type": provider_type,
+            "base_url": "https://provider.example/v1",
+            "remote_model_name": "offline-model",
+            "api_key_env": "PROTOCOL_PROVIDER_KEY",
+            "default_parameters": default_parameters,
+        },
+    )
+
+    assert response.status_code == 422
+    assert expected_message in response.text
+
+
+def test_run_rejects_invalid_effective_provider_protocol_parameters_before_queueing(
+    client,
+) -> None:
+    benchmark = client.post("/api/v1/benchmarks/reload-demo").json()
+    responses_model = client.post(
+        "/api/v1/models",
+        json={
+            "name": "Responses protocol run",
+            "provider_type": "openai_responses",
+            "base_url": "https://provider.example/v1",
+            "remote_model_name": "responses-model",
+            "api_key_env": "PROTOCOL_PROVIDER_KEY",
+        },
+    ).json()
+    messages_model = client.post(
+        "/api/v1/models",
+        json={
+            "name": "Messages protocol run",
+            "provider_type": "anthropic_messages",
+            "base_url": "https://provider.example/v1",
+            "remote_model_name": "messages-model",
+            "api_key_env": "PROTOCOL_PROVIDER_KEY",
+        },
+    ).json()
+
+    responses_with_omitted_seed = client.post(
+        "/api/v1/runs",
+        json={"model_id": responses_model["id"], "benchmark_id": benchmark["id"]},
+    )
+    assert responses_with_omitted_seed.status_code == 202, responses_with_omitted_seed.text
+    assert (
+        responses_with_omitted_seed.json()["model_parameters_snapshot"]["generation"]["seed"]
+        is None
+    )
+    assert responses_with_omitted_seed.json()["model_parameters_snapshot"]["generation"] == {
+        "temperature": None,
+        "top_p": None,
+        "max_tokens": 256,
+        "seed": None,
+    }
+
+    responses_with_explicit_seed = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": responses_model["id"],
+            "benchmark_id": benchmark["id"],
+            "seed": 42,
+        },
+    )
+    assert responses_with_explicit_seed.status_code == 422
+    assert responses_with_explicit_seed.json()["detail"]["code"] == (
+        "invalid_provider_generation_parameters"
+    )
+
+    accepted_responses = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": responses_model["id"],
+            "benchmark_id": benchmark["id"],
+            "seed": None,
+        },
+    )
+    assert accepted_responses.status_code == 202, accepted_responses.text
+    assert (
+        accepted_responses.json()["model_parameters_snapshot"]["model"]["adapter_type"]
+        == "openai_responses"
+    )
+
+    messages_without_limit = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": messages_model["id"],
+            "benchmark_id": benchmark["id"],
+            "seed": None,
+            "max_tokens": None,
+        },
+    )
+    assert messages_without_limit.status_code == 422
+    assert messages_without_limit.json()["detail"]["code"] == (
+        "invalid_provider_generation_parameters"
+    )
+
+    messages_with_invalid_temperature = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": messages_model["id"],
+            "benchmark_id": benchmark["id"],
+            "seed": None,
+            "temperature": 1.5,
+        },
+    )
+    assert messages_with_invalid_temperature.status_code == 422
+    assert messages_with_invalid_temperature.json()["detail"]["code"] == (
+        "invalid_provider_generation_parameters"
+    )
+
+    accepted_messages = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": messages_model["id"],
+            "benchmark_id": benchmark["id"],
+            "seed": None,
+        },
+    )
+    assert accepted_messages.status_code == 202, accepted_messages.text
+    assert accepted_messages.json()["model_parameters_snapshot"]["generation"] == {
+        "temperature": None,
+        "top_p": None,
+        "max_tokens": 256,
+        "seed": None,
+    }
+    assert accepted_messages.json()["model_parameters_snapshot"]["execution"]["retry_policy"][
+        "retryable_status_codes"
+    ] == [408, 429, 500, 502, 503, 504, 529]
+
+    runner = EvaluationRunner(SessionLocal)
+    responses_snapshot = runner._load_snapshots(accepted_responses.json()["id"])[0]
+    messages_snapshot = runner._load_snapshots(accepted_messages.json()["id"])[0]
+    assert responses_snapshot.provider_type == "openai_responses"
+    assert messages_snapshot.provider_type == "anthropic_messages"
+
+
+@pytest.mark.parametrize("provider_type", ["mock", "openai_compatible"])
+@pytest.mark.parametrize("field", ["temperature", "top_p"])
+def test_run_preserves_nonnullable_sampling_contract_for_legacy_protocols(
+    client,
+    provider_type: str,
+    field: str,
+) -> None:
+    benchmark = client.post("/api/v1/benchmarks/reload-demo").json()
+    model_payload: dict[str, object] = {
+        "name": f"Legacy sampling {provider_type} {field}",
+        "provider_type": provider_type,
+    }
+    if provider_type == "openai_compatible":
+        model_payload.update(
+            {
+                "base_url": "https://provider.example/v1",
+                "remote_model_name": "chat-model",
+                "api_key_env": "PROTOCOL_PROVIDER_KEY",
+            }
+        )
+    model = client.post("/api/v1/models", json=model_payload).json()
+
+    response = client.post(
+        "/api/v1/runs",
+        json={
+            "model_id": model["id"],
+            "benchmark_id": benchmark["id"],
+            field: None,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"]["code"] == "invalid_provider_generation_parameters"
 
 
 def test_mock_model_rejects_remote_connection_fields(client) -> None:

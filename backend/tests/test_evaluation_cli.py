@@ -16,7 +16,7 @@ from pydantic import ValidationError
 import app.cli.evaluate as evaluation_cli
 from app.core.constants import MAX_GENERATION_TOKENS
 from app.core.time import utc_now
-from app.models import RunStatus
+from app.models import ProviderType, RunStatus
 from app.providers import CanaryResult, ModelDiscoveryResult
 
 
@@ -97,6 +97,90 @@ def test_help_exposes_only_api_key_environment_name(capsys: pytest.CaptureFixtur
     help_text = capsys.readouterr().out
     assert "--api-key-env" in help_text
     assert "--api-key" not in _all_option_strings(parser)
+
+
+@pytest.mark.parametrize(
+    "provider_type",
+    [ProviderType.OPENAI_RESPONSES, ProviderType.ANTHROPIC_MESSAGES],
+)
+def test_new_provider_protocol_defaults_omit_seed(provider_type: ProviderType) -> None:
+    args = _parse_run("--provider-type", provider_type.value)
+
+    defaults = evaluation_cli._provider_defaults(args)
+
+    assert defaults == {
+        "temperature": None,
+        "top_p": None,
+        "max_tokens": 4000,
+        "seed": None,
+        "concurrency": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "provider_type",
+    [ProviderType.OPENAI_RESPONSES, ProviderType.ANTHROPIC_MESSAGES],
+)
+def test_new_provider_protocol_preserves_explicit_sampling_parameters(
+    provider_type: ProviderType,
+) -> None:
+    args = _parse_run(
+        "--provider-type",
+        provider_type.value,
+        "--temperature",
+        "0.5",
+        "--top-p",
+        "0.75",
+    )
+
+    defaults = evaluation_cli._provider_defaults(args)
+
+    assert defaults["temperature"] == 0.5
+    assert defaults["top_p"] == 0.75
+
+
+@pytest.mark.parametrize(
+    "provider_type",
+    [ProviderType.OPENAI_RESPONSES, ProviderType.ANTHROPIC_MESSAGES],
+)
+def test_new_provider_protocol_rejects_explicit_cli_seed(
+    provider_type: ProviderType,
+) -> None:
+    args = _parse_run(
+        "--provider-type",
+        provider_type.value,
+        "--generation-seed",
+        "7",
+    )
+
+    with pytest.raises(evaluation_cli.EvaluationCLIError, match="does not support"):
+        evaluation_cli._provider_defaults(args)
+
+
+def test_messages_protocol_rejects_temperature_above_one_in_cli() -> None:
+    args = _parse_run(
+        "--provider-type",
+        ProviderType.ANTHROPIC_MESSAGES.value,
+        "--temperature",
+        "1.5",
+    )
+
+    with pytest.raises(evaluation_cli.EvaluationCLIError, match="between 0 and 1"):
+        evaluation_cli._provider_defaults(args)
+
+
+def test_model_payload_persists_explicit_provider_protocol() -> None:
+    payload = evaluation_cli._model_payload(
+        base_url="https://provider.example/zen/go/v1/responses",
+        remote_model="remote-model",
+        api_key_env="CLI_PROVIDER_KEY",
+        display_name=None,
+        input_price=None,
+        output_price=None,
+        provider_type=ProviderType.OPENAI_RESPONSES,
+    )
+
+    assert payload.provider_type == ProviderType.OPENAI_RESPONSES
 
 
 @pytest.mark.parametrize(
@@ -490,9 +574,14 @@ async def test_resolve_and_canary_uses_discovery_but_passes_only_env_name_to_ada
     seen: dict[str, Any] = {}
     events: list[str] = []
 
-    async def fake_discovery(base_url: str, api_key: str) -> ModelDiscoveryResult:
+    async def fake_discovery(
+        base_url: str,
+        api_key: str,
+        *,
+        provider_type: ProviderType,
+    ) -> ModelDiscoveryResult:
         events.append("discovery")
-        seen["discovery"] = (base_url, api_key)
+        seen["discovery"] = (base_url, api_key, provider_type)
         return ModelDiscoveryResult(models=("only-model",), request_id="fixture-discovery")
 
     async def fake_canary(
@@ -529,13 +618,99 @@ async def test_resolve_and_canary_uses_discovery_but_passes_only_env_name_to_ada
     assert discovery is not None
     assert canary == _canary()
     assert events == ["discovery", "local-validation", "canary"]
-    assert seen["discovery"] == ("https://provider.example/v1", "offline-secret")
+    assert seen["discovery"] == (
+        "https://provider.example/v1",
+        "offline-secret",
+        ProviderType.OPENAI_COMPATIBLE,
+    )
     assert seen["canary"] == (
         "https://provider.example/v1",
         "only-model",
         "CLI_PROVIDER_KEY",
         {"temperature": 0, "top_p": 1, "max_tokens": 64, "seed": 42},
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_and_canary_uses_explicit_non_chat_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    async def unexpected_chat_canary(*_args: Any, **_kwargs: Any) -> CanaryResult:
+        pytest.fail("a Responses Run must not use the Chat Completions canary")
+
+    async def fake_provider_canary(
+        provider_type: ProviderType,
+        base_url: str,
+        remote_model: str,
+        api_key_env: str,
+        generation: dict[str, Any],
+    ) -> CanaryResult:
+        seen["canary"] = (
+            provider_type,
+            base_url,
+            remote_model,
+            api_key_env,
+            generation,
+        )
+        return _canary()
+
+    monkeypatch.setattr(evaluation_cli, "run_chat_canary", unexpected_chat_canary)
+    monkeypatch.setattr(evaluation_cli, "run_provider_canary", fake_provider_canary)
+
+    remote_model, discovery, canary = await evaluation_cli._resolve_and_canary(
+        base_url="https://provider.example/zen/go/v1/responses",
+        requested_model="remote-model",
+        api_key="offline-secret",
+        api_key_env="CLI_PROVIDER_KEY",
+        generation={"temperature": 0, "top_p": 1, "max_tokens": 64, "seed": None},
+        skip_discovery=True,
+        question_count=2,
+        run_attempts=3,
+        yes=True,
+        provider_type=ProviderType.OPENAI_RESPONSES,
+    )
+
+    assert remote_model == "remote-model"
+    assert discovery is None
+    assert canary == _canary()
+    assert seen["canary"] == (
+        ProviderType.OPENAI_RESPONSES,
+        "https://provider.example/zen/go/v1/responses",
+        "remote-model",
+        "CLI_PROVIDER_KEY",
+        {"temperature": 0, "top_p": 1, "max_tokens": 64, "seed": None},
+    )
+
+
+def test_resume_reads_explicit_provider_protocol_snapshot() -> None:
+    run = SimpleNamespace(
+        model_parameters_snapshot={
+            "model": {
+                "adapter_type": "anthropic_messages",
+                "base_url": "https://provider.example/zen/go/v1/messages",
+                "remote_model_name": "remote-model",
+                "api_key_env": "CLI_PROVIDER_KEY",
+            },
+            "generation": {
+                "temperature": 0,
+                "top_p": 1,
+                "max_tokens": 64,
+                "seed": None,
+            },
+        }
+    )
+
+    provider_type, base_url, remote_model, api_key_env, generation = (
+        evaluation_cli._run_provider_configuration(run)
+    )
+
+    assert provider_type == ProviderType.ANTHROPIC_MESSAGES
+    assert base_url.endswith("/messages")
+    assert remote_model == "remote-model"
+    assert api_key_env == "CLI_PROVIDER_KEY"
+    assert generation["seed"] is None
 
 
 @pytest.mark.asyncio
@@ -667,7 +842,8 @@ async def test_resume_temporarily_copies_source_key_and_evaluates_only_missing_q
         status=RunStatus.PENDING,
         total_questions=10,
         completed_questions=3,
-        attempt_count=1,
+        attempt_count=3,
+        failed_attempt_count=0,
         max_attempts=3,
         model_parameters_snapshot={
             "model": {
@@ -707,7 +883,7 @@ async def test_resume_temporarily_copies_source_key_and_evaluates_only_missing_q
         assert kwargs["api_key"] == "offline-resume-secret"
         assert kwargs["api_key_env"] == "CLI_FROZEN_TARGET_KEY"
         assert kwargs["question_count"] == 7
-        assert kwargs["run_attempts"] == 2
+        assert kwargs["run_attempts"] == 3
         assert evaluation_cli.os.environ["CLI_FROZEN_TARGET_KEY"] == ("offline-resume-secret")
         return "remote-model", None, _canary()
 
@@ -745,6 +921,7 @@ async def test_resume_refuses_exhausted_run_before_accessing_key_or_provider(
         total_questions=10,
         completed_questions=5,
         attempt_count=3,
+        failed_attempt_count=3,
         max_attempts=3,
         model_parameters_snapshot={
             "model": {

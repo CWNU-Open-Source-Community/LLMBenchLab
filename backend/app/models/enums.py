@@ -6,6 +6,8 @@ from enum import StrEnum
 class ProviderType(StrEnum):
     MOCK = "mock"
     OPENAI_COMPATIBLE = "openai_compatible"
+    OPENAI_RESPONSES = "openai_responses"
+    ANTHROPIC_MESSAGES = "anthropic_messages"
 
 
 class CredentialSource(StrEnum):

@@ -253,21 +253,46 @@ Run 终态、defer 或 exhaust 转换会先在短事务中提交，再做 lease 
 - 增加 Worker 不会自动提高治理 limit；也不能消除 Provider fixed-minute 或 lifetime budget。
 - 当前实测只覆盖最多 2 个 Worker；更高数量必须重新测量。
 
-Compose 扩到两个 Worker：
+标准 Compose 入口默认启动两个 Worker，并在返回成功前核对 API 暴露的
+`expected/registered/live/stalled/shortfall=2/2/2/0/0`：
 
 ```bash
-LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES=2 \
-  docker compose up -d --no-deps --scale worker=2 worker
+make dev-multi
+# 等价入口，也可显式声明规模
+make docker-up WORKERS=2
 ```
 
-缩到一个 Worker：
+缩到一个 Worker时也必须走同一包装器，让 API expected 声明与实际 scale
+一起变化：
 
 ```bash
-LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES=1 \
-  docker compose up -d --no-deps --scale worker=1 worker
+make docker-up WORKERS=1
 ```
 
-`LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` 是部署声明，不从历史进程行猜测；规模与 expected 不一致会产生有意的 shortfall。缩容依赖 SIGTERM grace。先观察活动 Run，等待被停止 Worker 排空；若 grace 耗尽，未完成 lease 留到数据库自然过期，由 peer 以递增 token 接管。缩容后检查 Worker health、DB-time registered/live/stalled、`running/expired_running/retry_scheduled`、active reservations 和 Response 唯一性。
+`WORKERS` 映射到 launcher-only 的
+`LLMBENCHLAB_COMPOSE_WORKER_PROCESSES`，包装器再用同一值设置低层
+`LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` 和 `--scale worker=N`。包装器把 exited
+replica 也纳入扩缩方向判断；扩容/重启先启动 Worker，要求 fresh active generation 数
+精确为 `N`，并用应用数据库时钟 watermark 证明至少 `N-running` 个新 generation 已完成
+本轮 scan，随后才重建 API 提高 expected；缩容先重建 API 降低 expected，再让 Compose
+graceful scale Worker。
+不要只对 `worker` service 执行 `--no-deps --scale`：那不会重建 API，旧 expected
+会与实际规模漂移。直接使用低层 `docker compose` 时，操作者必须自行同步两者并核对
+gauges；标准包装器最多轮询 30 秒，超时非零且保留栈供诊断。
+
+连接已经迁移到 head 的 PostgreSQL 时，本地 API/Vite 开发会话也可启动多个独立
+Worker 进程：
+
+```bash
+make dev DEV_WORKERS=2
+```
+
+每个 Worker 同时持有一个 Run，Run 内仍可有 1–4 个 Provider 请求并发。因此未被
+governance 限制时，潜在外发并发上界约为 `Worker 数 × Run concurrency`；增加
+Worker 会放大 Provider 限流和费用风险。一个长时间 SSE/HTTP 请求只占住其所在
+Worker，peer 仍能领取其他数据集的 Run；若所有 Worker 都被长请求占满，队列仍会等待。
+
+缩容依赖 SIGTERM grace。先观察活动 Run，等待被停止 Worker 排空；若 grace 耗尽，未完成 lease 留到数据库自然过期，由 peer 以递增 token 接管。缩容后检查 Worker health、DB-time registered/live/stalled、`running/expired_running/retry_scheduled`、active reservations 和 Response 唯一性。
 
 ### 6.2 Worker crash/lease expiry
 
@@ -372,25 +397,29 @@ llmbenchlab-audit-retention restore \
 
 退出码 `0` 表示已确认成功，`2` 表示在提交前安全失败，`3` 表示提交已成功但后验核验失败，`4` 表示 commit outcome unknown。遇到 `3` 或 `4` 不得盲目重跑 mutation：保留 archive/count/digest，先执行只读 `reconcile` 判定数据库与 archive 的精确关系，再由操作者决定恢复或删除。Archive 与数据库/keyring 备份是不同资产；archive 不含 credential ciphertext/nonce/keyring，也不能单独恢复 stored Provider Key。
 
-## 10. 0007、0006、0005 与 0004 安全回滚
+## 10. 0008、0007、0006、0005 与 0004 安全回滚
 
-### 10.1 Observational overdraw 数据修复 0007
+### 10.1 Provider API 协议约束 0008
 
-当前 head `20260830_0007` 不新增表、字段或索引，也不修改 never-delete reservation、Provider actual usage、Response、audit 或 Run 终态。它只关联 managed reservation 对应的 `evaluation_runs.input_token_reservation`，按以下规则重算每个 `governance_scopes.overdrawn`：input/cost 维度只有在 Run 冻结了显式 input reservation 时参与；显式 `max_tokens` 形成的 output reservation 独立参与；没有关联 Run 的内部 synthetic reservation 继续把调用者提供的值视为显式。
+当前 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并同时替换 Provider 类型 check 与远程配置 check，使 `openai_responses`、`anthropic_messages` 成为显式 Adapter 值；既有 `mock`/`openai_compatible` 行不改写，13 表、Run/Response、ledger、audit 与 archive-v1 字段不变。`0008 -> 0007` 会先锁定 Model 表并检查新类型；只要存在任一新协议 Model 就在第一条 DDL 前拒绝，否则恢复 `VARCHAR(17)` 与两个旧 check。安全回退必须先停止 API/Worker/CLI writer，确认无 active Run，并在 0008 应用中显式删除或转换这些配置；不要直接改 check、删历史 Run 或绕过凭据/active-Run 门禁。
+
+### 10.2 Observational overdraw 数据修复 0007
+
+`20260830_0007` 不新增表、字段或索引，也不修改 never-delete reservation、Provider actual usage、Response、audit 或 Run 终态。它只关联 managed reservation 对应的 `evaluation_runs.input_token_reservation`，按以下规则重算每个 `governance_scopes.overdrawn`：input/cost 维度只有在 Run 冻结了显式 input reservation 时参与；显式 `max_tokens` 形成的 output reservation 独立参与；没有关联 Run 的内部 synthetic reservation 继续把调用者提供的值视为显式。
 
 `0006 -> 0007` 和 `0007 -> 0006` 都会在任何 materialized 更新前拒绝仍为 `reserved` 或 `send_started` 的 attempt。标准维护流程是停止 API/Worker/CLI writer，确认 active reservation 为零并创建一致性备份，再由唯一 migration owner 执行 `make migrate`。直接 `UPDATE governance_scopes`、删除 ledger 或裁剪 actual usage 均不受支持。降级到 `0006` 只按旧谓词重算 flag，让旧应用看到与旧 runtime 一致的 projection；它不会恢复旧代码、删除事实或把历史失败 Run 改成成功。
 
-### 10.2 Governance index compatibility repair 0006
+### 10.3 Governance index compatibility repair 0006
 
 revision `20260829_0006` 不增加新的业务字段或表，只为曾执行早期 `0004` 变体的数据库条件补齐 `ix_evaluation_runs_started_at_id`、`ix_evaluation_runs_finished_at_id` 与 `uq_governance_policies_single_active`。`make migrate` 只在 revision fingerprint 为 canonical，或缺失项是这三个索引的非空子集时放行，并先创建 SQLite 一致性备份；这允许在 SQLite repair DDL 部分完成但 marker 仍为 `0005` 时安全重入。PostgreSQL `0005` 也必须通过 metadata drift 校验。若有多条 active policy、错误的同名索引或任何额外 drift，必须人工核对，工具不会自动停用 policy。`0006 -> 0005` 保留这三个 canonical `0004` 索引，因此是有意的 no-op downgrade。
 
-### 10.3 Worker progress / retention revision 0005
+### 10.4 Worker progress / retention revision 0005
 
 revision `20260828_0005` 增加 `worker_processes` 和 audit retention/exporter 扫描索引。`0005 -> 0004` 在第一条 DDL 前检查 Worker process facts；只要表中存在任何 generation 行就拒绝，以免静默丢失注册、进展或 graceful-stop 证据。安全降级必须先停止 Worker、归档需要保留的 process facts，并由明确的数据生命周期审批清空；正常代码回滚应保留 0005 schema 并优先向前修复。
 
 正式迁移验收同时保留两层独立门禁：populated 0005 数据库拒绝跨过 Worker progress revision且 revision/核心事实不变；隔离空库允许 `0005 -> 0004 -> 0005`。这不会替代下节已有的 populated 0004 governance 拒绝与空库 `0004 -> 0003 -> 0004` 往返。
 
-### 10.4 Governance/audit revision 0004
+### 10.5 Governance/audit revision 0004
 
 revision `20260827_0004` 增加 policy、scope、minute bucket、question execution、Provider attempt ledger、typed audit、Run governance/fairness 字段及 Response Provider metadata。downgrade guard 在第一条 DDL 前检查数据损失风险。
 

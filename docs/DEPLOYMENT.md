@@ -5,7 +5,7 @@
 LLMBenchLab 当前有三条本地运行路径：
 
 - 本地开发兼容路径：SQLite、可选 Redis、FastAPI API、独立 Worker 和 Vite。它便于开发与离线 Mock 验收，但 SQLite 只支持单 Worker 低并发，不能替代 PostgreSQL 并发证据。
-- Phase 2 Compose 可靠执行路径：PostgreSQL 是唯一任务事实来源，Redis Streams 是 at-least-once 通知层，API 与 Worker 是独立进程，migrate 是唯一 Alembic upgrade owner，Nginx 提供前端。
+- Phase 2 Compose 可靠执行路径：PostgreSQL 是唯一任务事实来源，Redis Streams 是 at-least-once 通知层，API 与多个可复制 Worker 是独立进程，migrate 是唯一 Alembic upgrade owner，Nginx 提供前端。标准 Make 入口默认两个 Worker。
 - 可信本地正式评测 CLI：直接连接已迁移数据库，固定下载/转换 MMLU-Pro 或 GPQA-Diamond，在同一进程做 Provider preflight、运行有界 Runner、恢复缺失题并导出全量报告；不要求浏览器、API、Redis 或常驻 Worker。
 
 可靠执行基础已经覆盖租约、心跳、fencing、幂等 Response、取消、有限重试、数据库 reconciliation 和故障恢复；数据库权威的 global/provider/model/run 治理、逐 HTTP attempt ledger、背压、公平 slice、typed audit/archive、Worker progress、固定 exporter/规则、历史延迟及 Mock 容量基线也已进入 Phase 2 工作树，`llmbenchlab-protocol-v1` 评分含义没有改变。部署仍不等于生产高可用；容量边界见 [`PERFORMANCE.md`](PERFORMANCE.md)，告警、故障、retention 与 0005/0004 安全回滚见 [`OPERATIONS.md`](OPERATIONS.md)。
@@ -18,7 +18,7 @@ LLMBenchLab 当前有三条本地运行路径：
 | --- | --- | --- | --- | --- |
 | 本地 Make | `http://127.0.0.1:5173` | `http://127.0.0.1:8000` | `backend/data/llmbenchlab.db`；Redis 可选 | `make dev` 启动 API、独立 Worker、frontend；默认 loopback |
 | 可信本地 CLI | 不需要 | 不需要 | 当前 `DATABASE_URL`；`artifacts/` 中缓存、Benchmark ZIP 与报告 | `llmbenchlab-evaluate` 自己运行 Runner；同一数据库不得有竞争 Worker |
-| Docker Compose | `http://127.0.0.1:8080` | `http://127.0.0.1:8000` | `postgres-data`、`redis-data` named volumes | API/frontend 仅 loopback；PostgreSQL/Redis 无 host port |
+| Docker Compose | `http://127.0.0.1:8080` | `http://127.0.0.1:8000` | `postgres-data`、`redis-data` named volumes | `make dev-multi` 默认两个 Worker；API/frontend 仅 loopback；PostgreSQL/Redis 无 host port |
 
 API 系统端点：
 
@@ -85,6 +85,16 @@ make frontend
 
 SQLite 本地路径只允许单 Worker。不要启动多个 SQLite Worker，也不要用 SQLite kill/restart 代替真实 PostgreSQL 并发验收。
 
+当 `.env` 的有效 `DATABASE_URL` 已指向迁移到 head 的 PostgreSQL 时，同一 Vite 开发入口可以管理多个 Worker 进程：
+
+```bash
+make dev DEV_WORKERS=2
+```
+
+`DEV_WORKERS` 映射到 launcher-only 的 `LLMBENCHLAB_DEV_WORKER_PROCESSES`，范围为 1–32。单 Worker继续写 `worker.log`；多 Worker分别写 `worker-1.log`、`worker-2.log` 等，并向 API 注入同值的 `LLMBENCHLAB_WORKER_EXPECTED_PROCESSES`。任一 Worker、API 或 frontend 退出时，启动器向同一会话所有剩余进程发送 TERM、逐一等待并传播原退出码。请求 `N>1` 而有效 DSN 不是 PostgreSQL 时，会在创建日志或启动子进程前失败，错误不会回显 DSN。
+
+已有 SQLite 数据不能仅靠改 DSN 出现在 PostgreSQL。需要保留 Model、Benchmark 和 Run 时，必须先让 `pending/running`、active reservation 与 live Worker generation 通过受支持的取消/租约/对账流程收敛，随后停写并使用第 7 节的 SQLite→空 PostgreSQL importer；启动器不会自动迁移或双写。
+
 ### 3.3 直接运行子项目
 
 统一 Make 命令应是首选。排障时可显式运行：
@@ -149,7 +159,7 @@ uv run llmbenchlab-evaluate prepare \
 
 不要在 shell 命令中拼接真实值。CLI 没有 `--api-key` 参数，非交互且变量为空时会停止。
 
-使用兼容根地址的限题评测：
+使用兼容根地址的限题评测；`--provider-type` 必须与目标模型实际使用的协议一致：
 
 ```bash
 cd backend
@@ -157,21 +167,27 @@ uv run llmbenchlab-evaluate run \
   --dataset mmlu-pro \
   --profile official_cot \
   --limit 20 \
+  --provider-type openai_responses \
   --base-url https://provider.example.invalid/v1 \
   --model replace-with-provider-model-id \
   --concurrency 1
 ```
 
-Base URL 支持以下两种形式：
+Base URL 支持协议根地址或与显式协议匹配的完整 endpoint：
 
-- 兼容根地址 `https://host/v1`：发现请求为 `GET https://host/v1/models`，生成请求为 `POST https://host/v1/chat/completions`；
-- 完整 Chat 端点 `https://host/v1/chat/completions`：生成请求使用原地址，发现请求仍为同级 `https://host/v1/models`。
+- `--provider-type openai_compatible`：生成 endpoint 为 `/chat/completions`；
+- `--provider-type openai_responses`：生成 endpoint 为 `/responses`；
+- `--provider-type anthropic_messages`：生成 endpoint 为 `/messages`。
 
-远端 Provider 必须使用 HTTPS；明文 HTTP 仅允许 `localhost` 或字面量 loopback IP，用于操作者控制的本地推理服务。默认模型发现只在返回唯一模型时自动选择；返回多个模型必须提供 `--model`。任何模型 ID 若包含当前 Key，预检立即失败且错误不会回显该值。如果 `/models` 返回 404/405，只有显式提供模型名才继续。已知 Provider 不实现发现时可用 `--no-model-discovery --model ...`，但付费 canary 仍会执行。
+例如根地址 `https://host/v1` 会把发现请求发到 `GET https://host/v1/models`，再按所选协议生成对应 endpoint；完整地址 `https://host/v1/chat/completions`、`https://host/v1/responses` 或 `https://host/v1/messages` 则原样用于生成，发现请求仍推导为同级 `/models`。完整 endpoint 与 `--provider-type` 不匹配时会在发送 Key 前拒绝；不会根据模型名/URL 猜测协议，也不会在失败后跨协议 fallback。
 
-CLI 在发出 canary 前显示 Provider host、模型、计分题数、剩余 Run attempts 和最多 Chat Completion HTTP 尝试数，交互要求精确输入 `RUN`。canary 必须可解析为预期答案；若成功体明确返回不同于目标的模型名也会失败。上界包含每个逻辑调用最多 3 次 HTTP attempts，以及新 Run 的全部或恢复 Run 的剩余 execution attempts：`(缺失计分题数 × 剩余 Run attempts + 1 个 canary) × 3`。`--yes` 仅用于操作者明确批准的非交互环境。MMLU `official_cot` 默认 `temperature=0/max_tokens=4000`；其他配置默认 `temperature=0/max_tokens=1024`，共同默认 `top_p=1/seed=42/concurrency=1`，都可由命令参数覆盖并冻结到 Run。
+远端 Provider 必须使用 HTTPS；明文 HTTP 仅允许 `localhost` 或字面量 loopback IP，用于操作者控制的本地推理服务。模型发现按 `--provider-type` 鉴权：Chat/Responses 使用 `Authorization: Bearer`，Messages 使用 `x-api-key` 与 `anthropic-version`；Messages 的 `has_more/last_id` 通过 `after_id` 分页，并受累计 100 页、60 秒 wall-clock、2 MiB、10,000 项与缺失/重复 cursor 门禁保护。默认模型发现只在聚合后返回唯一模型时自动选择；返回多个模型必须提供 `--model`。任何模型 ID 若包含当前 Key，预检立即失败且错误不会回显该值。如果 `/models` 返回 404/405，只有显式提供模型名才继续。已知 Provider 不实现发现时可用 `--no-model-discovery --model ...`，但付费 canary 仍会执行。
 
-模型发现与 Chat 请求固定声明 `Accept-Encoding: identity` 并拒绝其他响应编码；发现体最多读取 2 MiB。Chat 显式请求 SSE 与流式 usage，持续消费到 `[DONE]`；普通 JSON 成功体上限 4 MiB，SSE wire/单事件/聚合 content 上限分别为 64 MiB/1 MiB/4 MiB，非 2xx 错误体上限 64 KiB。Provider 返回证据会递归检查成功内容、raw usage 的对象键/全部 JSON 标量、request ID、返回模型名、system fingerprint 和 finish reason；SSE content 先完整聚合，当前 Key 的精确回显再于进入 Runner/快照/Response 边界前替换为 `[REDACTED]`。这些控制不扫描无关 Benchmark/Question 内容，也不替代 Provider 账单检查、内容访问控制或通用 DLP。
+CLI 在发出 canary 前显示 Provider host、协议、模型、计分题数、剩余 failed-attempt 预算和最多 Provider HTTP 尝试数，交互要求精确输入 `RUN`。剩余预算严格为 `max_attempts - failed_attempt_count`，不把 cooperative yield 算作失败。canary 必须可解析为预期答案；若成功体明确返回不同于目标的模型名也会失败。上界包含每个逻辑调用最多 3 次 HTTP attempts：`(缺失计分题数 × 剩余 failed-attempt 预算 + 1 个 canary) × 3`。`--yes` 仅用于操作者明确批准的非交互环境。
+
+MMLU `official_cot` 的输出上限默认 `max_tokens=4000`，其他配置默认 `max_tokens=1024`，共同默认 `concurrency=1`。Chat Completions 另默认 `temperature=0/top_p=1/seed=42`；Responses 与 Messages 在未显式传入或由 Model 默认提供时省略 `temperature`、`top_p` 和 `seed`，避免向不支持采样字段的模型发送它们。Responses/Messages 不接受非空 seed；Messages 的 `temperature` 上限为 `1`，且 `max_tokens` 必须始终为有限正整数。允许的命令参数会冻结到 Run 快照。
+
+模型发现与三类远程请求固定声明 `Accept-Encoding: identity` 并拒绝其他响应编码；discovery 聚合最多 2 MiB/10,000 个模型 ID，Messages 分页另限制累计 100 页/60 秒 wall-clock，并拒绝 cursor 循环或 `has_more=true` 时缺失 `last_id`。Chat、Responses、Messages 的 SSE 必须分别消费到 `[DONE]`、`response.completed`、`message_stop`；普通 JSON 成功体上限 4 MiB，SSE wire/单事件/聚合 content 上限分别为 64 MiB/1 MiB/4 MiB，非 2xx 错误体上限 64 KiB。Provider 返回证据会递归检查成功内容、raw usage 的对象键/全部 JSON 标量、request ID、返回模型名、system fingerprint 和 finish reason；SSE content 先完整聚合，当前 Key 的精确回显再于进入 Runner/快照/Response 边界前替换为 `[REDACTED]`。这些控制不扫描无关 Benchmark/Question 内容，也不替代 Provider 账单检查、内容访问控制或通用 DLP。
 
 API URL 与 Key 已足以在 `/models` 只返回一个可用 ID 时选择模型；若返回多个模型，仍需提供 `--model`，避免猜测付费目标。`--input-price-per-million`/`--output-price-per-million` 是可选成本估算输入；不提供价格或 Provider usage 时报告成本为 unknown，而不是虚假 `0`。
 
@@ -184,6 +200,7 @@ cd backend
 uv run llmbenchlab-evaluate run \
   --dataset gpqa-diamond \
   --full \
+  --provider-type openai_compatible \
   --base-url https://provider.example.invalid/v1/chat/completions \
   --model replace-with-provider-model-id \
   --api-key-env MY_PROVIDER_API_KEY \
@@ -250,6 +267,7 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | SIGTERM 后等待活动 Run 的应用 grace |
 | `LLMBENCHLAB_WORKER_PROGRESS_FLUSH_SECONDS` | `5` | 真实 scan/claim/progress/heartbeat bit 合并写入 DB 的最大间隔；timer 不生成 keepalive |
 | `LLMBENCHLAB_WORKER_PROGRESS_STALE_SECONDS` | `60` | DB UTC 下 active generation 的 stale cutoff |
+| `LLMBENCHLAB_DEV_WORKER_PROCESSES` | `1` | 仅 `scripts/dev.sh` 使用的本地 Worker 进程数，范围 1–32；大于 1 要求 PostgreSQL |
 | `LLMBENCHLAB_WORKER_EXPECTED_PROCESSES` | `1` | 部署明确声明的最小 live Worker 数；扩缩容必须同步修改 |
 | `LLMBENCHLAB_WORKER_RECOVERY_ALERT_SECONDS` | `60` | expired lease age 告警比较阈值 |
 | `LLMBENCHLAB_MOCK_GENERATION_DELAY_SECONDS` | `0` | 只用于确定性 Mock 故障测试；不改变报告 latency 或协议评分 |
@@ -287,7 +305,8 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_COMPOSE_WORKER_SHUTDOWN_GRACE_SECONDS` | `30` | 应用 grace；容器另有 45 秒 stop grace |
 | `LLMBENCHLAB_COMPOSE_WORKER_PROGRESS_FLUSH_SECONDS` | `5` | 映射到 Worker progress flush |
 | `LLMBENCHLAB_COMPOSE_WORKER_PROGRESS_STALE_SECONDS` | `60` | 映射到 Worker stale cutoff |
-| `LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` | `1` | Compose 目标 Worker 数；`--scale` 时必须同步设置 |
+| `LLMBENCHLAB_COMPOSE_WORKER_PROCESSES` | `2` | 标准 Compose 包装器的 Worker replica 数，范围 1–32；当前只有 1–2 经过容量资格 |
+| `LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` | `1`（直接 Compose） | API 的低层 expected 声明；标准包装器从 Worker 数自动设置，直接 `docker compose` 时仍须自行同步 |
 | `LLMBENCHLAB_COMPOSE_WORKER_RECOVERY_ALERT_SECONDS` | `60` | exporter lease recovery 告警阈值 |
 | `LLMBENCHLAB_COMPOSE_REDIS_BLOCK_MILLISECONDS` | `1000` | 映射到 Worker Redis blocking read 上限 |
 | `LLMBENCHLAB_COMPOSE_REDIS_OPERATION_TIMEOUT_SECONDS` | `1` | 容器 Redis 操作 timeout |
@@ -298,7 +317,7 @@ Pydantic 应用设置优先读取 `LLMBENCHLAB_*`，并为数据库、Redis、CO
 | `LLMBENCHLAB_COMPOSE_MOCK_GENERATION_DELAY_SECONDS` | `0` | 可靠性测试专用 Mock delay |
 | `LLMBENCHLAB_COMPOSE_CREDENTIAL_KEYS_FILE` | `.secrets/credential-keys.json` | Compose 只读挂载给 API/Worker 的宿主 keyring |
 
-### 4.4 OpenAI-compatible Key
+### 4.4 远程 Provider Key
 
 Web 服务路径让用户在 Models 表单直接输入真实 Provider Key。API 将它作为 write-only 字段接收，用共享 keyring 做 AES-256-GCM 加密，并只把认证密文写入 `model_credentials`；Worker 读取同一 keyring 解密。API 不把凭据流中的 Key 或 Provider 回显复制进 Model GET/list、Run 的 model snapshot、队列和报告证据，也不返回密文、nonce 或 key id；这不排除无关用户数据的独立字面巧合。keyring 必须与数据库分开备份；数据库与 keyring 同时泄漏时，Provider Key 仍可被解密。
 
@@ -339,6 +358,7 @@ Redis 开启 AOF (`appendfsync everysec`) 只改善通知持久性，不是备�
 - `20260828_0005`：Worker progress facts 与 audit retention/exporter 有界扫描索引。
 - `20260829_0006`：不改变逻辑 schema 的兼容修复；仅为早期 `0004` 历史变体补齐三个 canonical governance 索引。
 - `20260830_0007`：不改变 schema、ledger 或 Provider actual usage 的数据修复；仅按显式 input/output hard reservation 与由完整上界和价格派生的 reserved cost 语义重算 `governance_scopes.overdrawn`。
+- `20260830_0008`：将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，同时替换 Provider 类型 check 与远程配置 check，加入显式 `openai_responses` / `anthropic_messages` Adapter；旧 Model 不改写，存在新类型 Model 时 downgrade 先拒绝。
 
 本地 SQLite 更新：
 
@@ -346,7 +366,7 @@ Redis 开启 AOF (`appendfsync everysec`) 只改善通知持久性，不是备�
 make migrate
 ```
 
-命令先执行 `app.db.prepare_migrations`，再 `alembic upgrade head`。受支持的未版本化 SQLite 会在严格结构/integrity/FK 检查和一致性备份后 stamp；与 current metadata 一致的未版本化库只 stamp 到 `0006`，确保 data-only `0007` 仍实际执行而不会被跳过。已知早期 `0004/0005` 变体只有在 revision fingerprint 为 canonical，或仅缺这三个已知索引的非空子集且最多一条 active policy 时，才会备份并交给 `0006` 修复，因此修复 DDL 中断后可安全重入。新近成为 historical 的 PostgreSQL `0005/0006` 按各自规则先做 metadata drift 校验；未知 drift 在写 revision 或 repair DDL 前拒绝。`0007` 在更新 materialized flag 前拒绝任何 `reserved/send_started` reservation。普通 API/Worker 启动只检查 head，不运行 `create_all`、preflight 或 upgrade。
+命令先执行 `app.db.prepare_migrations`，再 `alembic upgrade head`。受支持的未版本化 SQLite 会在严格结构/integrity/FK 检查和一致性备份后 stamp；即使结构已与 current metadata 一致，也只 stamp 到 `0006`，确保 data-only `0007` 仍实际执行，然后再由 `0008` 扩展 `provider_type` 列宽并替换两个 Provider check。已知早期 `0004/0005` 变体只有在 revision fingerprint 为 canonical，或仅缺这三个已知索引的非空子集且最多一条 active policy 时，才会备份并交给 `0006` 修复，因此修复 DDL 中断后可安全重入。新近成为 historical 的 PostgreSQL `0005/0006/0007` 按各自规则先做 metadata drift 校验；未知 drift 在写 revision 或 repair DDL 前拒绝。`0007` 在更新 materialized flag 前拒绝任何 `reserved/send_started` reservation。普通 API/Worker 启动只检查 head，不运行 `create_all`、preflight 或 upgrade。
 
 Compose 中只有一次性 `migrate` 服务执行：
 
@@ -356,7 +376,7 @@ python -m app.db.prepare_migrations && alembic upgrade head && alembic check
 
 `api` 与 `worker` 必须等待 migrate exit 0，然后仅执行 head check。不要把 Alembic 命令加回 API/Worker entrypoint，也不要同时运行多个 migration owner。
 
-`0007 -> 0006` 只按旧语义重算 `governance_scopes.overdrawn`，保留 reservation、actual usage、Response、audit 与 Run 终态；若有 active reservation 会在更新前拒绝。`0006 -> 0005` 是 no-op downgrade，因为三个索引本来就属于 canonical `0004`；`0005 -> 0004` 在 `worker_processes` 有任意 generation fact 时于第一条 DDL 前拒绝；`0004 -> 0003` 在任何 policy/scope/bucket/question-execution/ledger/audit 行或新 Run/Response 证据存在时同样拒绝。正常使用后的数据库不能把它们当普通代码回滚。`0003 -> 0002` 只要 `model_credentials` 存在任意行也会拒绝，避免静默丢失 Provider Key。`0002 -> 0001` 在发现 `pending` 或 `running` Run 时拒绝；它会删除可靠性元数据但保留核心实体与协议证据。完整 0007/0006/0005/0004 回滚流程见 [OPERATIONS.md](OPERATIONS.md)；schema downgrade 不是 PostgreSQL→SQLite 反向同步，也不恢复 Phase 1 进程内 Runner。
+`0008 -> 0007` 会把 `models.provider_type` 从 `VARCHAR(18)` 收回 `VARCHAR(17)`，并恢复旧 Provider 类型 check 与远程配置 check；若存在 `openai_responses` 或 `anthropic_messages` Model，它会在第一条 DDL 前拒绝。`0007 -> 0006` 只按旧语义重算 `governance_scopes.overdrawn`，保留 reservation、actual usage、Response、audit 与 Run 终态；若有 active reservation 会在更新前拒绝。`0006 -> 0005` 是 no-op downgrade，因为三个索引本来就属于 canonical `0004`；`0005 -> 0004` 在 `worker_processes` 有任意 generation fact 时于第一条 DDL 前拒绝；`0004 -> 0003` 在任何 policy/scope/bucket/question-execution/ledger/audit 行或新 Run/Response 证据存在时同样拒绝。正常使用后的数据库不能把它们当普通代码回滚。`0003 -> 0002` 只要 `model_credentials` 存在任意行也会拒绝，避免静默丢失 Provider Key。`0002 -> 0001` 在发现 `pending` 或 `running` Run 时拒绝；它会删除可靠性元数据但保留核心实体与协议证据。完整 0008/0007/0006/0005/0004 回滚流程见 [OPERATIONS.md](OPERATIONS.md)；schema downgrade 不是 PostgreSQL→SQLite 反向同步，也不恢复 Phase 1 进程内 Runner。
 
 ### 5.3 备份与恢复证据边界
 
@@ -374,16 +394,20 @@ Compose 定义六个 service，其中五个常驻，`migrate` 为一次性任务
 | `redis` | Redis 7 Streams 通知层，AOF everysec | `redis-cli ping`；`redis-data`；无 host port |
 | `migrate` | 唯一 Alembic preflight/upgrade/check owner | 等 PostgreSQL healthy；成功后 exit 0，不常驻 |
 | `api` | FastAPI CRUD、write-only Key 加密、Run commit 与 best-effort publish | 等 migrate 成功；只读挂载 keyring；启动只 head check；`/ready` 为容器 health；loopback API port |
-| `worker` | 独立租约 Worker、stored Key 解密、DB reconciliation、Redis consume/ACK、DB-time process progress | 等 migrate 成功；只读挂载同一 keyring；启动只 head check；dependency-only probe；容器 stop grace 45 秒 |
+| `worker` | 可横向复制的独立租约 Worker、stored Key 解密、DB reconciliation、Redis consume/ACK、DB-time process progress | 等 migrate 成功；只读挂载同一 keyring；启动只 head check；dependency-only probe；容器 stop grace 45 秒 |
 | `frontend` | Nginx 静态站与 `/api/` 同源代理 | 等 API healthy；loopback frontend port；关闭 API request buffering，避免 Key body 被 Nginx 临时落盘 |
 
 ### 6.1 启动、检查和停止
 
 ```bash
 make docker-up
+# 等价的产品化名称
+make dev-multi
+# 显式副本数
+make docker-up WORKERS=2
 ```
 
-该命令执行 `docker compose up --build --wait --wait-timeout 180 --remove-orphans`。检查：
+标准包装器校验副本数后，用同一个值导出 `LLMBENCHLAB_COMPOSE_WORKER_EXPECTED_PROCESSES` 并分阶段执行 build、依赖/migrate、Worker、API、frontend。它以全部 Compose replica（包括 exited）判断是否缩容，并另算 running replica 数；扩容/重启时先增加 Worker，要求恰好 `N` 个 fresh active generation 已有真实数据库 scan，且至少 `N-running` 个 generation 在本轮 DB-time watermark 之后启动并完成 scan，再强制重建 API 提高 expected。缩容时先重建 API 降低 expected，再 graceful scale Worker。默认 `N=2`。最后从 API container 有界轮询 `/api/v1/tasks/metrics`，只有 `worker_expected_processes=N`、`worker_registered_processes=N`、`worker_live_processes=N`、`worker_stalled_processes=0`、`worker_shortfall_processes=0` 才返回成功；scan 或 gauges 超时会保留当前 stack 供诊断，不自动删除 volume 或容器。检查：
 
 ```bash
 docker compose ps -a
@@ -616,10 +640,10 @@ operational/security audit 分别至少保留 90/365 天，清理不在请求链
 | 领域 | 当前可靠执行基础 | 生产前仍需 |
 | --- | --- | --- |
 | 身份与权限 | 无鉴权，所有端点可读写 | 登录/API Token、RBAC、对象授权、管理员导入/Model 权限、审计 |
-| 网络 | API/frontend loopback；PG/Redis 内部 Compose 网络；Provider Chat 真 SSE 客户端 | TLS 反向代理、可信 Host/代理、Worker→Provider 全链路 SSE flush/buffering/timeout 核对、网络策略、认证与安全 headers |
+| 网络 | API/frontend loopback；PG/Redis 内部 Compose 网络；Provider Chat/Responses/Messages 真 SSE 客户端 | TLS 反向代理、可信 Host/代理、Worker→Provider 全链路 SSE flush/buffering/timeout 核对、网络策略、认证与安全 headers |
 | PostgreSQL | 单实例、named volume、迁移/故障测试 | 托管/HA、TLS、最小权限角色、加密、备份/PITR、RPO/RTO 与真实恢复演练 |
 | Redis | 单实例 AOF、非权威通知层 | 认证/TLS、HA/容量/保留策略、监控；继续保持 DB 事实来源 |
-| Worker | 租约/心跳/fencing/重试/取消；数据库权威四层治理、attempt ledger、背压/公平 slice；DB-time scan/claim/progress/heartbeat aggregate；真实双 Worker Mock 基线 | 滚动排空自动化、更高 Worker 数/真实 Provider 的独立容量与成本规划 |
+| Worker | 租约/心跳/fencing/重试/取消；数据库权威四层治理、attempt ledger、背压/公平 slice；DB-time scan/claim/progress/heartbeat aggregate；标准 Compose 默认双 Worker且按方向扩缩并校验 expected/registered/live/stalled/shortfall；真实双 Worker Mock 基线 | 滚动排空自动化、三个以上 Worker/真实 Provider 的独立容量与成本规划 |
 | Secrets | Web write-only；AES-GCM 密文入库；API/Worker 共享独立 keyring；legacy env 可用 | 身份/对象授权、KMS/HSM、短期凭据、批量重加密、轮换审计与每进程最小权限 |
 | SSRF/数据外发 | 远端 HTTPS、HTTP 仅 loopback、禁重定向与有界正文 | allowlist、DNS/IP 验证、出站代理、元数据阻断、外发审批 |
 | 可观测性 | 受控 JSON 日志源、组件健康、DB gauges、typed audit/history、固定低基数 Prometheus exporter、8 条规则、Worker progress、逐题安全 Provider metadata | 受认证 Dashboard、统一 traces、告警发送/值班集成、生产 SLO、数据库管理员级不可篡改审计 |

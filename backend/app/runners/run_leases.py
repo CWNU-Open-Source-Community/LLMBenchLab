@@ -26,6 +26,7 @@ from app.models import (
     QuestionExecution,
     RunStatus,
 )
+from app.services.run_evidence import canonical_run_evidence
 
 DatabaseClock = Callable[[Session], datetime]
 _GOVERNANCE_INTEGRITY_REASON = "governance_integrity_error"
@@ -145,31 +146,32 @@ def aggregate_run_evidence(session: Session, run: EvaluationRun) -> int:
         cost,
         cost_reports,
     ) = aggregate
-    planned = run.total_questions
     completed_response_count = int(response_count or 0)
-    correct = round(float(score_sum or 0))
-    run.completed_questions = completed_response_count
-    run.correct_questions = correct
-    run.error_questions = int(errors or 0)
-    run.score = (float(score_sum or 0) / planned * 100) if planned else 0.0
-    run.completion_rate = (int(completed_outputs or 0) / planned * 100) if planned else 0.0
-    run.answered_accuracy = (correct / int(evaluable) * 100) if int(evaluable or 0) else None
-    run.average_latency_ms = float(avg_latency) if avg_latency is not None else None
-    run.input_tokens = (
-        int(in_tok or 0)
-        if completed_response_count and int(in_reports or 0) == completed_response_count
-        else None
+    metrics = canonical_run_evidence(
+        planned_questions=run.total_questions,
+        response_count=completed_response_count,
+        score_sum=float(score_sum or 0),
+        completed_outputs=int(completed_outputs or 0),
+        evaluable_responses=int(evaluable or 0),
+        error_responses=int(errors or 0),
+        average_latency_ms=float(avg_latency) if avg_latency is not None else None,
+        known_input_tokens=int(in_tok or 0),
+        input_token_reports=int(in_reports or 0),
+        known_output_tokens=int(out_tok or 0),
+        output_token_reports=int(out_reports or 0),
+        known_estimated_cost=Decimal(cost or 0),
+        estimated_cost_reports=int(cost_reports or 0),
     )
-    run.output_tokens = (
-        int(out_tok or 0)
-        if completed_response_count and int(out_reports or 0) == completed_response_count
-        else None
-    )
-    run.estimated_cost = (
-        Decimal(cost or 0)
-        if completed_response_count and int(cost_reports or 0) == completed_response_count
-        else None
-    )
+    run.completed_questions = metrics.completed_questions
+    run.correct_questions = metrics.correct_questions
+    run.error_questions = metrics.error_questions
+    run.score = metrics.score
+    run.completion_rate = metrics.completion_rate
+    run.answered_accuracy = metrics.answered_accuracy
+    run.average_latency_ms = metrics.average_latency_ms
+    run.input_tokens = metrics.input_tokens
+    run.output_tokens = metrics.output_tokens
+    run.estimated_cost = metrics.estimated_cost
     return completed_response_count
 
 

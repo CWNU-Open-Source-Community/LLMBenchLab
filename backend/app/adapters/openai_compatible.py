@@ -68,6 +68,7 @@ _HTTP_ADAPTER_ERROR_TYPES = frozenset(
         "provider_http_error",
     }
 )
+_KNOWN_PROVIDER_ENDPOINT_SUFFIXES = frozenset({"/chat/completions", "/responses", "/messages"})
 
 
 class _ResponseBodyTooLarge(RuntimeError):
@@ -102,17 +103,25 @@ class _SSEAccumulator:
     def consume_event(self, raw_event: bytes) -> None:
         """Consume one decoded SSE ``data`` event without retaining raw bytes."""
 
+        invalid_utf8 = False
         try:
             event_text = raw_event.decode("utf-8")
-        except UnicodeError as exc:
-            raise self._invalid("Upstream SSE data was not valid UTF-8.") from exc
+        except UnicodeError:
+            invalid_utf8 = True
+            event_text = ""
+        if invalid_utf8:
+            raise self._invalid("Upstream SSE data was not valid UTF-8.")
         if event_text.strip() == "[DONE]":
             self.done = True
             return
+        invalid_json = False
         try:
             body = json.loads(event_text)
-        except ValueError as exc:
-            raise self._invalid("Upstream SSE data was not valid JSON.") from exc
+        except ValueError:
+            invalid_json = True
+            body = None
+        if invalid_json:
+            raise self._invalid("Upstream SSE data was not valid JSON.")
         if not isinstance(body, Mapping):
             raise self._invalid("Upstream SSE data was not a JSON object.")
 
@@ -169,10 +178,14 @@ class _SSEAccumulator:
             return
         if not isinstance(content, str):
             raise self._invalid("Upstream SSE content delta was not text.")
+        invalid_content = False
         try:
             encoded_size = len(content.encode("utf-8"))
-        except UnicodeError as exc:
-            raise self._invalid("Upstream SSE content was not valid Unicode text.") from exc
+        except UnicodeError:
+            invalid_content = True
+            encoded_size = 0
+        if invalid_content:
+            raise self._invalid("Upstream SSE content was not valid Unicode text.")
         if self.content_bytes + encoded_size > MAX_CHAT_SUCCESS_RESPONSE_BYTES:
             raise _ResponseBodyTooLarge(
                 limit=MAX_CHAT_SUCCESS_RESPONSE_BYTES,
@@ -227,11 +240,17 @@ def _is_loopback_host(hostname: str) -> bool:
 
 def _validated_base_url(base_url: str) -> str:
     normalized = base_url.strip().rstrip("/")
+    invalid_url = False
     try:
         parsed = urlsplit(normalized)
         hostname = parsed.hostname
-    except ValueError as exc:
-        raise ValueError("base_url must be an absolute HTTP(S) URL") from exc
+    except ValueError:
+        invalid_url = True
+        parsed = None
+        hostname = None
+    if invalid_url:
+        raise ValueError("base_url must be an absolute HTTP(S) URL")
+    assert parsed is not None
     if parsed.scheme not in {"http", "https"} or not hostname:
         raise ValueError("base_url must be an absolute HTTP(S) URL")
     if parsed.username or parsed.password:
@@ -243,6 +262,18 @@ def _validated_base_url(base_url: str) -> str:
     if parsed.scheme == "http" and not _is_loopback_host(hostname):
         raise ValueError("plain HTTP base_url is allowed only for loopback hosts")
     return normalized
+
+
+def _validate_protocol_endpoint(base_url: str, expected_suffix: str) -> None:
+    """Reject a full endpoint that belongs to a different known protocol."""
+
+    path = urlsplit(base_url).path.rstrip("/")
+    for suffix in _KNOWN_PROVIDER_ENDPOINT_SUFFIXES:
+        if path.endswith(suffix) and suffix != expected_suffix:
+            raise ValueError(
+                f"base_url endpoint {suffix!r} does not match the selected "
+                f"{expected_suffix!r} protocol"
+            )
 
 
 def sanitize_error_message(message: object, *secrets: str) -> str:
@@ -294,6 +325,9 @@ class OpenAICompatibleAdapter(ModelAdapter):
     closed by this adapter.
     """
 
+    _endpoint_suffix = "/chat/completions"
+    _transport_error_label = "OpenAI-compatible"
+
     def __init__(
         self,
         base_url: str,
@@ -319,6 +353,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         if api_key is not None and not isinstance(api_key, (SecretStr, str)):
             raise ValueError("api_key must be a secret string or null")
         self.base_url = _validated_base_url(base_url)
+        _validate_protocol_endpoint(self.base_url, self._endpoint_suffix)
         self.remote_model_name = remote_model_name
         self.api_key_env = api_key_env
         self._api_key = SecretStr(api_key) if isinstance(api_key, str) else api_key
@@ -372,9 +407,21 @@ class OpenAICompatibleAdapter(ModelAdapter):
 
     @property
     def chat_completions_url(self) -> str:
-        if self.base_url.endswith("/chat/completions"):
+        return self.endpoint_url
+
+    @property
+    def endpoint_url(self) -> str:
+        if urlsplit(self.base_url).path.rstrip("/").endswith(self._endpoint_suffix):
             return self.base_url
-        return f"{self.base_url}/chat/completions"
+        return f"{self.base_url}{self._endpoint_suffix}"
+
+    def _build_headers(self, api_key: str) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "text/event-stream",
+            "Accept-Encoding": "identity",
+            "Content-Type": "application/json",
+        }
 
     async def generate(
         self,
@@ -400,12 +447,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
             )
 
         payload = self._build_payload(messages, generation_config)
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Accept": "text/event-stream",
-            "Accept-Encoding": "identity",
-            "Content-Type": "application/json",
-        }
+        headers = self._build_headers(api_key)
         first_attempt = self._first_provider_attempt(attempt_context)
         started = time.perf_counter()
         client = self._client
@@ -440,11 +482,12 @@ class OpenAICompatibleAdapter(ModelAdapter):
 
             stream_result: _SSEAccumulator | None = None
             response_body: bytes | None = None
+            terminal_response_error: AdapterError | None = None
             terminal_transport_error: AdapterError | None = None
             try:
                 async with client.stream(
                     "POST",
-                    self.chat_completions_url,
+                    self.endpoint_url,
                     json=payload,
                     headers=headers,
                     timeout=self._timeout,
@@ -535,7 +578,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     disposition=ProviderAttemptDisposition.SETTLED_CONSERVATIVE,
                     outcome=ProviderAttemptOutcome.PROVIDER_RESPONSE_ERROR,
                 )
-                raise AdapterError(
+                terminal_response_error = AdapterError(
                     "provider_response_too_large",
                     sanitize_error_message(
                         f"Upstream response exceeded the {exc.limit}-byte safety limit.",
@@ -543,7 +586,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     ),
                     status_code=_safe_status_code(exc.status_code, api_key),
                     attempts=attempt,
-                ) from exc
+                )
             except httpx.TransportError as exc:
                 await _finish_provider_attempt(
                     self._attempt_controller,
@@ -558,7 +601,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     continue
                 terminal_transport_error = AdapterError(
                     error_type,
-                    f"OpenAI-compatible request failed: {safe_message}",
+                    f"{self._transport_error_label} request failed: {safe_message}",
                     retryable=True,
                     attempts=attempt,
                 )
@@ -587,9 +630,11 @@ class OpenAICompatibleAdapter(ModelAdapter):
                 )
                 raise
 
-            # Raise only after leaving the TransportError handler.  httpx transport
-            # exceptions retain their request (including Authorization), and Python
-            # otherwise attaches that exception as both cause/context to AdapterError.
+            # Raise only after leaving handlers whose exceptions retain the request
+            # (including credentials) or raw response chunks. Otherwise Python would
+            # attach those exceptions and their traceback frames to AdapterError.
+            if terminal_response_error is not None:
+                raise terminal_response_error
             if terminal_transport_error is not None:
                 raise terminal_transport_error
 
@@ -916,28 +961,40 @@ class OpenAICompatibleAdapter(ModelAdapter):
         attempts: int,
         api_key: str,
     ) -> ModelGenerationResult:
+        invalid_json = False
         try:
             body = json.loads(response_body)
-        except (ValueError, UnicodeError) as exc:
+        except (ValueError, UnicodeError):
+            invalid_json = True
+            body = None
+        if invalid_json:
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream returned a non-JSON success response.",
                 status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
-            ) from exc
+            )
+        missing_choice = False
         try:
             choice = body["choices"][0]
-        except (KeyError, IndexError, TypeError) as exc:
+        except (KeyError, IndexError, TypeError):
+            missing_choice = True
+            choice = None
+        if missing_choice:
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream response did not contain choices[0].",
                 status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
-            ) from exc
+            )
         finish_reason = choice.get("finish_reason") if isinstance(choice, Mapping) else None
+        missing_content = False
         try:
             content = choice["message"]["content"]
-        except (KeyError, TypeError) as exc:
+        except (KeyError, TypeError):
+            missing_content = True
+            content = None
+        if missing_content:
             if finish_reason == "length":
                 raise AdapterError(
                     "output_truncated",
@@ -945,13 +1002,13 @@ class OpenAICompatibleAdapter(ModelAdapter):
                     "Increase max_tokens or let the Provider choose its default.",
                     status_code=_safe_status_code(response.status_code, api_key),
                     attempts=attempts,
-                ) from exc
+                )
             raise AdapterError(
                 "invalid_provider_response",
                 "Upstream response did not contain choices[0].message.content.",
                 status_code=_safe_status_code(response.status_code, api_key),
                 attempts=attempts,
-            ) from exc
+            )
         usage_obj = body.get("usage") if isinstance(body, Mapping) else None
         provider_request_id = body.get("id") if isinstance(body, Mapping) else None
         returned_model = body.get("model") if isinstance(body, Mapping) else None

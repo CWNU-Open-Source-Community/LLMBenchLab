@@ -33,6 +33,7 @@ CREDENTIAL_REVISION = "20260827_0003"
 GOVERNANCE_REVISION = "20260827_0004"
 WORKER_PROGRESS_REVISION = "20260828_0005"
 INDEX_REPAIR_REVISION = "20260829_0006"
+OBSERVATIONAL_OVERDRAW_REVISION = "20260830_0007"
 
 _WORKER_PROGRESS_TABLES = {"worker_processes"}
 _WORKER_PROGRESS_INDEXES = {
@@ -63,6 +64,7 @@ _KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCE_BY_NAME = {
 _KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCES = frozenset(
     _KNOWN_GOVERNANCE_MISSING_INDEX_DIFFERENCE_BY_NAME.values()
 )
+_PROVIDER_PROTOCOL_TYPE_DIFFERENCE = "modify_type:models.provider_type:VARCHAR(17)->VARCHAR(18)"
 
 _WEB_CREDENTIAL_DIFFERENCES = {
     "add_table:model_credentials",
@@ -145,6 +147,7 @@ _GOVERNANCE_DIFFERENCE_SET = (
         "remove_constraint:evaluation_runs.ck_evaluation_runs_attempt_within_limit",
     }
     | _WORKER_PROGRESS_DIFFERENCE_SET
+    | {_PROVIDER_PROTOCOL_TYPE_DIFFERENCE}
 )
 _GOVERNANCE_DIFFERENCES = tuple(sorted(_GOVERNANCE_DIFFERENCE_SET))
 _GOVERNANCE_CHECK_NAMES_BY_TABLE = {
@@ -310,6 +313,10 @@ def _difference_fingerprint(difference: tuple[Any, ...]) -> str:
     operation = str(difference[0])
     if operation == "modify_nullable":
         return f"modify_nullable:{difference[2]}.{difference[3]}:{difference[5]}->{difference[6]}"
+    if operation == "modify_type":
+        existing_type = "".join(str(difference[5]).upper().split())
+        target_type = "".join(str(difference[6]).upper().split())
+        return f"modify_type:{difference[2]}.{difference[3]}:{existing_type}->{target_type}"
     if operation == "add_column":
         column = difference[3]
         return f"add_column:{difference[2]}.{column.name}"
@@ -664,6 +671,16 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
         RELIABILITY_REVISION,
         CREDENTIAL_REVISION,
     }
+    pre_provider_protocols = schema_revision in {
+        LEGACY_REVISION,
+        PHASE_1_REVISION,
+        RELIABILITY_REVISION,
+        CREDENTIAL_REVISION,
+        GOVERNANCE_REVISION,
+        WORKER_PROGRESS_REVISION,
+        INDEX_REPAIR_REVISION,
+        OBSERVATIONAL_OVERDRAW_REVISION,
+    }
     for table_name, table in _schema_tables_for_revision(schema_revision).items():
         expected_entries = [
             (str(constraint.name), _normalized_check_sql(constraint.sqltext))
@@ -706,6 +723,37 @@ def _validate_check_constraints(connection: Connection, *, schema_revision: str)
                     ),
                 ]
             )
+        if pre_provider_protocols and table_name == "models":
+            expected_entries = [
+                entry
+                for entry in expected_entries
+                if entry[0]
+                not in {
+                    "ck_models_provider_type_values",
+                    "ck_models_openai_configuration_required",
+                }
+            ]
+            expected_entries.append(
+                (
+                    "ck_models_provider_type_values",
+                    "provider_type IN ('mock', 'openai_compatible')",
+                )
+            )
+            if not legacy:
+                expected_entries.append(
+                    (
+                        "ck_models_openai_configuration_required",
+                        (
+                            "provider_type != 'openai_compatible' OR (base_url IS NOT NULL "
+                            "AND remote_model_name IS NOT NULL AND api_key_env IS NOT NULL)"
+                            if pre_credentials
+                            else "provider_type != 'openai_compatible' OR (base_url IS NOT NULL "
+                            "AND remote_model_name IS NOT NULL AND ((credential_source = "
+                            "'environment' AND api_key_env IS NOT NULL) OR "
+                            "(credential_source = 'stored' AND api_key_env IS NULL)))"
+                        ),
+                    )
+                )
         if pre_governance and table_name in _GOVERNANCE_CHECK_NAMES_BY_TABLE:
             expected_entries = [
                 entry
@@ -874,6 +922,7 @@ def prepare_database(
             GOVERNANCE_REVISION,
             WORKER_PROGRESS_REVISION,
             INDEX_REPAIR_REVISION,
+            OBSERVATIONAL_OVERDRAW_REVISION,
         )
         historical_heads = {(revision,) for revision in historical_revisions}
 
@@ -924,6 +973,7 @@ def prepare_database(
             if not sqlite_locked and source_revision not in {
                 WORKER_PROGRESS_REVISION,
                 INDEX_REPAIR_REVISION,
+                OBSERVATIONAL_OVERDRAW_REVISION,
             }:
                 return PreparationResult(action="versioned")
             expected_differences = {
@@ -931,9 +981,12 @@ def prepare_database(
                 PHASE_1_REVISION: _PHASE_1_DIFFERENCES,
                 RELIABILITY_REVISION: _RELIABILITY_DIFFERENCES,
                 CREDENTIAL_REVISION: _CREDENTIAL_DIFFERENCES,
-                GOVERNANCE_REVISION: _WORKER_PROGRESS_DIFFERENCES,
-                WORKER_PROGRESS_REVISION: (),
-                INDEX_REPAIR_REVISION: (),
+                GOVERNANCE_REVISION: tuple(
+                    sorted((*_WORKER_PROGRESS_DIFFERENCES, _PROVIDER_PROTOCOL_TYPE_DIFFERENCE))
+                ),
+                WORKER_PROGRESS_REVISION: (_PROVIDER_PROTOCOL_TYPE_DIFFERENCE,),
+                INDEX_REPAIR_REVISION: (_PROVIDER_PROTOCOL_TYPE_DIFFERENCE,),
+                OBSERVATIONAL_OVERDRAW_REVISION: (_PROVIDER_PROTOCOL_TYPE_DIFFERENCE,),
             }[source_revision]
             differences = _schema_differences(connection)
             expected_missing_index_names: frozenset[str] = frozenset()
@@ -982,6 +1035,7 @@ def prepare_database(
                 GOVERNANCE_REVISION: "versioned_governance",
                 WORKER_PROGRESS_REVISION: "versioned_worker_progress",
                 INDEX_REPAIR_REVISION: "versioned_index_repair",
+                OBSERVATIONAL_OVERDRAW_REVISION: "versioned_observational_overdraw",
             }[source_revision]
         else:
             if not sqlite_locked:
@@ -991,6 +1045,8 @@ def prepare_database(
                 )
             differences = _schema_differences(connection)
             if not differences:
+                # Even a metadata-current unversioned schema must pass through
+                # the idempotent 0007 data repair before reaching the head.
                 target_revision = INDEX_REPAIR_REVISION
                 action = "stamped_index_repair"
                 source_revision = INDEX_REPAIR_REVISION
@@ -1006,10 +1062,18 @@ def prepare_database(
                 target_revision = CREDENTIAL_REVISION
                 action = "stamped_credentials"
                 source_revision = CREDENTIAL_REVISION
-            elif differences == _WORKER_PROGRESS_DIFFERENCES:
+            elif differences == tuple(
+                sorted((*_WORKER_PROGRESS_DIFFERENCES, _PROVIDER_PROTOCOL_TYPE_DIFFERENCE))
+            ):
                 target_revision = GOVERNANCE_REVISION
                 action = "stamped_governance"
                 source_revision = GOVERNANCE_REVISION
+            elif differences == (_PROVIDER_PROTOCOL_TYPE_DIFFERENCE,):
+                # Re-run the idempotent 0007 data repair before widening the
+                # provider type when an unversioned 0005-0007 schema is found.
+                target_revision = INDEX_REPAIR_REVISION
+                action = "stamped_index_repair"
+                source_revision = INDEX_REPAIR_REVISION
             elif differences == _LEGACY_DIFFERENCES:
                 target_revision = LEGACY_REVISION
                 action = "stamped_legacy"
@@ -1021,7 +1085,13 @@ def prepare_database(
                     "schema; no migration marker was written. Differences: "
                     f"{rendered_differences}"
                 )
-            _validate_sqlite_database(connection, schema_revision=source_revision)
+            _validate_sqlite_database(
+                connection,
+                # A metadata-current schema is intentionally stamped at 0006
+                # only so the idempotent 0007 data repair still executes.
+                # Validate its actual DDL against the real current head.
+                schema_revision=head_revision if not differences else source_revision,
+            )
 
         backup_path = _backup_sqlite_database(database_url)
         if target_revision is not None:

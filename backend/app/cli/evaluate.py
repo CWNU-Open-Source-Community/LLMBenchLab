@@ -41,13 +41,14 @@ from app.providers import (
     ProviderPreflightError,
     discover_models,
     run_chat_canary,
+    run_provider_canary,
     select_remote_model,
 )
 from app.reports import GROUP_FIELD_WHITELIST, ReportExportError, export_run_report
 from app.runners.evaluation_runner import EvaluationRunner
 from app.runners.run_leases import RunLeaseRepository
 from app.schemas.evaluation_run import EvaluationRunCreate
-from app.schemas.model import ENV_VAR_PATTERN, ModelCreate
+from app.schemas.model import ENV_VAR_PATTERN, ModelCreate, validate_provider_generation_parameters
 from app.services.benchmark_service import persist_dataset
 from app.services.run_service import build_evaluation_run
 from app.standard_datasets import prepare_gpqa_diamond, prepare_mmlu_pro
@@ -126,8 +127,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="llmbenchlab-evaluate",
         allow_abbrev=False,
         description=(
-            "Pinned standard-dataset evaluation for a trusted local OpenAI-compatible API. "
-            "API keys are never accepted as command-line arguments."
+            "API keys are never accepted as command-line arguments. "
+            "Run trusted local Provider evaluations."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -147,6 +148,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_dataset_arguments(run, require_scope=True)
     run.add_argument("--base-url", required=True)
     run.add_argument(
+        "--provider-type",
+        choices=(
+            ProviderType.OPENAI_COMPATIBLE.value,
+            ProviderType.OPENAI_RESPONSES.value,
+            ProviderType.ANTHROPIC_MESSAGES.value,
+        ),
+        default=ProviderType.OPENAI_COMPATIBLE.value,
+        help="Explicit Provider API protocol; defaults to OpenAI Chat Completions.",
+    )
+    run.add_argument(
         "--model", help="Remote model ID; auto-selected only when discovery is unique."
     )
     run.add_argument("--display-name", help="Local Model display name.")
@@ -154,13 +165,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--no-model-discovery",
         action="store_true",
-        help="Skip GET /models; requires --model. The billed Chat canary still runs.",
+        help="Skip GET /models; requires --model. The billed protocol canary still runs.",
     )
     run.add_argument("--temperature", type=float)
-    run.add_argument("--top-p", type=float, default=1.0)
+    run.add_argument("--top-p", type=float)
     run.add_argument("--max-tokens", type=_positive_int)
-    run.add_argument("--no-seed", action="store_true")
-    run.add_argument("--generation-seed", type=int, default=42)
+    seed = run.add_mutually_exclusive_group()
+    seed.add_argument("--no-seed", action="store_true")
+    seed.add_argument("--generation-seed", type=int)
     run.add_argument("--concurrency", type=int, choices=(1, 2, 3, 4), default=1)
     run.add_argument("--input-price-per-million", type=_price)
     run.add_argument("--output-price-per-million", type=_price)
@@ -289,24 +301,43 @@ def _secret_environment(
 
 
 def _provider_defaults(args: argparse.Namespace) -> dict[str, Any]:
+    provider_type = ProviderType(args.provider_type)
     official_cot = args.dataset == "mmlu-pro" and args.profile == "official_cot"
-    temperature = args.temperature if args.temperature is not None else 0
+    supports_protocol_sampling_defaults = provider_type == ProviderType.OPENAI_COMPATIBLE
+    temperature = (
+        args.temperature
+        if args.temperature is not None or not supports_protocol_sampling_defaults
+        else 0
+    )
+    top_p = args.top_p if args.top_p is not None or not supports_protocol_sampling_defaults else 1
     max_tokens = (
         args.max_tokens if args.max_tokens is not None else (4000 if official_cot else 1024)
+    )
+    if provider_type != ProviderType.OPENAI_COMPATIBLE and args.generation_seed is not None:
+        raise EvaluationCLIError(f"{provider_type.value} does not support --generation-seed.")
+    seed = (
+        None
+        if args.no_seed or provider_type != ProviderType.OPENAI_COMPATIBLE
+        else (42 if args.generation_seed is None else args.generation_seed)
     )
     candidate = EvaluationRunCreate(
         model_id="preflight-model",
         benchmark_id="preflight-benchmark",
         temperature=temperature,
-        top_p=args.top_p,
+        top_p=top_p,
         max_tokens=max_tokens,
-        seed=None if args.no_seed else args.generation_seed,
+        seed=seed,
         concurrency=args.concurrency,
     )
-    return {
+    defaults = {
         field: getattr(candidate, field)
         for field in ("temperature", "top_p", "max_tokens", "seed", "concurrency")
     }
+    try:
+        validate_provider_generation_parameters(provider_type, defaults)
+    except ValueError as exc:
+        raise EvaluationCLIError(str(exc)) from None
+    return defaults
 
 
 async def _resolve_and_canary(
@@ -321,6 +352,7 @@ async def _resolve_and_canary(
     run_attempts: int,
     yes: bool,
     before_canary: Callable[[str], None] | None = None,
+    provider_type: ProviderType = ProviderType.OPENAI_COMPATIBLE,
 ) -> tuple[str, ModelDiscoveryResult | None, CanaryResult]:
     if skip_discovery and not requested_model:
         raise EvaluationCLIError("--no-model-discovery requires --model.")
@@ -332,7 +364,11 @@ async def _resolve_and_canary(
     discovery: ModelDiscoveryResult | None = None
     if not skip_discovery:
         try:
-            discovery = await discover_models(base_url, api_key)
+            discovery = await discover_models(
+                base_url,
+                api_key,
+                provider_type=provider_type,
+            )
         except ProviderPreflightError as exc:
             if exc.code == "model_discovery_unsupported" and requested_model:
                 print(
@@ -356,13 +392,23 @@ async def _resolve_and_canary(
         question_count,
         run_attempts=run_attempts,
         yes=yes,
+        provider_type=provider_type,
     )
-    canary = await run_chat_canary(
-        base_url,
-        remote_model,
-        api_key_env,
-        generation,
-    )
+    if provider_type == ProviderType.OPENAI_COMPATIBLE:
+        canary = await run_chat_canary(
+            base_url,
+            remote_model,
+            api_key_env,
+            generation,
+        )
+    else:
+        canary = await run_provider_canary(
+            provider_type,
+            base_url,
+            remote_model,
+            api_key_env,
+            generation,
+        )
     return remote_model, discovery, canary
 
 
@@ -373,18 +419,23 @@ def _confirm_real_calls(
     *,
     run_attempts: int,
     yes: bool,
+    provider_type: ProviderType = ProviderType.OPENAI_COMPATIBLE,
 ) -> None:
     if run_attempts < 1:
         raise EvaluationCLIError("The Run has no remaining execution attempts.")
     adapter_attempts = DEFAULT_MAX_RETRIES + 1
     maximum_requests = (question_count * run_attempts + 1) * adapter_attempts
+    request_label = (
+        "Chat Completion" if provider_type == ProviderType.OPENAI_COMPATIBLE else "Provider API"
+    )
     host = urlsplit(base_url).hostname or "unknown-host"
     message = (
         f"Provider host: {host}\n"
         f"Remote model: {remote_model}\n"
         f"Scored questions: {question_count}\n"
         f"Remaining Run attempts included in upper bound: {run_attempts}\n"
-        f"Maximum billed Chat Completion attempts this invocation: {maximum_requests} "
+        f"Provider protocol: {provider_type.value}\n"
+        f"Maximum billed {request_label} attempts this invocation: {maximum_requests} "
         f"(one canary plus up to {adapter_attempts} HTTP attempts per question per Run attempt)\n"
         "Pricing or usage may be unknown; LLMBenchLab cannot enforce a global Provider "
         "budget yet.\n"
@@ -419,10 +470,11 @@ def _model_payload(
     display_name: str | None,
     input_price: Decimal | None,
     output_price: Decimal | None,
+    provider_type: ProviderType = ProviderType.OPENAI_COMPATIBLE,
 ) -> ModelCreate:
     return ModelCreate(
         name=_model_name(base_url, remote_model, display_name),
-        provider_type=ProviderType.OPENAI_COMPATIBLE,
+        provider_type=provider_type,
         base_url=base_url,
         remote_model_name=remote_model,
         api_key_env=api_key_env,
@@ -495,6 +547,7 @@ def _find_or_create_model(
     display_name: str | None,
     input_price: Decimal | None,
     output_price: Decimal | None,
+    provider_type: ProviderType = ProviderType.OPENAI_COMPATIBLE,
 ) -> tuple[Model, bool]:
     payload = _model_payload(
         base_url=base_url,
@@ -503,6 +556,7 @@ def _find_or_create_model(
         display_name=display_name,
         input_price=input_price,
         output_price=output_price,
+        provider_type=provider_type,
     )
     existing, payload = _resolve_model_registration(session, payload)
     if existing is not None:
@@ -524,6 +578,7 @@ def _validate_model_registration(
     display_name: str | None,
     input_price: Decimal | None,
     output_price: Decimal | None,
+    provider_type: ProviderType = ProviderType.OPENAI_COMPATIBLE,
 ) -> None:
     payload = _model_payload(
         base_url=base_url,
@@ -532,6 +587,7 @@ def _validate_model_registration(
         display_name=display_name,
         input_price=input_price,
         output_price=output_price,
+        provider_type=provider_type,
     )
     with SessionLocal() as session:
         _resolve_model_registration(session, payload)
@@ -540,7 +596,24 @@ def _validate_model_registration(
 def _preflight_snapshot(
     discovery: ModelDiscoveryResult | None,
     canary: CanaryResult,
+    provider_type: ProviderType = ProviderType.OPENAI_COMPATIBLE,
 ) -> dict[str, Any]:
+    canary_evidence = {
+        "status": "passed",
+        "model": canary.model,
+        "returned_model": canary.returned_model,
+        "system_fingerprint": canary.system_fingerprint,
+        "finish_reason": canary.finish_reason,
+        "provider_request_id": canary.provider_request_id,
+        "input_tokens": canary.input_tokens,
+        "output_tokens": canary.output_tokens,
+        "latency_ms": canary.latency_ms,
+        "attempts": canary.attempts,
+    }
+    canary_key = "chat_canary"
+    if provider_type != ProviderType.OPENAI_COMPATIBLE:
+        canary_key = "provider_canary"
+        canary_evidence["provider_type"] = provider_type.value
     return {
         "performed_at": utc_now().isoformat(),
         "model_discovery": {
@@ -548,18 +621,7 @@ def _preflight_snapshot(
             "model_count": len(discovery.models) if discovery is not None else None,
             "request_id": discovery.request_id if discovery is not None else None,
         },
-        "chat_canary": {
-            "status": "passed",
-            "model": canary.model,
-            "returned_model": canary.returned_model,
-            "system_fingerprint": canary.system_fingerprint,
-            "finish_reason": canary.finish_reason,
-            "provider_request_id": canary.provider_request_id,
-            "input_tokens": canary.input_tokens,
-            "output_tokens": canary.output_tokens,
-            "latency_ms": canary.latency_ms,
-            "attempts": canary.attempts,
-        },
+        canary_key: canary_evidence,
     }
 
 
@@ -595,6 +657,7 @@ def _create_persisted_run(
     generation: dict[str, Any],
     discovery: ModelDiscoveryResult | None,
     canary: CanaryResult,
+    provider_type: ProviderType = ProviderType.OPENAI_COMPATIBLE,
 ) -> EvaluationRun:
     with SessionLocal() as session:
         _raise_if_run_is_active(session)
@@ -607,6 +670,7 @@ def _create_persisted_run(
             display_name=display_name,
             input_price=input_price,
             output_price=output_price,
+            provider_type=provider_type,
         )
         run_payload = EvaluationRunCreate(
             model_id=model.id,
@@ -619,7 +683,7 @@ def _create_persisted_run(
         )
         run = build_evaluation_run(model, benchmark, run_payload, settings)
         snapshot = dict(run.model_parameters_snapshot)
-        snapshot["preflight"] = _preflight_snapshot(discovery, canary)
+        snapshot["preflight"] = _preflight_snapshot(discovery, canary, provider_type)
         preparation = _prepared_summary(prepared)
         preparation.pop("archive_path", None)
         snapshot["dataset_preparation"] = preparation
@@ -639,16 +703,25 @@ def _load_run(run_id: str) -> EvaluationRun:
         return run
 
 
-def _run_provider_configuration(run: EvaluationRun) -> tuple[str, str, str, dict[str, Any]]:
+def _run_provider_configuration(
+    run: EvaluationRun,
+) -> tuple[ProviderType, str, str, str, dict[str, Any]]:
     snapshot = dict(run.model_parameters_snapshot or {})
     model = dict(snapshot.get("model", {}))
     generation = dict(snapshot.get("generation", {}))
     base_url = model.get("base_url")
     remote_model = model.get("remote_model_name")
     api_key_env = model.get("api_key_env")
+    adapter_type = model.get("adapter_type", ProviderType.OPENAI_COMPATIBLE.value)
     if not all(isinstance(value, str) and value for value in (base_url, remote_model, api_key_env)):
         raise EvaluationCLIError("Run does not contain a complete compatible Provider snapshot.")
-    return str(base_url), str(remote_model), str(api_key_env), generation
+    try:
+        provider_type = ProviderType(str(adapter_type))
+    except ValueError as exc:
+        raise EvaluationCLIError("Run contains an unsupported Provider protocol snapshot.") from exc
+    if provider_type == ProviderType.MOCK:
+        raise EvaluationCLIError("Run does not contain a remote Provider protocol snapshot.")
+    return provider_type, str(base_url), str(remote_model), str(api_key_env), generation
 
 
 async def _execute_with_progress(
@@ -760,9 +833,10 @@ async def _run_new(args: argparse.Namespace, settings: Settings) -> int:
     prepared = await asyncio.to_thread(_prepare_dataset, args)
     prepared_summary = _prepared_summary(prepared)
     generation = _provider_defaults(args)
+    provider_type = ProviderType(args.provider_type)
     validated_model = ModelCreate(
         name="validation-only",
-        provider_type=ProviderType.OPENAI_COMPATIBLE,
+        provider_type=provider_type,
         base_url=args.base_url,
         remote_model_name=args.model or "pending-discovery",
         api_key_env=args.api_key_env,
@@ -779,6 +853,7 @@ async def _run_new(args: argparse.Namespace, settings: Settings) -> int:
             question_count=prepared_summary["question_count"],
             run_attempts=settings.worker_max_attempts,
             yes=args.yes,
+            provider_type=provider_type,
             before_canary=lambda remote_model: _validate_model_registration(
                 base_url=base_url,
                 remote_model=remote_model,
@@ -786,6 +861,7 @@ async def _run_new(args: argparse.Namespace, settings: Settings) -> int:
                 display_name=args.display_name,
                 input_price=args.input_price_per_million,
                 output_price=args.output_price_per_million,
+                provider_type=provider_type,
             ),
         )
         run = _create_persisted_run(
@@ -800,6 +876,7 @@ async def _run_new(args: argparse.Namespace, settings: Settings) -> int:
             generation=generation,
             discovery=discovery,
             canary=canary,
+            provider_type=provider_type,
         )
         print(f"Run created: {run.id}", file=sys.stderr)
         terminal = await _drive_run(run.id, settings)
@@ -851,9 +928,9 @@ async def _resume(args: argparse.Namespace, settings: Settings) -> int:
             )
         )
         return 0
-    base_url, remote_model, target_env, generation = _run_provider_configuration(run)
+    provider_type, base_url, remote_model, target_env, generation = _run_provider_configuration(run)
     missing = max(0, run.total_questions - run.completed_questions)
-    remaining_attempts = run.max_attempts - run.attempt_count
+    remaining_attempts = run.max_attempts - run.failed_attempt_count
     if remaining_attempts < 1:
         raise EvaluationCLIError(
             f"Run {run.id} has exhausted all {run.max_attempts} execution attempts. "
@@ -870,6 +947,7 @@ async def _resume(args: argparse.Namespace, settings: Settings) -> int:
             question_count=missing,
             run_attempts=remaining_attempts,
             yes=args.yes,
+            provider_type=provider_type,
         )
         terminal = await _drive_run(run.id, settings)
     if terminal.status in TERMINAL_STATUSES:

@@ -15,6 +15,7 @@
 - 可观测性与审计保留：[ADR-0015](../decisions/ADR-0015-observability-worker-progress-audit-retention.md)
 - Schema-equivalent 索引修复：[ADR-0017](../decisions/ADR-0017-schema-equivalent-governance-index-repair.md)
 - Observational reservation 修正：[ADR-0018](../decisions/ADR-0018-observational-token-estimates-are-not-hard-reservations.md)
+- Provider API 显式协议：[ADR-0019](../decisions/ADR-0019-explicit-provider-api-protocol-adapters.md)
 
 ## 阶段目标
 
@@ -22,7 +23,7 @@
 
 ## 当前功能范围
 
-- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容；P2-06 implementation SHA `9a20676…` 将双方言 Alembic 链扩展至 `20260828_0005`，`20260829_0006` 仅修复早期 `0004` 三索引缺口；当前 data-only head `20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn。
+- PostgreSQL 多 Worker 目标、SQLite 单 Worker 兼容；日常入口维护已把 `make dev DEV_WORKERS=N` 和默认双 Worker的 `make dev-multi` / `make docker-up WORKERS=N` 暴露为受保护入口，并按扩/缩方向同步 scale、API expected 与 expected/registered/live/stalled/shortfall。P2-06 implementation SHA `9a20676…` 将双方言 Alembic 链扩展至 `20260828_0005`，`20260829_0006` 仅修复早期 `0004` 三索引缺口，`20260830_0007` 只按显式 hard reservation 语义重算 scope overdrawn；当前 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并替换 Provider 类型 check 与远程配置 check，旧 Model 不改写。
 - Redis at-least-once 通知；Run、取消、重试、租约、Response、终态、治理、attempt ledger 和 audit 全由数据库裁决。
 - 原子 claim、数据库时间 lease/heartbeat、fencing、有限 retry/backoff、取消、过期接管、duplicate no-op 和 dead-letter。
 - 停写只读 SQLite→空 PostgreSQL 的单向 importer；`0005` 按依赖顺序复制 13 张应用表并做 count/PK/content fingerprint，源有 live Worker generation 时拒绝，stopped/stale progress 可精确复制。keyring 仍在数据库之外。
@@ -57,7 +58,7 @@
 - write-only `api_key`、AES-256-GCM `model_credentials`、数据库外共享 keyring、legacy `api_key_env`、origin/active-Run 门禁继续有效。Key、Authorization、ciphertext、nonce、keyring、Provider URL、题目/prompt/response正文不得进入 audit。
 - Provider request ID/returned model/system fingerprint/finish reason 仅在固定字符、长度和凭据形态检查后保存；不安全值为 `null`，不生成含 Provider 控制文本的 redaction event。
 - audit 是应用 append-only、event-key 幂等并有 hash/schema read validation，不是数据库管理员不可篡改的 WORM。
-- OpenAI-compatible SSE、严格 `[DONE]`、JSON fallback、wire/event/content 上限和聚合后 Key 脱敏保持不变。
+- Chat Completions 的严格 `[DONE]`，Responses 的 `response.completed`，Messages 的 `message_stop`，各自 JSON fallback、wire/event/content 上限和聚合后 Key 脱敏保持不变；协议由 Run snapshot 显式选择，不做失败 fallback。
 
 ## 任务状态
 
@@ -66,6 +67,8 @@
 | P2-01 一致性与容量设计 | `completed` | ADR-0012～0014、DB truth/lease/fencing/治理、v2 四 cell 多轮统计、恢复与连接模型已交付；clean SHA `b6a35fe…` 的 1+5 资格为 23/23、`qualified`；证据文档 commit `875f13a…` 已 push，精确 SHA CI 4/4 成功 |
 | P2-02 PostgreSQL 迁移 | `slice_delivered` | 历史 `0002`～`0004` 与 12 表 importer 已通过精确 SHA 远程门禁；`9a20676…` 增加 `0005` / 13 表 importer、live Worker preflight 和 populated downgrade guard，clean Compose 与远程实现门禁已通过 |
 | P2-03 Queue/Worker | `foundation_delivered` | Redis 通知、DB scan、claim、lease/heartbeat/fencing、ACK/no-op 已交付；`9a20676…` 增加 generation 级 DB-time scan/claim/lease-heartbeat/progress 与 stale 聚合，dependency probe 仍只表示 capability |
+| P2-03 日常多 Worker入口维护 | `completed` | 本地 PostgreSQL 多进程与 Compose 默认双 Worker入口、SQLite fail-fast、fresh/watermark scan、all/running scale direction、五 gauges 与跨 Benchmark PG lease 回归已通过本地/远程门禁；不改变 P2-07 或 Phase 2 总状态 |
+| Provider API 三协议维护 | `completed` | ADR-0019、`openai_responses` / `anthropic_messages` Adapter、`0008` 列宽与两个 check 变更、CLI/Web 显式协议与 MockTransport 合同已实现；本地完整门禁和隔离 PostgreSQL 16 往返通过，实现 `6943aa29…` 已 push 且 exact-SHA run `33304667092` 4/4；不改变 protocol-v1、P2-07 或 Phase 2 总状态 |
 | P2-04 生命周期可靠性 | `foundation_delivered` | retry/backoff、取消、恢复、dead-letter、Response 幂等和三个确定性 DB crash-seam 场景已通过完整 Compose acceptance；Provider 外部副作用仍为 at-least-once |
 | P2-05 并发治理 | `slice_delivered` | 四层 concurrency/RPM/TPM/lifetime budget、per-attempt ledger、backpressure、finite quantum、公平排序、counter 重算 fail-closed 与 ADR-0011 已实现；精确 SHA 的真实 PG/capacity/acceptance/CI 候选门禁已通过 |
 | P2-05 observational overdraw 维护 | `completed` | ADR-0018 与 data-only `0007` 只重算 overdrawn 并保留 ledger/actual/Response/Run，active reservation 时拒绝；本地完整验证、当前库迁移和最终 SHA `cb00924…` 的 CI 4/4 均通过 |
@@ -77,6 +80,8 @@
 2026-08-30 的个人本地维护已从最新非空 SQLite 一致性备份恢复 1 个 Mock Model、1 个 Demo Benchmark、15 Questions、1 个 completed Run 和 15 Responses，并让组合开发启动器把三服务详细输出分流到私有 Git 忽略日志。该操作有 staging 迁移、共有列摘要、完整性/外键/head、真实本地启动与 API/Web 读取证据，但不包含 PostgreSQL/keyring、Redis 或告警恢复认证，不能计作 P2-07 实施或改变本阶段状态。
 
 同日的 OpenCode Go `hy3` Run 又暴露 observational input estimate 被错误写成 hard reservation：7 个 attempt 全部 actual settlement，第七次 estimate/actual 为 59/75，而所有 hard policy/Run override 均为 `null`，四层 scope 却被标记 overdrawn。ADR-0018/`0007` 修正这一派生语义并把 UI 文案改为“实际用量曾被判定超过预留”；旧 ledger、actual usage、7 条 Response 和 failed/exhausted Run 终态不改写。本地完整门禁、当前 SQLite 迁移、最终 SHA `cb00924…` 的 real-Compose 9/9 与精确 SHA CI 4/4 均通过，仓库级闭环完成。
+
+同日的 Run Detail 维护又修正了两个只读展示缺口：`error_questions` 继续只表示执行异常，页面改用 `completed_questions - correct_questions` 显示全部未得分并拆出普通答错；Responses API 追加分页无关的输入/输出已知 Token 小计和独立覆盖数，使精确 Run Token 为 `null` 时仍可显示明确不完整的证据。该维护不改 protocol-v1、数据库 schema、历史 Response/Run、治理 ledger 或 P2-07 范围；并行 Run/Responses 快照不一致时页面保守显示已知小计，不把旧值标成当前完整总量。
 
 ## 验收标准与当前结论
 
@@ -91,6 +96,8 @@
 - [x] **P2-06 仓库级闭环完成**：clean implementation commit `9a20676dcf545040782f04c166205d0043345753` 已 push，clean capacity/9/9 acceptance 与 [run `33164609388`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 4/4 通过；evidence-doc commit `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 也精确 4/4 通过。
 - [x] **0004 历史索引兼容修复完成**：schema-equivalent `20260829_0006`、仅允许三个已知索引缺失子集的可重入 SQLite preflight、PostgreSQL `0005` metadata 白名单控制流、重复 active/额外 drift 拒绝、真实失败备份副本升级及本地门禁均通过；实现 SHA [`8fb51b690ae6335b8ef93b3cbe54e039781fb173`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/8fb51b690ae6335b8ef93b3cbe54e039781fb173) 的 [run `33263405214`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33263405214) 4/4 成功。historical PG missing-index 分支仍仅有 Mock 回归，标准 CI 真实 PG 只覆盖 fresh canonical 分支。
 - [x] **Observational overdraw 修复完成**：目标行为与 `0007` migration 已通过本地完整测试、双方言 migration 和当前个人 SQLite 验真；最终修正 SHA [`cb00924ea3ba3d01ce5bc322b7eabdae1345baf3`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/cb00924ea3ba3d01ce5bc322b7eabdae1345baf3) 的 [run `33271095910`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33271095910) 4/4 成功。
+- [x] **Run Detail 指标维护完成**：API/UI 与零/全/部分/非对称 usage、页内错题拆分及并行快照回归已实现；本地 lint/test/smoke/build/config 和目标实页核对通过。实现 SHA [`0003e4291769a851005ba46c7e59b156a6b789eb`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/0003e4291769a851005ba46c7e59b156a6b789eb) 已 push，[PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5) 的 [run `33286730109`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33286730109) 4/4 成功；不改变 P2-07 或 Phase 2 整体状态。
+- [x] **日常多 Worker入口维护闭环**：离线启动器 `42 passed`，隔离 PostgreSQL 16 迁移到 head 后跨 Benchmark/唯一 lease 回归 `2 passed`，终审后的 fresh/watermark 与 exited-replica 回归、真实 Compose `2→1→2` gauges/cleanup 和完整本地门禁通过；implementation SHA `b06594c…` 的 run `33299883513` 4/4 成功。
 - [ ] **P2-07 正式闭环未通过**：没有数据库+keyring backup/restore 认证、完整故障矩阵和告警处置演练。
 
 ## 已实际运行的中间证据
@@ -122,6 +129,7 @@
 | P2-06 evidence-doc remote gate | [run `33165775037`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) | 精确 `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6`，四个必需 job 全 success；P2-06 仓库级闭环完成 |
 | 2026-08-29 DB compatibility repair | migration `52 passed`；完整 backend `927 passed, 33 skipped`、frontend `38 passed`；lint/smoke/config、真实失败备份副本与当前库 startup/check 全绿 | `8fb51b6…` 的 exact-SHA run `33263405214` 4/4；不改变 P2-07 planned 状态 |
 | 2026-08-30 本地恢复/静默启动维护 | 启动器 `3 passed`；完整 backend `930 passed, 33 skipped`、frontend `38 passed`；lint/build/smoke/config、SQLite digest/quick/FK/head、真实 API/Web 读取通过 | 个人本地 Demo 数据恢复和开发 UX；`5075bdb…` 的 run `33265171953` 4/4 成功，且不是 P2-07 恢复认证 |
+| 2026-08-30 多 Worker入口目标回归 | 启动器/fake Compose `42 passed`；隔离 PostgreSQL 16 在迁移到 `0007` 后跨 Benchmark/唯一 lease `2 passed`；终审后的隔离 Compose `2→1→2` 最终 gauges 分别收敛到 `2/2/2/0/0`、`1/1/1/0/0`、`2/2/2/0/0`，cleanup C/V/N/image tags=`0/0/0/0` | 首次空 PG 未迁移导致 fixture setup `UndefinedTable`，按真实部署顺序迁移后通过；fresh/watermark 与 exited-replica 两项终审问题已修复并复审为 0 Blocker/High/Medium；完整 backend `1003 passed, 35 skipped`、frontend `64 passed`，lint/Mock smoke/build/config/diff check 全绿；`b06594c…` run `33299883513` 4/4 成功 |
 | 2026-08-30 observational overdraw 修复 | backend `946 passed, 33 skipped`；真实 PG+Redis integration `33 passed`；双方言 migration 往返/check、`make lint`、frontend `39 passed`/build、Mock smoke `1 passed`、本地 real-Compose `9/9`、Compose config 与当前库迁移验真通过 | 当前 SQLite head `0007`，scope `4→0`，7 Responses/7 ledger/407 input/599 output、13 表行数、quick/FK 保持；无真实 Provider；`cb00924…` run `33271095910` 4/4 成功 |
 
 所有自动化模型行为只使用 Mock、MockTransport 或 stub；没有真实 Provider 或 API Key。
@@ -153,4 +161,4 @@
 
 ## 状态
 
-`in_progress`。P2-01、P2-06 与 observational overdraw 维护已完成，P2-05 主切片已交付。P2-07 状态为 `planned`，功能尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。
+`in_progress`。P2-01、P2-06、observational overdraw 与 Run Detail 指标维护已完成，P2-05 主切片已交付。P2-07 状态为 `planned`，功能尚未实现，数据库+keyring backup/restore 和完整恢复演练仍缺失。不得把 Phase 2 标为 `completed`，不得宣称生产 HA、灾难恢复 SLA、无限横向扩展或 Provider exactly-once。

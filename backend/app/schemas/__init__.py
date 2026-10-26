@@ -3,6 +3,14 @@
 from app.schemas.audit import AuditEventList, AuditEventRead
 from app.schemas.base import Pagination
 from app.schemas.benchmark import BenchmarkCreate, BenchmarkList, BenchmarkRead
+from app.schemas.evaluation_progress import (
+    PROGRESS_BLOCK_SIZE,
+    EvaluationProgressBlock,
+    EvaluationProgressBlockSummary,
+    EvaluationProgressCell,
+    EvaluationProgressIndex,
+    EvaluationProgressOutcome,
+)
 from app.schemas.evaluation_response import (
     EvaluationResponseDetail,
     EvaluationResponseList,
@@ -25,12 +33,18 @@ from app.schemas.system import (
 )
 
 __all__ = [
+    "PROGRESS_BLOCK_SIZE",
     "AuditEventList",
     "AuditEventRead",
     "BenchmarkCreate",
     "BenchmarkList",
     "BenchmarkRead",
     "DashboardSummary",
+    "EvaluationProgressBlock",
+    "EvaluationProgressBlockSummary",
+    "EvaluationProgressCell",
+    "EvaluationProgressIndex",
+    "EvaluationProgressOutcome",
     "EvaluationResponseDetail",
     "EvaluationResponseList",
     "EvaluationResponseRead",

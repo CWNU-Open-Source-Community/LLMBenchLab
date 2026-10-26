@@ -6,6 +6,7 @@
 - **Scope**: managed Run 的 Provider attempt reservation、overdraw 派生语义与历史物化修复
 - **Amends**: [ADR-0009](ADR-0009-database-governance-audit-fair-scheduling.md) 第 3、4 节的 input reservation / overdraw 语义
 - **Also amends**: [ADR-0015](ADR-0015-observability-worker-progress-audit-retention.md) 的 archive-v1 compatible-head allowlist，以及 [ADR-0016](ADR-0016-postgresql-keyring-recovery-and-redis-rebuild.md) 的 P2-07 exact recovery head
+- **Amended by**: [ADR-0019](ADR-0019-explicit-provider-api-protocol-adapters.md) 将当前 Alembic/archive/recovery exact head 从 data-only `0007` 前进到扩展 `provider_type` 列宽并替换 Provider 类型/远程配置两个 check 的 `0008`；本 ADR 的 hard-reservation 语义不变
 - **Preserves**: never-delete attempt ledger、Provider actual usage、显式 hard Token/cost fail-closed、四层 scope、`llmbenchlab-protocol-v1`
 
 ## Context

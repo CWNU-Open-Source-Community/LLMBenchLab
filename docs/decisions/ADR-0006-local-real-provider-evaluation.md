@@ -5,11 +5,11 @@
 - **Scope**: 标准数据集供应链、真实 OpenAI-compatible 接入、评测编排与报告
 - **Related requirements**: FR-MOD-05–10、FR-BEN-01–08、FR-REP-01–04、NFR-SEC-01–05
 - **Supersedes**: 无；补充 [ADR-0004](ADR-0004-secret-management.md) 与 [ADR-0005](ADR-0005-durable-task-execution.md)
-- **Partially superseded by**: [ADR-0007](ADR-0007-web-provider-credentials.md) 已取代本文关于“REST/前端不得接收 Key”和“数据库不得保存加密凭据”的限制；[ADR-0008](ADR-0008-openai-compatible-sse-transport.md) 已取代本文把 Chat 成功响应统一限制为 4 MiB 的决定，改为 JSON 4 MiB、SSE wire/单事件/聚合 content 64 MiB/1 MiB/4 MiB；其余数据集供应链、可信本地 CLI、预检与报告决定继续有效
+- **Partially superseded by**: [ADR-0007](ADR-0007-web-provider-credentials.md) 已取代本文关于“REST/前端不得接收 Key”和“数据库不得保存加密凭据”的限制；[ADR-0008](ADR-0008-openai-compatible-sse-transport.md) 已取代本文把 Chat 成功响应统一限制为 4 MiB 的决定；[ADR-0019](ADR-0019-explicit-provider-api-protocol-adapters.md) 将本文 Chat-only 的 discovery/canary 扩展为显式 Chat Completions / OpenAI Responses / Anthropic Messages Adapter；其余数据集供应链、可信本地 CLI、预检与报告决定继续有效
 
 ## Status
 
-Accepted；Web/REST 凭据边界由 ADR-0007 部分取代，Chat transport/资源边界由 ADR-0008 部分取代。
+Accepted；Web/REST 凭据边界由 ADR-0007 部分取代，Chat transport/资源边界由 ADR-0008 部分取代，Chat-only discovery/canary 范围由 ADR-0019 扩展为三个显式协议。
 
 ## Context
 
@@ -45,12 +45,12 @@ MMLU-Pro 当前固定版本含 12,032 道 test 题，超过 dataset-v1 原 10,00
 ### 真实 Provider 入口
 
 - CLI 的 Base URL 是普通参数；API Key 只允许从指定环境变量读取或用 `getpass` 从终端安全输入。禁止 `--api-key` 明文参数。
-- 远程 Provider 必须使用 HTTPS；明文 HTTP 只允许 loopback 本地推理服务。发现与 Chat 都禁用 redirect、声明并只接受 identity encoding；本文接受时的发现正文上限为 2 MiB，Chat 成功/错误正文上限分别为 4 MiB/64 KiB。Chat 成功边界后来由 ADR-0008 部分取代。
-- CLI 先调用兼容的 `GET /models` 验证认证并发现模型。若调用方明确给出模型名，可在 Provider 不支持模型列表时继续；未给模型且无法唯一发现时必须停止并给出候选，不猜测付费目标。发现结果中任何模型 ID 反射当前 Key 都会安全失败。
-- 在创建正式 Run 前执行一次最小 Chat Completions canary，验证目标模型、请求形状和答案提取；成功体若明确返回不同模型则失败。预检结果只保存脱敏状态、返回模型名、request id、usage、finish reason 与延迟，不保存 headers 或 Key。
+- 远程 Provider 必须使用 HTTPS；明文 HTTP 只允许 loopback 本地推理服务。发现与三类远程生成都禁用 redirect、声明并只接受 identity encoding；本文接受时的发现正文上限为 2 MiB，Chat 成功/错误正文边界后来由 ADR-0008 部分取代，Responses/Messages 的同类边界由 ADR-0019 统一纳入。
+- CLI 先调用同级 `GET /models` 验证认证并发现模型，鉴权跟随显式协议：Chat/Responses 使用 `Authorization: Bearer`，Messages 使用 `x-api-key` 与 `anthropic-version`，并以受累计 100 页、60 秒 wall-clock、2 MiB、10,000 项和重复 cursor 门禁保护的 `after_id` 跟进 `has_more/last_id`。若调用方明确给出模型名，可在 Provider 不支持模型列表时继续；未给模型且无法唯一发现时必须停止并给出候选，不猜测付费目标。发现结果中任何模型 ID 反射当前 Key 都会安全失败。
+- 在创建正式 Run 前按显式协议执行一次最小 canary，分别调用 `/chat/completions`、`/responses` 或 `/messages`，并要求流式结果以 `[DONE]`、`response.completed` 或 `message_stop` 完整终止；它验证目标模型、请求形状和答案提取，成功体若明确返回不同模型则失败。预检结果只保存脱敏状态、返回模型名、request id、usage、finish reason 与延迟，不保存 headers 或 Key。
 - 成功 content、raw usage 的字符串值/对象键、request ID、返回模型、system fingerprint 和 finish reason 若包含当前 Key，会在进入 Runner/快照/Response 边界前按精确值替换为 `[REDACTED]`。这是针对当前凭据的最后防线，不是通用 DLP。
 - CLI 把 Key 临时注入由 `api_key_env` 指定、并冻结进 Run 的环境变量名；若该变量原来存在则退出上下文后恢复，否则删除。数据库 Model 与 Run 快照仍只保存变量名。ADR-0004 的 REST/前端禁收明文密钥规则不变。
-- CLI 默认要求显式确认预计题数和 Provider 请求保守上界；上界同时计算 Adapter HTTP retries、题数、canary 和剩余 Run attempts。非交互自动化只能通过 `--yes` 继续。价格未知时不得显示虚假零成本。
+- CLI 默认要求显式确认预计题数和 Provider 请求保守上界；上界同时计算 Adapter HTTP retries、题数、canary 和剩余 failed-attempt 预算 `max_attempts - failed_attempt_count`，不把 cooperative yield 算作失败。非交互自动化只能通过 `--yes` 继续。价格未知时不得显示虚假零成本。
 
 ### 执行、恢复与报告
 
@@ -138,6 +138,7 @@ MMLU-Pro 当前固定版本含 12,032 道 test 题，超过 dataset-v1 原 10,00
 - [GPQA official repository](https://github.com/idavidrein/gpqa)（访问 2026-08-27；数据内 `license.txt` 为 CC BY 4.0）
 - [ADR-0004 — 数据库仅保存密钥环境变量名](ADR-0004-secret-management.md)
 - [ADR-0005 — Durable task execution](ADR-0005-durable-task-execution.md)
+- [ADR-0019 — 显式 Provider API 协议](ADR-0019-explicit-provider-api-protocol-adapters.md)
 
 ## Change history
 
@@ -146,3 +147,4 @@ MMLU-Pro 当前固定版本含 12,032 道 test 题，超过 dataset-v1 原 10,00
 | 2026-08-27 | Accepted | 用户明确要求优先形成可真实模型完整评测的可信本地流程 |
 | 2026-08-27 | Hardened | 终审后固定 HTTPS/loopback、identity/响应上限、Key 反射与返回模型拒绝、成功元数据脱敏及过期租约恢复边界 |
 | 2026-08-27 | Partially superseded | ADR-0008 以真 SSE 和独立 wire/event/content 上限取代统一 Chat 4 MiB 成功正文边界 |
+| 2026-08-30 | Partially superseded | ADR-0019 将 Chat-only discovery/canary 扩展为三个显式协议，并保留本文的数据供应链与可信本地确认边界 |

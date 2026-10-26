@@ -1,12 +1,14 @@
 import type {
   Benchmark,
   DashboardSummary,
-  EvaluationResponse,
+  EvaluationResponseList,
   EvaluationRun,
   LeaderboardEntry,
   ListResponse,
   ModelConfig,
   ModelPayload,
+  RunProgressBlock,
+  RunProgressIndex,
   RunPayload,
   RunStatus,
 } from "./types";
@@ -53,6 +55,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     response = await fetch(`${API_BASE}${path}`, { ...init, headers });
   } catch (error) {
+    if (init.signal?.aborted) throw error;
     throw new ApiError(
       error instanceof Error ? `无法连接后端：${error.message}` : "无法连接后端服务。",
       0,
@@ -106,13 +109,17 @@ export const api = {
     benchmark_id?: string;
     protocol_version?: string;
   } = {}) => request<ListResponse<EvaluationRun>>(`/runs${query({ ...params, limit: params.limit ?? 20 })}`),
-  run: (id: string) => request<EvaluationRun>(`/runs/${id}`),
+  run: (id: string, signal?: AbortSignal) => request<EvaluationRun>(`/runs/${id}`, { signal }),
   createRun: (payload: RunPayload) => request<EvaluationRun>("/runs", { method: "POST", body: JSON.stringify(payload) }),
   cancelRun: (id: string) => request<EvaluationRun>(`/runs/${id}/cancel`, { method: "POST" }),
   responses: (runId: string, params: { offset?: number; limit?: number } = {}) =>
-    request<ListResponse<EvaluationResponse>>(
+    request<EvaluationResponseList>(
       `/runs/${runId}/responses${query({ offset: params.offset, limit: params.limit ?? 100 })}`,
     ),
+  runProgressIndex: (runId: string, signal?: AbortSignal) =>
+    request<RunProgressIndex>(`/runs/${runId}/progress`, { signal }),
+  runProgressBlock: (runId: string, blockIndex: number, signal?: AbortSignal) =>
+    request<RunProgressBlock>(`/runs/${runId}/progress/blocks/${blockIndex}`, { signal }),
   leaderboard: (params: { model_id?: string; benchmark_id?: string; order?: string } = {}) =>
     request<ListResponse<LeaderboardEntry>>(`/leaderboard${query({ ...params, limit: 100 })}`),
 };

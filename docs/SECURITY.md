@@ -28,7 +28,7 @@ LLMBenchLab 当前开发基线是供个人开发者在受信任机器上使用�
 | API 客户端/浏览器 | 仅来自显式配置的本地前端；Web 表单会短暂持有待提交 Key | 无鉴权接口被滥用、Key/数据被读取或篡改、付费 Run 被启动 |
 | FastAPI API | 受信任的写入边界；接收 write-only Key 并持有部署 keyring | 可在加密前读取 Key，或替换 endpoint/envelope、泄漏 keyring |
 | Benchmark 作者 | 文件内容不可信，来源需人工判断 | 资源消耗、提示注入、答案污染、敏感数据外发 |
-| OpenAI-compatible Provider | 地址和服务由用户信任 | 收集提示、伪造响应、消耗预算、返回恶意文本 |
+| Chat / Responses / Messages Provider | 地址、协议选择和服务由用户信任 | 收集提示、伪造响应、消耗预算、返回恶意文本 |
 | 独立 Worker | 受信任的执行边界，持有数据库/Redis 凭据与部署 keyring，并按 source 解密或读取 Provider Key | 凭据/keyring 泄漏、越权读写全部评测事实、重复外部调用 |
 | PostgreSQL / Redis | 只在受控内部网络可达，数据卷由受信操作者保护 | 数据事实被篡改、任务被干扰、运行元数据泄漏或服务不可用 |
 | GitHub/CI/依赖源 | 外部供应链 | 依赖投毒、Actions 权限滥用、秘密泄漏 |
@@ -90,7 +90,7 @@ Web stored 流程如下：
 4. Model 读响应只返回凭据状态 `credential_source`/`has_api_key`，以及 environment 兼容模式所需的变量名称；`has_api_key=true` 仅表示 stored row 存在，environment 模式不会因进程里恰好有变量值而返回 true。API/Run/Response/OpenAPI 读 schema 都不含 `api_key`、ciphertext、nonce 或 keyring 数据。
 5. Run 没有 credential reference/envelope 列。快照只保存 source、Model ID、远端模型和 endpoint；environment 模式另保存变量名。stored 模式的 Worker 按 `run.model_id` 读取 row，并用 `run.model_id + Run snapshot base_url origin` 做 AAD 解密，绝不以当前 Model Base URL 替代快照目标。
 6. keyring 缺失/无效、未知 key id、row 缺失、密文篡改、跨 Model 或错误 origin 都会 fail closed，并在 Adapter 构造和任何 Provider 网络请求之前结束该 Run attempt。environment 变量缺失则产生安全的 `missing_api_key`，同样不会无凭据联网。
-7. 解密值只在内存中用于 `Authorization: Bearer ...`。Provider 响应在离开 Adapter 前递归脱敏：成功内容、raw usage 的对象键和所有 JSON 标量（包括数值/布尔/null）、token/status 数值、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，都会替换为 `[REDACTED]`。
+7. 解密值只在内存中用于与显式协议匹配的秘密 header：Chat/Responses 使用 `Authorization: Bearer ...`，Messages 使用 `x-api-key`。Provider 响应在离开 Adapter 前递归脱敏：成功内容、raw usage 的对象键和所有 JSON 标量（包括数值/布尔/null）、token/status 数值、request ID、返回模型名、system fingerprint 和 finish reason 若精确包含当前 Key，都会替换为 `[REDACTED]`。
 8. credential create/replace/delete/source switch 记录 `credential_changed`，origin/active-Run/恢复边界拒绝记录 `credential_rejected`，key ID/认证解密失败记录 `credential_decrypt_failed`。security audit 以数据库 UTC 记时，只保存 Model、source/action/reason 和安全 key ID，不保存 Key、origin 或 envelope；被回滚的拒绝以 server request ID 在独立短事务中幂等写入，但进程在响应前崩溃仍可能缺事件，因此不声称跨进程 exactly-once。
 
 这里的保证限定于**不把 Key 或 Provider 对 Key 的回显从凭据数据流复制进公开字段或持久化证据**。create/PATCH 精确扫描 `ModelRead` 的所有字段和 Run snapshot 的 `model` 子投影；Adapter 递归扫描 Provider 返回证据。它不扫描整个 Run 中与 Model 无关的 Benchmark/Question 固定内容，也不声称用户数据与 Key 永远不会发生独立的字面巧合。
@@ -115,21 +115,21 @@ Web stored 流程如下：
 - 给每个环境和用途使用独立、最小权限 Key；能设置预算、允许模型或来源 IP 时应开启。怀疑泄漏时先在 Provider 侧吊销/轮换，再清理仓库历史、数据库副本、日志和 keyring 备份。
 - 本地 `make dev` 的 API/Worker 可能继承同一 `.env`，但只有 environment 执行路径解析已登记变量；Vite 不会自动把非 `VITE_*` 变量打入客户端。更严格部署应分别注入：API/Worker 共享 keyring，legacy Provider env 只给 Worker，frontend/migrate 两者都不给。
 - Worker 同时需要数据库与 Redis 连接能力。生产设计应拆分 API/Worker/迁移数据库角色，限制 Worker 只能访问所需表和操作，并用独立 Redis ACL、短期凭据及轮换流程代替共享本地凭据。
-- API/Worker 日志、崩溃转储、进程列表和诊断端点都属于秘密边界。不得记录环境、DSN、Authorization header、请求体、解密值或原始 Provider 请求。
+- API/Worker 日志、崩溃转储、进程列表和诊断端点都属于秘密边界。不得记录环境、DSN、`Authorization`/`x-api-key` header、请求体、解密值或原始 Provider 请求。
 - at-least-once 只保证任务最终可再次处理；逐 attempt ledger 防止同一本地逻辑 attempt 重复结算，但 `send_started` 后崩溃仍可能留下远端幽灵请求。若 Provider 已响应而本地 Response 提交前崩溃，接管 Worker 可能重复上游调用和计费；本地 `(run_id, question_id)` 唯一约束、保守 consumed 或释放 permit 都不能消除这一外部副作用或替代真实账单。
 
 ### 3.4 可信本地 CLI 秘密边界
 
 - CLI 只适合受信任的交互式机器。它将读取到的 Key 临时放入 Run 快照所引用的进程环境变量，使现有 Adapter 能复用同一秘密接口；上下文结束时恢复原值或删除临时值。拥有同一用户权限、调试/进程转储能力的程序仍可能读取内存或环境。
-- 模型发现 `GET /models`、最小 Chat canary 和正式题目请求都使用同一个 Key。任何发现到的模型 ID 若反射该 Key，预检立即失败；canary 若明确返回不同于请求目标的模型名也失败。CLI 只保存脱敏 preflight 元数据，不保存请求 header 或 Key；完整 Provider access log 不受本应用控制。
-- 在 canary 前，CLI 打印 Provider host、目标模型、题数、剩余 Run attempts 和最大 Chat HTTP 尝试数，并要求输入 `RUN`；上界按 `(缺失题数 × 剩余 Run attempts + 1 个 canary) × 3` 包含 HTTP retries，但仍不是 Token/金额预算。`--yes` 只用于操作者明确授权的非交互运行，不是预算、速率限制或安全审批。该路径创建 `legacy_unmanaged` Run，不继承 managed Web/API policy。
+- 模型发现 `GET /models`、按显式 Chat Completions / Responses / Messages 协议构造的最小 canary 和正式题目请求都使用同一个 Key。discovery 同样按显式协议鉴权：Chat/Responses 使用 `Authorization: Bearer`，Messages 使用 `x-api-key` 与 `anthropic-version`；Messages 的 `has_more/last_id` 只通过 `after_id` 跟进，并受累计 100 页、60 秒 wall-clock、2 MiB、10,000 个模型 ID 与重复 cursor 门禁保护。任何发现到的模型 ID 若反射该 Key，预检立即失败；canary 若明确返回不同于请求目标的模型名也失败。CLI 只保存脱敏 preflight 元数据，不保存请求 header 或 Key；完整 Provider access log 不受本应用控制。
+- 在 canary 前，CLI 打印 Provider host、显式协议、目标模型、题数、剩余 failed-attempt 预算和最大 Provider HTTP 尝试数，并要求输入 `RUN`；剩余预算严格为 `max_attempts - failed_attempt_count`，不把 cooperative yield 算作失败，上界按 `(缺失题数 × 剩余 failed-attempt 预算 + 1 个 canary) × 3` 包含 HTTP retries，但仍不是 Token/金额预算。`--yes` 只用于操作者明确授权的非交互运行，不是预算、速率限制或安全审批。该路径创建 `legacy_unmanaged` Run，不继承 managed Web/API policy。
 - `resume` 会再次读取 Key、确认并发送 canary，然后只处理本地缺失 Response。初次 canary 会固化到新 Run 快照，但 resume canary 当前不会追加为独立 audit event；逐题 request ID、返回模型名、system fingerprint、finish reason 与 HTTP attempt count 已安全归一化持久化。远端调用不是 exactly-once，恢复前应同时检查 Provider 账单与是否仍允许继续。
 - `report` 和 `prepare` 不需要 Provider Key；不得为了方便给这两条命令或 CI 注入真实凭据。
 - 正式 CLI 必须在常规 API/Worker 停止后独占数据库。代码只能拒绝已有 `running` Run，不能识别空闲 Worker；若空闲 Worker 抢到新 `pending` Run，可能在错误的 Key/进程边界发起调用。
 
 ## 4. 日志与错误脱敏
 
-当前应用日志和 OpenAI-compatible Adapter 的错误处理会：
+当前应用日志和三类远程 Adapter 的错误处理会：
 
 - 只有显式登记的 LLMBenchLab 应用 logger 可输出 literal message 与 structured extra；字段除了 allowlist，还分别受固定 event/result/error/component 枚举、canonical UUID、Redis stream ID、HTTP method/route template 和有限数值合同约束。非法身份字段被省略，未知 method/path/code 只映射到固定 `unsupported`，异常类名只保留固定错误族，不反射原值。API 不记录原始查询串或请求体。
 - `configure_logging` 把已知进程内 `Uvicorn`、`httpx`/`httpcore`、SQLAlchemy 与 Redis client logger 统一路由到同一 sanitizer：第三方动态 logger 名、message、exception 与伪造 structured extra 不进入 JSON；原始 `uvicorn.access` handler 被禁用，由应用 middleware 的 route-template 事件替代。
@@ -138,11 +138,11 @@ Web stored 流程如下：
 - 用 `[REDACTED]` 替换当前 API Key 的精确值。
 - 识别常见 Bearer、Authorization、API key、token 和 secret 表达形式。
 - 把上游错误折叠为单行并截断到 500 字符。
-- 不保存请求头、完整上游请求或响应对象；最终 `httpx.TransportError` 在 `except` 边界外转成安全 `AdapterError`，其 `__cause__`、`__context__` 和格式化 traceback 不保留可达 request/Authorization；Run 只持久化分类后的错误类型与可读消息。
+- 不保存请求头、完整上游请求或响应对象；最终 `httpx.TransportError`，以及三协议 malformed JSON/SSE 或 oversized 响应，都在捕获原始异常的 `except` 边界外转成安全 `AdapterError`，其 `__cause__`、`__context__` 和格式化 traceback 不保留可达 request、秘密 header 或原始 Provider bytes；Run 只持久化分类后的错误类型与可读消息。
 - 不记录原始 SSE 行、事件或单个 delta；只在收到完整终止信号后使用聚合结果。
-- 对 Chat 成功内容、raw usage 的对象键和全部 JSON 标量，以及 provider request ID、返回模型名、system fingerprint、finish reason 递归执行当前 Key 的精确替换，再允许其进入后续 Runner/preflight 边界。
+- 对 Chat/Responses/Messages 成功内容、raw usage 的对象键和全部 JSON 标量，以及 provider request ID、返回模型名、system fingerprint、finish reason 递归执行当前 Key 的精确替换，再允许其进入后续 Runner/preflight 边界。
 - EvaluationResponse/API/report 只保存经过长度、字符和 Key 反射检查的 provider request ID、returned model、system fingerprint、finish reason 与整数 HTTP attempt count；不保存任意 raw usage object，被拒字符串归一化为 `null`。
-- SSE `delta.content` 先完整聚合、再执行当前 Key 的精确替换，覆盖 Key 被分到多个 delta 的情况；这仍不是通用 DLP。
+- 三类 SSE 的文本 delta 先按各自 typed event 完整聚合、再执行当前 Key 的精确替换，覆盖 Key 被分到多个 delta 的情况；这仍不是通用 DLP。
 - 把 `finish_reason="length"` 的空输出或无法解析最终答案的输出归类为稳定的 `output_truncated`；这只是安全的诊断分类，不回显完整 Provider 响应对象或请求头。
 
 仍需遵守以下规则：
@@ -171,18 +171,19 @@ allowlist 只减少聚合面，不等于 artifact 无敏感性。raw child 仍�
 
 ## 5. `base_url` 与 SSRF
 
-`openai_compatible` 允许用户配置 `base_url`，Adapter 会调用其 Chat Completions 路径。这是当前最高优先级的公开部署阻断项。
+三个远程 Provider 类型都允许用户配置 `base_url`，Adapter 会根据显式类型调用 Chat Completions、OpenAI Responses 或 Anthropic Messages 路径。这是当前最高优先级的公开部署阻断项。
 
 ### 5.1 已实现的有限校验
 
 - URL 必须是含 hostname 的绝对地址；远端 Provider 必须使用 `https://`，只有 `localhost` 或字面量 loopback IP 可使用 `http://`。
 - 禁止内嵌 username/password、query 与 fragment，并去除末尾 `/`。
 - Adapter 使用有限连接/读取超时及有限重试；普通配置型 4xx 不会无限重试。
-- Provider 请求禁用 HTTP redirect。CLI 从兼容根地址推导同路径的 `/models` 和 `/chat/completions`；若传入完整 `/chat/completions`，模型发现回到其同级 `/models`。
-- 模型发现与 Chat 请求都发送 `Accept-Encoding: identity`，并在读取正文前拒绝压缩响应；发现体流式限制为 2 MiB，Chat 普通 JSON 成功体限制为 4 MiB，SSE 累计 wire/单事件/最终 content 分别限制为 64 MiB/1 MiB/4 MiB，非 2xx 错误体限制为 64 KiB，超限即中止而不保留整段正文。
+- 除既有 retryable HTTP/transport 分类外，只重试显式白名单的 typed transient error：Responses 的 rate-limit/server error，以及 Messages 的 `rate_limit_error`、`api_error`、`overloaded_error`、`timeout_error`；Messages 的 HTTP `529` 也进入冻结的 retryable status 集。未知流内错误 fail closed，每个重试 HTTP attempt 都独立结算 ledger。
+- Provider 请求禁用 HTTP redirect。CLI 从根地址或三个已知完整 endpoint 推导同级 `/models`；discovery 与生成都使用显式 Adapter 对应的认证 header，生成 endpoint 也由该类型决定。匹配的完整 endpoint 原样使用，其他已知协议后缀在发送 Key 前拒绝。系统不按模型名/URL猜测协议，也不在失败后跨协议 fallback。
+- 模型发现与三类远程请求都发送 `Accept-Encoding: identity`，并在读取正文前拒绝压缩响应；discovery 聚合限制为 2 MiB/10,000 个模型 ID，Messages 分页另限制累计 100 页/60 秒 wall-clock，并拒绝重复或 `has_more=true` 时缺失 `last_id` 的继续游标。普通 JSON 成功体限制为 4 MiB，SSE 累计 wire/单事件/最终 content 分别限制为 64 MiB/1 MiB/4 MiB，非 2xx 错误体限制为 64 KiB，超限即中止而不保留整段正文。Chat、Responses、Messages 分别要求 `[DONE]`、`response.completed`、`message_stop` 终止事件，截断流不会保存部分答案。
 - stored credential 的 AES-GCM AAD 绑定规范化 origin；改变 scheme/host/非默认 port 时必须重输 Key，active Run 期间禁止 endpoint/credential 更新，Worker 解密只接受 Run snapshot origin。这阻止 Key 被静默换绑到另一 origin，但不判断首次配置的 HTTPS 目标是否可信。
 
-这些校验降低凭据经远端明文 HTTP 外泄和大/压缩响应耗尽内存的风险，但不保证目标安全。loopback HTTP 是明确支持的本地推理路径；RFC 1918 私网、IPv6 link-local、云元数据和其他敏感目标仍可能通过 HTTPS 被访问，DNS rebinding 也未防御。CORS 对服务端 SSRF 没有帮助。模型发现另有 10,000 个模型 ID 上限和 2 MiB 正文上限；Chat 普通 JSON 成功体为 4 MiB，SSE wire/单事件/聚合 content 为 64 MiB/1 MiB/4 MiB，错误体为 64 KiB。
+这些校验降低凭据经远端明文 HTTP 外泄和大/压缩响应耗尽内存的风险，但不保证目标安全。loopback HTTP 是明确支持的本地推理路径；RFC 1918 私网、IPv6 link-local、云元数据和其他敏感目标仍可能通过 HTTPS 被访问，DNS rebinding 也未防御。CORS 对服务端 SSRF 没有帮助。模型发现另有 10,000 个模型 ID 上限和 2 MiB 正文上限；远程协议普通 JSON 成功体为 4 MiB，SSE wire/单事件/聚合 content 为 64 MiB/1 MiB/4 MiB，错误体为 64 KiB。Anthropic Messages 的 `x-api-key` 与 Chat/Responses 的 `Authorization` 同属秘密 header，不得进入日志、异常或证据。
 
 ### 5.2 MVP 使用要求
 
@@ -191,7 +192,7 @@ allowlist 只减少聚合面，不等于 artifact 无敏感性。raw child 仍�
 - 远端只使用 HTTPS 并验证证书；HTTP 只用于确认由本机操作者控制的 loopback 推理服务，不使用把凭据写进 URL 的反向代理。
 - 在主机防火墙、容器网络或出站代理层拒绝云元数据、loopback、link-local 与内网网段；若必须访问本地推理服务，应为它建立精确的目标例外。
 - 创建 Run 前确认 Benchmark 内容允许发送给目标 Provider。
-- 把 Web 的 Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s` 只当作可编辑建议。更高输出预算和更长读取超时可能增加费用；“由 Provider 决定”提交 `max_tokens:null`，只表示请求中省略该字段，并不取消 Provider 自身限制或平台费用风险。
+- 把 Web 的 Demo `256/60s`、MMLU-Pro direct `1024/180s`、official CoT `4000/300s`、GPQA-Diamond `8192/600s` 只当作可编辑建议。更高输出预算和更长读取超时可能增加费用；Chat/Responses 的“由 Provider 决定”提交 `max_tokens:null`，只表示请求中省略对应输出字段，并不取消 Provider 自身限制或平台费用风险。Messages 不支持该选择，必须提交有限正整数 `max_tokens`。
 - 把 `read_timeout_seconds` 理解为 LLMBenchLab 等待下一批 Provider 字节的空闲窗口，不是模型生成总时限；它不会配置 Worker→Provider 链路上的 Cloudflare、Caddy 或其他 Gateway。真实评测前必须另行核对代理的 SSE flush、buffering、空闲与绝对总时长。
 - 真实 CLI 先使用小额 `--limit` 验证；只有确认模型发现/canary、响应解析、失败率和账单后才考虑 `--full`。不要把 CLI 的请求尝试上界误当作 Token 或金额硬上限。
 
@@ -289,7 +290,7 @@ Redis 仅可置于受控内部网络。当前本地 Compose 使用 AOF、无 ACL
 - 退出码 `3` 表示 `COMMIT` 已确认、但提交后验证或报告失败；导入已经提交。**禁止盲目重试或把它描述为回滚**，应先只读核验目标，必要时从已验证备份执行人工恢复。
 - 工具是单向导入，不提供 PostgreSQL→SQLite 自动回迁。schema downgrade 也不等于数据平台回滚。
 
-当前 head `20260830_0007` 是 data-only 修复：它不改 schema、never-delete ledger、Provider actual usage、Response、audit 或 Run 终态，只依据冻结的 `evaluation_runs.input_token_reservation` 重算 `governance_scopes.overdrawn`。upgrade/downgrade 都会在任何更新前拒绝 `reserved/send_started` active reservation；downgrade 仅恢复旧派生谓词。`20260829_0006` 仍只补齐 canonical `0004` 的三个索引；兼容入口只接受 canonical schema，或缺失项为这三个索引的非空子集，以便 SQLite 非事务 DDL 中断后安全重入。新近成为 historical 的 PostgreSQL `0005/0006` 必须按各自规则通过 metadata drift 校验；任何额外差异仍 fail closed。SQLite preflight 与 repair migration 都会在恢复 single-active 唯一索引前拒绝多条 active policy。`0006 → 0005` 不删除对象；`20260828_0005 → 0004` 会移除 Worker progress，guard 在第一条 DDL 前拒绝任何 generation 行；`20260827_0004 → 0003` 会移除治理/ledger/audit/Provider metadata并拒绝任何相关事实。正常运行后的数据库不可原地 downgrade；应优先向前修复，或恢复经核验的旧备份并保留只读证据。只有隔离空数据库用于双方向往返验证；详见 [OPERATIONS.md](OPERATIONS.md)。
+当前 head `20260830_0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并同时替换 Provider 类型 check 与远程配置 check；它不改写旧 `mock`/`openai_compatible` 行。数据库中存在 `openai_responses` 或 `anthropic_messages` Model 时，`0008 → 0007` 在第一条 DDL 前拒绝，避免静默丢失新配置。其上游 `20260830_0007` 是 data-only 修复：它不改 schema、never-delete ledger、Provider actual usage、Response、audit 或 Run 终态，只依据冻结的 `evaluation_runs.input_token_reservation` 重算 `governance_scopes.overdrawn`。`0007` upgrade/downgrade 都会在任何更新前拒绝 `reserved/send_started` active reservation；downgrade 仅恢复旧派生谓词。`20260829_0006` 仍只补齐 canonical `0004` 的三个索引；兼容入口只接受 canonical schema，或缺失项为这三个索引的非空子集，以便 SQLite 非事务 DDL 中断后安全重入。新近成为 historical 的 PostgreSQL `0005/0006/0007` 必须按各自规则通过 metadata drift 校验；任何额外差异仍 fail closed。SQLite preflight 与 repair migration 都会在恢复 single-active 唯一索引前拒绝多条 active policy。`0006 → 0005` 不删除对象；`20260828_0005 → 0004` 会移除 Worker progress，guard 在第一条 DDL 前拒绝任何 generation 行；`20260827_0004 → 0003` 会移除治理/ledger/audit/Provider metadata并拒绝任何相关事实。正常运行后的数据库不可原地 downgrade；应优先向前修复，或恢复经核验的旧备份并保留只读证据。只有隔离空数据库用于双方向往返验证；详见 [OPERATIONS.md](OPERATIONS.md)。
 
 ## 10. 依赖与构建供应链
 

@@ -682,6 +682,44 @@ async def test_openai_compatible_rejects_invalid_or_error_sse_events(
     assert stream.closed is True
 
 
+@pytest.mark.parametrize("response_mode", ["json", "sse"])
+@pytest.mark.asyncio
+async def test_openai_compatible_parse_errors_do_not_retain_provider_secrets(
+    response_mode: str,
+) -> None:
+    secret = "malformed-chat-provider-secret"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if response_mode == "sse":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=f'data: {{"reflected":"{secret}"\n\n'.encode(),
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            content=f'{{"reflected":"{secret}"'.encode(),
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(AdapterError) as caught:
+            await OpenAICompatibleAdapter(
+                "https://provider.example/v1",
+                "model",
+                api_key=secret,
+                client=client,
+            ).generate([{"role": "user", "content": "question"}], {})
+
+    expected = "invalid_provider_stream" if response_mode == "sse" else "invalid_provider_response"
+    assert caught.value.error_type == expected
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    formatted = "".join(traceback.format_exception(caught.type, caught.value, caught.tb))
+    assert secret not in formatted
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("limit_kind", ["wire", "event", "content"])
 async def test_openai_compatible_enforces_sse_size_limits(
@@ -741,6 +779,8 @@ async def test_openai_compatible_enforces_sse_size_limits(
     assert caught.value.error_type == "provider_response_too_large"
     assert caught.value.attempts == 1
     assert f"{expected_limit}-byte safety limit" in caught.value.error_message
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
     assert stream.closed is True
 
 
@@ -1061,6 +1101,10 @@ async def test_openai_compatible_streams_and_rejects_oversized_response_bodies(
     assert caught.value.retryable is False
     assert "32-byte safety limit" in caught.value.error_message
     assert secret not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    formatted = "".join(traceback.format_exception(caught.type, caught.value, caught.tb))
+    assert secret not in formatted
     assert stream.yielded < len(stream.chunks)
     assert stream.closed is True
 

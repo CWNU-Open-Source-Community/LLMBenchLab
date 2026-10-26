@@ -2,7 +2,7 @@
 
 ## 1. 测试原则
 
-LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模型费用。自动化测试和 CI 只能使用 `MockModelAdapter`，或使用进程内 `httpx.MockTransport` 验证 OpenAI-compatible 协议；不得访问真实 Provider，不要求 API Key，不把“本机碰巧可用”当作通过证据。
+LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模型费用。自动化测试和 CI 只能使用 `MockModelAdapter`，或使用进程内 `httpx.MockTransport` 验证 Chat Completions、OpenAI Responses 与 Anthropic Messages 协议；不得访问真实 Provider，不要求 API Key，不把“本机碰巧可用”当作通过证据。
 
 每次报告测试结果时必须写明实际命令、通过/失败、测试数量、失败原因和未运行项。没有执行的 Docker、浏览器或联网验证不能写成通过。
 
@@ -15,9 +15,9 @@ LLMBenchLab 的默认验收路径必须完全离线、可重复且不产生模�
 | API 与进程边界测试 | FastAPI Schema、状态码、秘密安全、Run 提交与 API/Worker 分离 | `backend/tests/test_api.py`、`test_run_dispatch.py`、`test_process_boundaries.py` | 禁止 |
 | Governance / audit 测试 | policy/ledger 完整性、typed history/audit、Provider/credential evidence，以及 canonical archive/离线 verify/精确 reconcile/restore/delete | `test_governance.py`、`test_audit_api.py`、`test_audit_archive.py`、`test_audit_retention.py`、`test_audit_retention_cli.py` | 禁止；SQLite/Mock/fixture；真实 PG retention 只连测试库 |
 | 租约与 Worker 测试 | 条件领取、fencing、心跳、取消、幂等 Response、重试/恢复、队列 ACK，以及 generation 级 DB-time scan/claim/lease-heartbeat/progress/stale | `test_run_leases.py`、`test_evaluation_runner_reliability.py`、`test_worker.py`、`test_worker_progress.py`、`test_worker_probe.py` | 禁止；SQLite/假队列 |
-| Metrics / alert / logging 测试 | 固定 Prometheus exposition、snapshot/hard cap/single-flight/取消竞态、精确八规则/Runbook、全部生产 logger source/第三方 handler 治理，以及组合开发启动器的日志分流/退出传播 | `test_prometheus_exporter.py`、`test_prometheus_alert_rules.py`、`test_logging.py`、`test_logging_sources.py`、`test_dev_script.py` | 禁止；SQLite/假队列/标准库 JSON/假子进程 |
+| Metrics / alert / logging / 启动器测试 | 固定 Prometheus exposition、snapshot/hard cap/single-flight/取消竞态、精确八规则/Runbook、全部生产 logger source/第三方 handler 治理，以及本地/Compose 多 Worker启动、日志分流、环境优先级、gauges 轮询与退出传播 | `test_prometheus_exporter.py`、`test_prometheus_alert_rules.py`、`test_logging.py`、`test_logging_sources.py`、`test_dev_script.py`、`test_compose_up_script.py` | 禁止；SQLite/假队列/标准库 JSON/假子进程/假 Docker |
 | 迁移与导入回归 | SQLite/真实 PostgreSQL migration、`0005` populated downgrade refusal/空库往返，以及 13 表 SQLite→PostgreSQL 原子导入 | `test_migrations.py`、`test_sqlite_postgres_import.py` | 导入/本地部分禁止；真实 PostgreSQL 用 `integration` marker |
-| 真实基础设施集成 | PostgreSQL 并发领取/取消竞态、Redis Streams PEL/ACK/重复投递 | `backend/tests/integration/` 与 importer 的 `integration` 用例 | 只连接显式测试 PostgreSQL/Redis；禁止 Provider |
+| 真实基础设施集成 | PostgreSQL 并发领取/取消竞态、不同 Benchmark Run 被不同 owner 领取且同一 Run lease 唯一、Redis Streams PEL/ACK/重复投递 | `backend/tests/integration/` 与 importer 的 `integration` 用例 | 只连接显式测试 PostgreSQL/Redis；禁止 Provider |
 | Mock 端到端 Smoke | API 提交 pending Run → 独立 WorkerService → Responses → Leaderboard/Metrics | `backend/tests/test_smoke.py`，marker 为 `smoke` | 禁止 |
 | Compose 故障验收 | 六服务拓扑、双 Worker、进程/Redis/lease 故障、治理/ledger、取消、重复消息、Worker expected count 与 `0005` 安全回滚 | `scripts/phase2_acceptance.py` / `make phase2-acceptance` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
 | Mock 容量基线 | 真实 PostgreSQL 16/Redis 7、全有限 policy、1/2 Worker、精确 `202/429` backlog、cooperative quantum、跨 Model 公平性、lease/Redis/重复通知故障及 DB/queue/ledger/audit 对账 | `scripts/phase2_capacity.py` / `make phase2-capacity` | 只拉取/构建基础镜像；模型执行始终为离线 Mock |
@@ -62,11 +62,25 @@ npm ci
 make test       # 后端 pytest + 前端 Vitest
 make lint       # Ruff + ESLint + TypeScript 类型检查
 make smoke      # 只跑完全离线的后端垂直切片
+make dev-multi  # PostgreSQL/Redis Compose 默认双 Worker，并验证 gauges
 make phase2-acceptance  # 隔离的真实 Compose 九场景可靠性验收
 make phase2-capacity    # PostgreSQL 16/Redis 7/1→2 Worker 的 Mock 容量基线
 make phase2-slo         # clean commit 上固定 v2 四-cell、1 warm-up + 5 measured 的单机资格
 make format     # 运行项目约定的格式化器
 ```
+
+多 Worker启动层的纯离线目标回归为：
+
+```bash
+cd backend
+uv run pytest tests/test_dev_script.py tests/test_compose_up_script.py
+```
+
+它用假子进程和假 Docker 覆盖 `1..32` 校验、SQLite fail-fast、独立日志、信号清理、
+Compose scale/expected 同步与 30 次有界 gauges 超时，不会启动真实 Provider。租约并发
+断言还必须在已迁移的显式 PostgreSQL 测试库上运行
+`test_postgres_leases.py`；没有 `LLMBENCHLAB_TEST_POSTGRES_URL` 时该层按设计跳过，不能
+把 skip 写成真实 PostgreSQL 通过。
 
 格式化会修改文件；仅检查时使用下面的直接命令。提交 PR 前还应执行前端 production build。
 
@@ -148,7 +162,7 @@ npm run build
 docker compose config --quiet
 ```
 
-这只验证配置渲染，不证明镜像已构建、migration 已完成或服务健康。普通启动验证使用 `make docker-up`、检查 `/api/v1/live`、`/health`、`/ready` 和 Worker probe，最后执行 `make docker-down`。真实故障验收使用 `make phase2-acceptance`，容量基线使用 `make phase2-capacity`；两者都创建唯一 Compose project、随机 loopback 端口和隔离卷，失败路径也执行精确 `down -v` 并检查无项目残留。不得对日常项目名手工套用其清理命令。
+这只验证配置渲染，不证明镜像已构建、migration 已完成或服务健康。普通启动验证使用 `make docker-up` / `make dev-multi`；标准包装器默认两个 Worker，先拒绝 stale generation 冒充本轮新增 Worker scan，并把 exited replica 纳入缩容方向判断；只有 `/api/v1/tasks/metrics` 收敛到 `expected/registered/live/stalled/shortfall=2/2/2/0/0` 才成功。随后检查 `/api/v1/live`、`/health`、`/ready` 和 Worker probe，最后执行 `make docker-down`。真实故障验收使用 `make phase2-acceptance`，容量基线使用 `make phase2-capacity`；两者都创建唯一 Compose project、随机 loopback 端口和隔离卷，失败路径也执行精确 `down -v` 并检查无项目残留。不得对日常项目名手工套用其清理命令。
 
 ## 5. 后端测试覆盖
 
@@ -165,22 +179,24 @@ docker compose config --quiet
 
 ### 5.2 Adapter 单元测试
 
-`test_adapters.py` 覆盖：
+`test_adapters.py` 覆盖 Mock 与既有 Chat transport；`test_provider_protocol_adapters.py` 覆盖三协议 request/response 合同，`test_provider_protocol_plumbing.py` 覆盖 API/Run/Runner/CLI、typed retry 与 attempt ledger 联动：
 
 - Mock 输出、Token、延迟、request ID 可预测且不进行 I/O。
 - Mock 可注入分类错误，用于验证单题故障隔离；latency/Token/usage shape 等确定性本地配置在 reserve 前全部验证，非法配置断言治理 hook 零调用，成功与模拟 Provider error 断言 reserve→mark→actual/conservative finish 顺序。
-- OpenAI-compatible 的 Chat Completions URL、messages、`Accept: text/event-stream`、`stream:true`、`stream_options.include_usage:true` 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
+- Chat Completions 的 URL、messages、`Accept: text/event-stream`、`stream:true`、`stream_options.include_usage:true` 与 `temperature/top_p/max_tokens/seed`；数字 `max_tokens` 原样发送，`null` 时请求体完全省略该字段。
+- Responses 的 `/responses`、Bearer header、`input`、`max_output_tokens`、普通 JSON `output` 与 typed SSE `response.output_text.delta`/`response.completed`；Messages 的 `/messages`、`x-api-key`/`anthropic-version`、顶层 system、有限 `max_tokens`、普通 JSON `content[].text` 与 typed SSE `content_block_delta`/`message_stop`。
+- 根 URL 与匹配完整 endpoint 均正确解析，已知跨协议后缀、Responses/Messages 非空 seed、Messages `temperature>1` 和 `max_tokens:null` 在 transport 零调用时稳定拒绝；请求/Model 默认均省略时，Responses/Messages 的 `temperature/top_p/seed` 快照为 `null` 且 Provider payload 不包含这些字段。
 - usage 缺失时 Token 字段为 `null`。
-- 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试。
-- 每个 OpenAI-compatible HTTP retry 都经过 request-local reserve→mark-send-started→finish hook；pre-send 失败 release，usage 完整 actual，transport/usage 缺失 conservative，settlement unknown 停止后续外发。
+- 429、选定 5xx、网络超时的有限指数退避，以及普通 4xx 不重试；Responses 的 rate-limit/server typed error 与 Messages 的 `rate_limit_error`、`api_error`、`overloaded_error`、`timeout_error` 在 JSON/SSE 路径有限重试，Messages HTTP `529` 写入 Run retry snapshot，未知 typed error fail closed。
+- 每个远程协议 HTTP retry 都经过 request-local reserve→mark-send-started→finish hook；pre-send 失败 release，usage 完整 actual，transport/usage 缺失 conservative，settlement unknown 停止后续外发。
 - 远端 HTTPS 强制、loopback HTTP 例外，以及在发送 Key 前拒绝远端明文 HTTP。
 - 真 SSE 的任意网络/UTF-8 拆包与合包、LF/CRLF/独立 CR、BOM、comment ping、多 `data` 行、role/null delta、reasoning/timings 扩展忽略、finish 后继续读取可选 usage-only 块至 `[DONE]`，以及普通 JSON fallback。
-- 非法 UTF-8/JSON/字段、SSE 内 Provider error、缺失 `[DONE]`、transport 中断的有限重试，以及同一 Adapter 并发请求的 request-local 状态隔离。
-- 模型发现与 Chat 的 `Accept-Encoding: identity`、读取前拒绝压缩，以及发现 2 MiB、Chat JSON 4 MiB/错误 64 KiB、SSE wire 64 MiB/单事件 1 MiB/聚合 content 4 MiB 的上限。
+- 非法 UTF-8/JSON/字段、SSE 内 Provider error、分别缺失 `[DONE]`/`response.completed`/`message_stop`、transport 中断的有限重试，以及同一 Adapter 并发请求的 request-local 状态隔离。
+- 模型发现按显式协议鉴权：Chat/Responses 使用 `Authorization: Bearer`，Messages 使用 `x-api-key` 与 `anthropic-version`；Messages 的 `has_more/last_id` 通过有界 `after_id` 分页聚合，并断言累计 100 页、60 秒 wall-clock、10,000 项、2 MiB、缺失/重复 cursor 边界 fail closed。发现与三类生成请求都使用 `Accept-Encoding: identity`、读取前拒绝压缩，并覆盖 JSON 4 MiB/错误 64 KiB、SSE wire 64 MiB/单事件 1 MiB/聚合 content 4 MiB 的上限。
 - legacy Key 环境变量缺失、write-only direct `SecretStr`、空 Provider 回答、非法配置与错误脱敏；`finish_reason="length"` 的空输出分类为 `output_truncated`，普通空输出仍为 `empty_response`；成功内容、raw usage 键/字符串值、request ID、返回模型名、fingerprint 和 finish reason 的当前 Key 精确替换，包括 Key 横跨 SSE delta 的聚合后替换。
-- 最终 `httpx.TransportError` 的安全 `AdapterError` 同时断言 `__cause__ is None`、`__context__ is None`，格式化 traceback 不含带 Authorization request 中的 canary Key。
+- 最终 transport、malformed JSON/SSE 或 oversized 响应的安全 `AdapterError` 同时断言 `__cause__ is None`、`__context__ is None`，格式化 traceback 不含带 `Authorization`/`x-api-key` request 中的 canary Key 或原始 Provider bytes。
 
-OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
+远程协议测试只给进程内 transport 使用虚构 token；不得把测试地址改为真实域名。
 
 ### 5.3 Dataset Loader 单元测试
 
@@ -202,9 +218,9 @@ OpenAI-compatible 测试只给进程内 transport 使用虚构 token；不得把
 - GPQA-Diamond 内层 CSV Hash、198 行约束、逐 Record ID 确定性选项重排、seed/domain 筛选，以及不携带作者/解释字段；
 - 输出 ZIP 再由普通 dataset-v1 Loader round-trip 校验。
 
-`test_provider_preflight.py` 只使用 `httpx.MockTransport`，覆盖 `/v1` 与完整 `/chat/completions` 的 `/models` 推导、远端 HTTP 拒绝、identity-only/2 MiB 发现响应、压缩体读取前拒绝、认证错误脱敏、发现模型 ID 反射当前 Key 时失败、唯一/多模型选择、最小 Chat canary 使用同一流式 payload/响应 Adapter、finish reason 脱敏，以及 canary 明确返回不同模型时失败。它不能证明任何真实 Provider 兼容，也不应改为读取开发者环境 Key。
+`test_provider_preflight.py` 只使用 `httpx.MockTransport`，覆盖 `/v1` 与完整 `/chat/completions`、`/responses`、`/messages` 的 `/models` 推导、远端 HTTP 拒绝、identity-only/2 MiB 发现响应、压缩体读取前拒绝、认证错误脱敏、发现模型 ID 反射当前 Key 时失败、唯一/多模型选择、按显式协议执行最小 canary、finish reason 脱敏，以及 canary 明确返回不同模型时失败。它不能证明任何真实 Provider 兼容，也不应改为读取开发者环境 Key。
 
-`test_evaluation_cli.py` 只做离线编排，覆盖无 `--api-key`、环境/隐藏输入生命周期、确认口令、含 HTTP retries 与剩余 Run attempts 的请求上界、profile 默认值、active Run 早拒绝、Run 创建/恢复/报告顺序、过期 incomplete lease 的 fenced reclaim 和 Key 值不持久化。它验证的是本地控制流，不证明真实 Provider 或操作系统级独占；人工 runbook 仍必须先停常规 API/Worker。
+`test_evaluation_cli.py` 只做离线编排，覆盖无 `--api-key`、环境/隐藏输入生命周期、确认口令、含 HTTP retries 与 `max_attempts - failed_attempt_count` 剩余预算的请求上界、profile/协议默认值、active Run 早拒绝、Run 创建/恢复/报告顺序、过期 incomplete lease 的 fenced reclaim 和 Key 值不持久化。它验证的是本地控制流，不证明真实 Provider 或操作系统级独占；人工 runbook 仍必须先停常规 API/Worker。
 
 `test_run_report.py` 使用临时数据库覆盖分页导出全部 Response、非重叠分组、三文件内容、目标拒绝覆盖、文件权限与秘密脱敏。回归还构造 failed Run 的陈旧汇总字段，验证 `summary.metrics` 从计划题与 Responses 派生、`metrics_provenance` 标出漂移，并与 groups/responses 保持同一口径。报告含题目和 raw response，因此测试 fixture 必须完全虚构。
 
@@ -253,17 +269,30 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - SQLite 并发测试断言 Model PATCH 与 Run create 在读取 Model 前以 `BEGIN IMMEDIATE` 串行化；PostgreSQL integration 断言两条路径共用 Model row `FOR UPDATE` 锁。SQLite 竞争期间允许请求短暂等待，这仍只是低并发本地模式；生产/并发评测门禁使用 PostgreSQL。
 - SQLAlchemy 基本 CRUD 与外键/Schema 基线。
 - Run 创建 `202`、取消、轮询、逐题证据、汇总和排行榜；API 提交不在进程内执行 Adapter。生成边界测试覆盖兼容默认 `max_tokens=256`、显式 `null`、数字上限 `131072`、读取超时默认 `60s`/上限 `1800s`，并断言最终 generation 与 `execution.timeouts_seconds.read` 快照。
+- Response 列表的 Run-wide usage summary 覆盖零 Response、完整 usage、部分/非对称 usage、合法零 Token 和跨页一致性；输入/输出已知小计与非 `null` 计数各自独立，部分 usage 不会回填 protocol-v1 的精确 Run Token。
+- P3-06 progress index/block 回归必须覆盖：固定 `block_size=512`；全部计划 block（含空 block）升序 count；block absolute position 的稀疏/乱序完成；`error_type` 优先于 score、`score==1` 通过、其余普通答错；没有 Response 的 planned position 由客户端视为 `not_run`。index 的 completed/correct/error、三项 protocol-v1 指标、平均延迟及 known Token/cost coverage 必须与 block counts 在同一读取快照派生。
+- progress 竞态回归必须在 index→block 之间插入新 Response，证明 payload 与下一 index 最终收敛、不漏不重；覆盖 0/1/12,032/20,000 题边界、运行中和 completed/cancelled/failed 部分证据、nullable latency/usage/cost、负 block FastAPI 422、越界 typed `422 progress_block_out_of_range`、Run 404、两个接口 `Cache-Control: no-store` 及显式 OpenAPI Schema。相同语义需在快速 SQLite 与真实 PostgreSQL 读取快照用例验证。
+- progress cell 白名单必须精确限制为 `position/outcome/score/latency_ms/input_tokens/output_tokens/estimated_cost/error_type`；marker 测试必须证明 Question/Response ID、external ID、prompt/choices/raw/parsed/reference、error message、Provider request/model/fingerprint/finish reason、raw usage 和其他 Provider metadata 均不可表示或反射。
 - Web stored Key 纵向用例通过模拟 SSE 验证 API 写入→Worker 解密→Adapter 聚合→逐题/Run Token 持久化→报告脱敏；另一用例保留 JSON fallback，并断言 Run 的空闲读取超时和 stream payload 到达 Provider request。
 - Response/API/report 纵向用例验证安全归一化的 provider request ID、returned model、system fingerprint、finish reason 和 HTTP attempt count；过长/控制字符/非标值 fail closed 为 `null`，raw usage object 不作为任意持久化字段暴露。
 - Runner 诊断测试覆盖非空但无法解析且 `finish_reason="length"` 时的 `output_truncated`，并确认普通解析失败仍保持 `parse_error`；两者都不改变严格计零语义。
 
 增加或修改路由时至少断言：成功状态码与 Schema、一项校验错误、404/409 等业务错误、分页/筛选（若适用），以及响应中不出现秘密值。API 行为改变必须同步更新 [API.md](API.md)。
 
+P3-06 后端定向命令：
+
+```bash
+cd backend
+uv run pytest tests/test_run_progress_api.py tests/test_response_metadata_api.py -q
+```
+
+初版 cursor 合同曾建立 4 个失败先行用例并得到 `4 failed`；随后发现 Response 没有数据库单调提交序列，因此已在生产实现前废弃。固定 512 题 block 合同的后端定向结果为 `37 passed`；旧 cursor red 结果不计入通过数。
+
 ### 6.2 Alembic 与遗留 SQLite
 
 `backend/tests/test_migrations.py` 使用独立临时 SQLite 和 Alembic 子进程验证：
 
-- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260830_0007` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束、两个 bounded audit scan indexes，以及早期 `0004/0005` 三索引缺口、repair DDL 部分完成后的重入和 PostgreSQL `0005/0006` metadata 白名单/额外 drift 拒绝控制流（Mock）。
+- 空库 upgrade/check/downgrade/upgrade 往返，以及 `20260830_0008` 最终 revision、可靠性/凭据/治理/ledger/audit/Provider metadata、`worker_processes` 字段/约束、两个 bounded audit scan indexes，以及早期 `0004/0005` 三索引缺口、repair DDL 部分完成后的重入和 PostgreSQL `0005/0006/0007` metadata 白名单/额外 drift 拒绝控制流（Mock）。
 - 有模型、Benchmark、题目、Run 与 Response 的 legacy schema 被一致性备份、严格识别并无损升级；题目按原插入顺序回填 0-based `position`。
 - 与当前 metadata 一致但没有版本标记的库可安全收养，已有 head 重复 preflight 不生成多余备份。
 - 部分表、server default/CHECK 内容或重名、PK/UNIQUE/FK/index/partial index、trigger、SQLite conflict policy/generated column、`STRICT`/`WITHOUT ROWID` 等未知 drift 在创建版本标记和备份前被拒绝；已在 head 的库同样验证。
@@ -273,6 +302,7 @@ SQLite 测试适合快速验证状态机和兼容路径；跨连接并发保证�
 - `0003 -> 0004` 把既有 Run 标为 `legacy_unmanaged` 并保留 protocol-v1 证据；任意 policy/scope/bucket/question execution/attempt ledger/audit、新 Run fairness/governance 字段或 Response Provider metadata 存在时，`0004 -> 0003` 必须在第一条 DDL 前拒绝。只有隔离空库用于 `0004 -> 0003 -> 0004` roundtrip。
 - `0004 -> 0005` 不回填虚构 Worker generation；任意 `worker_processes` 行都使 `0005 -> 0004` 在第一条 DDL 前拒绝。只有显式清空 process facts 或隔离空库才能往返，进入 `0004` 后原 governance/audit downgrade guard 继续生效。
 - `0006 -> 0007` 不改 schema 或历史 ledger/actual/Response，只重算 scope `overdrawn`：无显式 Run input bound 的 historical observational input/cost 超额被清除，显式 input/output 超额与由完整显式上界和价格派生的 cost 超额保留；`0007 -> 0006` 恢复旧派生结果。两个方向在任何更新前都拒绝 `reserved/send_started` active reservation。
+- `0007 -> 0008` 将 `models.provider_type` 从 `VARCHAR(17)` 扩为 `VARCHAR(18)`，并同时替换 Provider 类型 check 与远程配置 check，旧 `mock`/`openai_compatible` 行值不改写；preflight 只接受精确 `17→18` type fingerprint，任意其他列宽/type drift 都拒绝。存在 `openai_responses` 或 `anthropic_messages` Model 时 downgrade 在第一条 DDL 前拒绝，隔离空库可往返。
 - 应用启动 revision 门禁拒绝未迁移库；测试夹具中的 `create_all` 仅用于隔离临时库，并显式 stamp 到与 metadata 对应的 head，不是运行时建表路径。
 
 目标化运行：
@@ -282,7 +312,7 @@ cd backend
 uv run pytest tests/test_migrations.py
 ```
 
-真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline并停止 API/Worker 后，从 head `0007` 发起 downgrade；`0007 -> 0006` 只恢复旧 overdraw 派生谓词，`0006 -> 0005` 为 schema no-op，随后 populated `0005 -> 0004` 在任何有损 DDL 前拒绝。另建隔离空 PostgreSQL 跨过 `0005 -> 0004 -> 0005`，最终 `upgrade head` 回到 `0007` 并 check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
+真实 PostgreSQL `backend-integration` job 在空的专用 management database 上执行 migration 往返与 `alembic check`，验证 revision/DDL；它不提供已使用数据库可安全丢弃新事实的证明。带数据证据来自 Compose 验收：脚本完成 managed Mock baseline并停止 API/Worker 后，从 head `0008` 发起 downgrade；因该基线没有新协议 Model，`0008 -> 0007` 会恢复 `VARCHAR(17)` 列宽、旧 Provider 类型 check 与旧远程配置 check，`0007 -> 0006` 只恢复旧 overdraw 派生谓词，`0006 -> 0005` 为 schema no-op，随后 populated `0005 -> 0004` 在任何有损 DDL 前拒绝。另建隔离空 PostgreSQL 跨过 `0005 -> 0004 -> 0005`，最终 `upgrade head` 回到 `0008` 并 check。历史 `0004 -> 0003` governance/audit guard 仍保留；schema downgrade 不是 PostgreSQL→SQLite 平台回迁。
 
 ### 6.3 SQLite→PostgreSQL 导入
 
@@ -341,16 +371,16 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 自动化安全依赖多层约束：
 
 1. 所有端到端测试注册的 Provider 都是 `mock`；`MockModelAdapter.generate` 不执行网络 I/O。
-2. OpenAI-compatible 协议测试向 Adapter 注入 `httpx.MockTransport`，响应在进程内生成。
+2. Chat Completions、OpenAI Responses 与 Anthropic Messages 协议测试都向 Adapter 注入 `httpx.MockTransport` 或内存字节流，响应在进程内生成。
 3. 测试数据库和日志级别在应用导入前通过 fixture 环境变量设置，不读取开发 `.env`。
-4. CI 不配置任何真实 Provider Key；测试进程只生成独立临时 keyring 和明显虚构 canary。所有 OpenAI-compatible 路径必须注入 `MockTransport`，篡改/错误凭据路径在构造 Adapter 前失败。
+4. CI 不配置任何真实 Provider Key；测试进程只生成独立临时 keyring 和明显虚构 canary。所有三协议远程路径必须注入 `MockTransport`，篡改/错误凭据路径在构造 Adapter 前失败。
 5. 测试数据中的 Key 与域名必须是明显无效占位符，不从开发者环境复制。
 6. 标准数据测试必须注入内存 fetcher；CI 不运行在线 `llmbenchlab-evaluate prepare`，也不依赖本机已有 `artifacts/` 缓存。
 7. 报告和正式流程组件测试必须使用临时目录/临时数据库，不能读取或覆盖操作者已有正式 Run。
 
 当前测试套件没有操作系统级的“禁止所有出站网络”沙箱，因此最后一层仍是代码 Review：任何新增测试若构造真实 `httpx` client、读取开发 Key 或依赖在线服务，都必须被拒绝。公开 CI 加固可在后续增加 egress-disabled runner 或网络拦截 fixture；不能因为 CI runner 通常没有 Key 就认定任意网络访问安全。
 
-真实 OpenAI-compatible Provider 只允许作为用户主动执行、明确知晓费用和数据政策的可选手工验证；它不是 PR、CI、Smoke 或 Phase 2 可靠执行基础的完成条件。
+真实远程 Provider 只允许作为用户主动执行、显式选择 Chat/Responses/Messages 协议并明确知晓费用和数据政策的可选手工验证；它不是 PR、CI、Smoke 或 Phase 2 可靠执行基础的完成条件。
 
 真实模型验收应在隔离的本地数据库上先运行 `--limit`，人工核对模型发现、付费 canary、请求上界、逐题错误、Provider 账单和报告三文件，再决定是否 `--full`。这项手工操作不得写入自动化测试结果或 CI 通过数；如果本次没有真实 API URL/Key，就应明确记录“未运行”，不能用 MockTransport 结果替代“真实 Provider 已验证”。
 
@@ -364,15 +394,21 @@ Smoke Test 证明 API 与 Worker 责任边界以及数据库驱动的最小离�
 - `pending/running/completed/failed/cancelled` 五种状态标签。
 - Dashboard 主页面的 API 加载、严格总分、完成率、Run/模型/Benchmark 汇总与最近运行。
 - 后端不可达时的结构化、可重试错误状态。
-- Models password input、创建必填、编辑留空保留、origin 变化重输、请求 pending/成功/失败/关闭/切 Mock/unmount 清空、AbortSignal、恶意错误回显脱敏，以及不写 storage/console。
-- New Run 的 GPQA `8192/600s` 初始建议、MMLU-Pro official/direct 切换建议、手动预算不被覆盖、“应用建议”恢复、`max_tokens:null` Provider 托管提交，以及数字 `131072`/超时 `1800s` DOM 上限。
+- Models password input、创建必填、编辑留空保留、origin 变化重输、请求 pending/成功/失败/关闭/切 Mock/unmount 清空、AbortSignal、恶意错误回显脱敏、不写 storage/console，以及三协议 selector 的值、说明、匹配完整 endpoint 与提交 payload。
+- New Run 的 GPQA `8192/600s` 初始建议、MMLU-Pro official/direct 切换建议、手动预算不被覆盖、“应用建议”恢复、Chat/Responses 的 `max_tokens:null` Provider 托管提交，以及数字 `131072`/超时 `1800s` DOM 上限；协议切换还覆盖 Responses/Messages 默认 `temperature/top_p/seed=null`、逐 Model seed 恢复、Messages `temperature` DOM 上限 `1` 与有限 `max_tokens` 回落。
 - Runs 主导航、20 条 offset 分页、状态筛选、active Run 定时刷新、错误/空状态和详情链接。
 - Run Detail 返回 Runs 列表、终态停止轮询、逐题每页 100 条的 offset 导航，以及跨页序号/总数显示。
+- Run Detail 把全局和当前页的未得分与执行异常分开显示；Token 测试覆盖精确 Run 总量、部分已知小计、输入/输出非对称覆盖、零 usage、零 Response，以及并行 Run/Response 快照不一致时的保守降级。
+- P3-06 纯函数/状态测试覆盖 position↔row/column 的 0、1、12,032、20,000 边界，四态计数、nullable usage 的 aria-label、block reducer 幂等、旧请求世代/旧 runId 响应丢弃与 reset；实现不保留 API cursor 合同代码路径。
+- 热力图组件测试必须覆盖非仅颜色的图例/形状或边框、hover/focus/tap 等价详情、方向键、Home/End、Ctrl+Home/End、PageUp/PageDown、`aria-rowcount/aria-colcount/aria-activedescendant`、virtual DOM 节点上限、移动端 pinned detail，以及 block 未 hydrate 时“同步中”而非虚假 `not_run`。
+- Run Detail 集成测试必须覆盖 live metrics 更新但不触发整页 loading、当前 Response page 2 保持、旧 Run/旧 block 返回丢弃、一个 tick 不重复 fetch、hidden 暂停/visible 恢复、terminal 先到仍追齐目标 counts、progress 失败不阻断 Run/当前证据页。terminal 且 progress reconciled 后必须恰好执行一次最终 Run/当前 evidence 页刷新，避免终态 `Promise.all` 交错留下旧证据；同一路由切换 `runId` 必须把 evidence offset 重置为 0。known subtotal/coverage 只能展示，不能写成精确 Run Token/cost。
 - Run Detail 显示 `managed`、`delayed`、`exhausted`、`legacy_unmanaged` 治理状态，稳定 closed reason 使用受控文案，`not_before` 明确按 UTC 格式化；未知 reason 只显示安全兜底，不反射服务端原值。
 
-所有 fetch 与 Recharts 均在进程内 stub，没有真实网络；这些组件测试不会调用真实 Provider，也不会验证 Provider 实际接受某个输出长度或读取超时。Benchmark Demo 导入与完整 raw/parsed/reference/score/error 证据仍以离线后端 Smoke 和手工验收补充，不能把 DOM/API stub 结果描述成真实模型兼容性验证。
+所有 fetch 与 Recharts 均在进程内 stub，没有真实网络；这些组件测试不会调用真实 Provider，也不会验证 Provider 实际接受某个输出长度或读取超时。Benchmark Demo 导入与完整 raw/parsed/reference/score/error 证据仍以离线后端 Smoke 和手工验收补充，不能把 DOM/API stub 结果描述成真实模型兼容性验证。P3-06 定向命令 `cd frontend && npm test -- --run tests/run-detail-page.test.tsx tests/run-progress-heatmap.test.tsx` 为 `32 passed`（Run Detail `20` + heatmap `12`）；完整 `make test` 为 backend `964 passed, 33 skipped`、frontend `64 passed`。`make lint`、Mock smoke `1 passed, 7 deselected`、frontend production build 与 `docker compose config --quiet` 也已通过。
 
 本轮还在可信 loopback 的真实浏览器中手工核对 Models 表单：Key 控件实际为 password input，页面没有 `api_key_env` 控件，保存成功后表单/卡片/网络响应均不回显测试 Key，应用日志也没有该测试 Key。该检查使用无效测试值且没有触发真实 Provider；它补充 DOM stub 自动化，但不增加 Vitest 或后端测试计数。
+
+P3-06 可信 loopback 浏览器验收使用历史 Run `a3de7e4d-40b2-4d8c-994b-c713047393ae`：热力图/计数为 179 passed、17 wrong、2 error，known input/output Token 为 `45,509 / 4,561,625` 且两项覆盖均为 `196/198`。desktop、768px、375px 无横向溢出，console 无 warning/error，键盘导航与 Tooltip 通过。12,032/20,000 题仅由组件自动化验证虚拟 DOM 边界与导航，未进行大型真实 Run 的手工 DevTools 长任务/内存测量；不得把自动化结果扩写为该性能声明。实现 SHA [`99791964621165c9cc7ec36b4b2d27fe04e6acd5`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/commit/99791964621165c9cc7ec36b4b2d27fe04e6acd5) 已普通 push 到 `codex/complete-evaluation-workflow` 并进入 [PR #5](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/pull/5)；精确 SHA 的 [GitHub Actions run `33289522923`](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) 对 backend、backend-integration、full-stack-reliability、frontend 四个必需 job 全部成功，因此 P3-06 切片为 `completed`，但 Phase 3 整体仍为 `in_progress`。
 
 测试应优先按可见文本、label 和 role 查询 DOM，不依赖内部 class 或实现细节。时间、ID 和 API 返回应固定；不要用长 sleep 消除竞态。
 
@@ -387,7 +423,7 @@ GitHub Actions 对 `main` push 和 Pull Request 触发四类 job：
 | `full-stack-reliability` | `python3 scripts/phase2_acceptance.py` 的隔离 Compose 九场景 | 唯一项目/卷、随机 loopback 端口、Mock-only；总是上传已脱敏 evidence，脚本总是精确清理 |
 | `frontend` | ESLint、Vitest 组件测试、production build（`tsc -b` + Vite） | `npm ci` 锁定依赖；fetch/Recharts stub；`VITE_API_BASE_URL=/api/v1` |
 
-CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。`P2-local-control-plane-v2` 的 validator、统计、四-cell 编排失败路径、ledger projection 和 exact-project cleanup 合同可以进入普通自动化，但 GitHub-hosted runner 不运行 `make phase2-slo` 的绝对吞吐/延迟门禁：共享 runner 的 CPU、内存和 Docker 调度不是稳定性能实验室。P2-01 正式实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功；它是同一 SHA 的正确性门禁，不替代本机 1+5。P2-06 实现 SHA `9a20676dcf545040782f04c166205d0043345753` 的 [run 33164609388](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 与证据文档 SHA `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run 33165775037](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 均已 4/4 成功。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
+CI 不配置 Provider Key、不调用真实模型，也不在线下载 MMLU-Pro/GPQA。PostgreSQL/Redis 是测试依赖，不是 Provider 网络；标准数据转换只使用 fixture fetcher。`P2-local-control-plane-v2` 的 validator、统计、四-cell 编排失败路径、ledger projection 和 exact-project cleanup 合同可以进入普通自动化，但 GitHub-hosted runner 不运行 `make phase2-slo` 的绝对吞吐/延迟门禁：共享 runner 的 CPU、内存和 Docker 调度不是稳定性能实验室。P2-01 正式实现 SHA `b6a35fef1dd069ebb54b69955058915c722aa34d` 的 [run 33146681285](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33146681285) 4/4 成功；它是同一 SHA 的正确性门禁，不替代本机 1+5。P2-06 实现 SHA `9a20676dcf545040782f04c166205d0043345753` 的 [run 33164609388](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33164609388) 与证据文档 SHA `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的 [run 33165775037](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33165775037) 均已 4/4 成功。P3-06 实现 SHA `99791964621165c9cc7ec36b4b2d27fe04e6acd5` 的 [run 33289522923](https://github.com/CWNU-Open-Source-Community/LLMBenchLab/actions/runs/33289522923) 也已 4/4 成功。所有必需 job 通过后才能合并；跳过用例、降低断言或使用 `continue-on-error` 都不算修复。具体分支和 Review 门槛见 [GITHUB_WORKFLOW.md](GITHUB_WORKFLOW.md)。
 
 P2-06 实现 SHA 与提交前阶段性证据如下。Dirty 结果只作为历史过程记录，仓库收尾以 `9a20676dcf545040782f04c166205d0043345753` 绑定的 clean evidence 和实现精确 SHA CI、以及证据文档 SHA `ec2959680459a14aa308bd4d9ebcc6bb7bfcf3a6` 的精确 SHA CI 为准；两层门禁均已完成：
 
@@ -531,23 +567,28 @@ make dev
 
    ```bash
    curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/responses?limit=100'
+   curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/progress'
+   curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/progress/blocks/0'
    curl -sS 'http://127.0.0.1:8000/api/v1/runs/<RUN_ID>/audit?limit=100'
    curl -sS 'http://127.0.0.1:8000/api/v1/tasks/history?window_hours=24'
    curl -sS 'http://127.0.0.1:8000/api/v1/leaderboard?benchmark_id=<BENCHMARK_ID>&order=score_desc'
    curl -sS http://127.0.0.1:8000/api/v1/metrics/summary
    ```
 
-   预期 Responses 共 15 条，Run audit 能稳定分页看到 admission/claim/question/terminal typed event，history counters/latency 包含本次 Run；排行榜包含该 Run 且 `is_demo=true`，汇总包含 1 个已完成 Run。
+   预期 Responses 共 15 条；progress index 为 `block_size=512`、一个 block/15 responses，block payload 为 15 个 absolute-position passed cells，且两个响应均 `no-store`。Run audit 能稳定分页看到 admission/claim/question/terminal typed event，history counters/latency 包含本次 Run；排行榜包含该 Run 且 `is_demo=true`，汇总包含 1 个已完成 Run。
 
 ### 11.2 前端验收
 
 打开 `http://127.0.0.1:5173`，按顺序检查：
 
 - Dashboard 的模型、Benchmark、Run、得分/延迟/Token 汇总与最近运行来自 API，而非固定假数据。
-- Models 能新增、编辑、删除 Mock；选择 OpenAI-compatible 后出现 masked API Key 输入框，用户直接粘贴真实 Key，保存后输入框清空且卡片只显示“已安全保存”。编辑留空保留，改变 Provider origin 必须重输。
+- Models 能新增、编辑、删除 Mock，并显式选择 Chat Completions、OpenAI Responses 或 Anthropic Messages；远程类型出现 masked API Key 输入框，用户直接粘贴真实 Key，保存后输入框清空且卡片只显示“已安全保存”。编辑留空保留，改变 Provider origin 必须重输。
+- New Run 在 Responses/Messages 下禁用并清空 seed；Messages 禁用 Provider-managed 输出预算并回落到有限 Benchmark 建议值；切回 Chat 时恢复适用控件。
 - Benchmarks 能重载 Demo、显示版本/题数/Hash/许可证与醒目的 Demo 警告。
 - New Run 能选择 Model 与 Benchmark，区分 protocol-v1 API 默认和 Web 建议，允许数字预算或显式 Provider 托管，并把读取超时随创建请求提交。
-- Runs 列表能从主导航进入，按状态/20 条分页显示并链接回详情；Run Detail 轮询进度并在终态停止，配置快照和逐题证据以每页 100 条查看，不把大型 Run 截断在第一页。
+- Runs 列表能从主导航进入，按状态/20 条分页显示并链接回详情；Run Detail 独立轮询 Run、当前证据页与 progress index/变化 blocks，终态先到时追齐热力图再停止。切到证据第 2 页、切换 Run、隐藏/恢复标签页或 progress 暂时失败都不应清空当前页或混入旧 block。
+- 在运行中、completed、cancelled 和 failed 的部分证据样本核对绿/红/黑/白四态、计数与后端 live metrics；初次非空 block 未 hydrate 时显示“同步中”。hover、键盘 focus/导航与移动端 tap 显示同一 score/Token/延迟/cost/error_type，未知 usage 不显示 0。
+- 在 320/375/768/desktop 宽度、200% zoom、仅键盘、VoiceOver 或 NVDA、forced-colors 和 reduced-motion 下检查可用性；以 12,032 和 20,000 题样本核对虚拟 DOM 上限、滚动、长任务与内存，没有全量正文轮询。
 - Leaderboard 可按模型/Benchmark 筛选、按得分排序，协议、Hash、完成率和 Demo 标识可见。
 - 刷新页面、空数据库、API 关闭和常见移动宽度下都有明确可操作状态。
 
@@ -577,7 +618,7 @@ make phase2-acceptance
 6. Redis 完全 stop/start；`live`/`health` 保持可用、`ready` 降级，API 仍以 `202` 提交数据库事实，Worker 仅靠 DB reconciliation 完成；Redis 恢复后新消息正常 ACK。
 7. Worker 停止时取消 pending Run；Worker 恢复消费旧通知后终态和 0 Response 不漂移。
 8. 运行中取消并再次 XADD 同一 Run；Response 数在取消后冻结，重复投递被 ACK 且 canonical snapshot 不变。
-9. 停止 API/Worker 后从 current head `20260830_0007` 尝试 downgrade 到 `0004`：data-only `0007 -> 0006` 只按旧谓词重算 overdrawn，schema-no-op `0006 -> 0005` 后，Worker progress rows 存在时必须在 `0005 -> 0004` 第一条有损 DDL 前拒绝，13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005`，最终回到 `0007` 并 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
+9. 停止 API/Worker 后从 current head `20260830_0008` 尝试 downgrade 到 `0004`：Mock baseline 没有新协议 Model，因此 `0008 -> 0007` 恢复 `VARCHAR(17)` 列宽、旧 Provider 类型 check 与旧远程配置 check；data-only `0007 -> 0006` 只按旧谓词重算 overdrawn，schema-no-op `0006 -> 0005` 后，Worker progress rows 存在时必须在 `0005 -> 0004` 第一条有损 DDL 前拒绝，13 表计数、Run/Response core protocol hash 与可靠性字段不变；另建独立空 PostgreSQL 完成 `0005 -> 0004 -> 0005`，最终回到 `0008` 并 check，随后重启 API/Worker。历史 `0004` governance/audit guard 继续由 migration 回归覆盖；schema downgrade 不是数据平台回迁。
 
 任何一个场景失败、未运行、使用真实 Provider、最终 PEL/lag 非零或清理不完整，都不能把可靠执行基础写成通过。`--self-check-only` 只验证 Docker/Compose、隔离和清理 guard，不执行九场景，不能替代正式命令。精确 SHA `665244e…` 的最终本地运行已 9/9 通过；artifact 与 hash 见第 10.1 节。
 
